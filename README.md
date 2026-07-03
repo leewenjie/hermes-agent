@@ -183,6 +183,16 @@ All documentation lives at **[hermes-agent.nousresearch.com/docs](https://hermes
 
 ---
 
+## Hosted Oxaide deployment notes
+
+For the hosted two-repo SaaS deployment shape where `hermes-webui` is public and `hermes-agent` stays private:
+
+- [`docs/agents-runtime-production-checklist.md`](docs/agents-runtime-production-checklist.md) — private runtime production checklist
+- [`.env.production.template`](.env.production.template) — fill-in production environment template for the private runtime service
+- [`docs/hosted-saas-runtime-contract.md`](docs/hosted-saas-runtime-contract.md) — hosted runtime contract and boundary
+
+---
+
 ## Migrating from OpenClaw
 
 If you're coming from OpenClaw, Hermes can automatically import your settings, memories, skills, and API keys.
