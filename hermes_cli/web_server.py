@@ -340,6 +340,7 @@ def _has_valid_session_token(request: Request) -> bool:
 # links opened by the OS shell or a new browser tab where the session header
 # can't be set. Kept narrow — same query-token tradeoff as the /api/pty WS.
 _QUERY_TOKEN_API_PATHS: frozenset[str] = frozenset({"/api/files/download"})
+_HOSTED_RUNTIME_API_PREFIX = "/api/hosted/runtime"
 
 
 def _has_valid_query_token(request: Request, path: str) -> bool:
@@ -582,6 +583,8 @@ async def auth_middleware(request: Request, call_next):
     if getattr(request.app.state, "auth_required", False):
         return await call_next(request)
     path = request.url.path
+    if path == _HOSTED_RUNTIME_API_PREFIX or path.startswith(_HOSTED_RUNTIME_API_PREFIX + "/"):
+        return await call_next(request)
     if path.startswith("/api/") and path not in _PUBLIC_API_PATHS:
         if not _has_valid_session_token(request) and not _has_valid_query_token(request, path):
             return JSONResponse(
@@ -912,6 +915,120 @@ class ManagedDirectoryCreate(BaseModel):
 class ManagedFileDelete(BaseModel):
     path: str
     recursive: bool = False
+
+
+class HostedRuntimeBootstrapBody(BaseModel):
+    user_id: Optional[str] = None
+    org_id: Optional[str] = None
+    workspace_id: Optional[str] = None
+    workspace_slug: Optional[str] = None
+    session_id: Optional[str] = None
+    profile_id: Optional[str] = None
+    plan: Optional[str] = None
+    entitlements: Dict[str, Any] = {}
+    limits: Dict[str, Any] = {}
+    identity: Dict[str, Any] = {}
+    auth_context: Dict[str, Any] = {}
+    usage: Dict[str, Any] = {}
+    access_state: Optional[str] = None
+
+
+class HostedRuntimeUsageBody(BaseModel):
+    runtime_session_id: Optional[str] = None
+    session_id: Optional[str] = None
+    workspace_id: Optional[str] = None
+    credits: int = 0
+    source: Optional[str] = None
+
+
+class HostedRuntimeReplyBody(BaseModel):
+    runtime_session_id: Optional[str] = None
+    prompt: Optional[str] = None
+
+
+_HOSTED_RUNTIME_POLICY_VERSION = "v1"
+_hosted_runtime_sessions: Dict[str, Dict[str, Any]] = {}
+_hosted_runtime_lock = threading.Lock()
+
+
+def _hosted_runtime_shared_secret() -> str:
+    return str(os.getenv("HERMES_HOSTED_RUNTIME_SHARED_SECRET", "") or "").strip()
+
+
+def _hosted_runtime_authorized(request: Request) -> bool:
+    expected = _hosted_runtime_shared_secret()
+    presented = str(request.headers.get("X-Hermes-Hosted-Secret", "") or "").strip()
+    return bool(expected and presented and hmac.compare_digest(presented, expected))
+
+
+def _require_hosted_runtime_secret(request: Request) -> None:
+    if not _hosted_runtime_authorized(request):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _hosted_runtime_effective_toolsets(entitlements: Dict[str, Any]) -> List[str]:
+    toolsets: list[str] = ["file", "search"]
+    if bool(entitlements.get("terminal")):
+        toolsets.append("terminal")
+    if bool(entitlements.get("browser")):
+        toolsets.extend(["browser", "web"])
+    if bool(entitlements.get("delegation")):
+        toolsets.append("delegation")
+    return sorted(dict.fromkeys(toolsets))
+
+
+def _hosted_runtime_usage_snapshot(record: Dict[str, Any]) -> Dict[str, Any]:
+    usage = record.get("usage_snapshot") if isinstance(record.get("usage_snapshot"), dict) else {}
+    return {
+        "tokens_used": int(usage.get("tokens_used") or 0),
+        "tool_calls": int(usage.get("tool_calls") or 0),
+        "runtime_credits_used": int(usage.get("runtime_credits_used") or 0),
+    }
+
+
+def _hosted_runtime_build_proof_reply(record: Dict[str, Any], prompt: str) -> Dict[str, Any]:
+    workspace_slug = str(record.get("workspace_slug") or record.get("workspace_id") or "workspace").strip() or "workspace"
+    plan = str(record.get("plan") or "starter").strip() or "starter"
+    runtime_session_id = str(record.get("runtime_session_id") or "").strip()
+    safe_prompt = " ".join(str(prompt or "").strip().split())
+    message = (
+        f"Hosted runtime proof reply ready for {workspace_slug} on {plan}. "
+        f"Runtime session {runtime_session_id} is currently {record.get('status') or 'ready'}."
+    )
+    if safe_prompt:
+        message += f" Prompt received: {safe_prompt}"
+    return {
+        "runtime_session_id": runtime_session_id,
+        "message": message,
+        "status": record.get("status") or "ready",
+        "workspace_id": record.get("workspace_id"),
+        "workspace_slug": record.get("workspace_slug"),
+        "plan": plan,
+        "live_session_binding": False,
+        "scaffolded": True,
+    }
+
+
+def _hosted_runtime_session_response(record: Dict[str, Any]) -> Dict[str, Any]:
+    entitlements = record.get("entitlements") if isinstance(record.get("entitlements"), dict) else {}
+    limits = record.get("limits") if isinstance(record.get("limits"), dict) else {}
+    return {
+        "runtime_session_id": record.get("runtime_session_id"),
+        "status": record.get("status") or "unknown",
+        "workspace_id": record.get("workspace_id"),
+        "workspace_slug": record.get("workspace_slug"),
+        "session_id": record.get("session_id"),
+        "profile_id": record.get("profile_id"),
+        "plan": record.get("plan"),
+        "policy_version": _HOSTED_RUNTIME_POLICY_VERSION,
+        "policy": {
+            "effective_toolsets": _hosted_runtime_effective_toolsets(entitlements),
+            "limits": limits,
+            "entitlements": entitlements,
+        },
+        "usage_snapshot": _hosted_runtime_usage_snapshot(record),
+        "updated_at": record.get("updated_at"),
+    }
 
 
 _AUDIO_MIME_EXTENSIONS: Dict[str, str] = {
@@ -2773,6 +2890,170 @@ async def get_status(profile: Optional[str] = None):
     finally:
         if status_scope is not None:
             status_scope.__exit__(*sys.exc_info())
+
+
+@app.get("/api/hosted/runtime/health")
+async def hosted_runtime_health(request: Request):
+    _require_hosted_runtime_secret(request)
+    with _hosted_runtime_lock:
+        session_count = len(_hosted_runtime_sessions)
+    return {
+        "configured": bool(_hosted_runtime_shared_secret()),
+        "reachable": True,
+        "status": "ok",
+        "policy_version": _HOSTED_RUNTIME_POLICY_VERSION,
+        "scaffolded": True,
+        "live_session_binding": False,
+        "session_count": session_count,
+    }
+
+
+@app.post("/api/hosted/runtime/bootstrap")
+async def hosted_runtime_bootstrap(request: Request, body: HostedRuntimeBootstrapBody):
+    _require_hosted_runtime_secret(request)
+    runtime_session_id = f"rt_{secrets.token_hex(8)}"
+    now = datetime.now(timezone.utc).isoformat()
+    record = {
+        "runtime_session_id": runtime_session_id,
+        "status": "ready",
+        "user_id": body.user_id,
+        "org_id": body.org_id,
+        "workspace_id": body.workspace_id,
+        "workspace_slug": body.workspace_slug,
+        "session_id": body.session_id,
+        "profile_id": body.profile_id or "hosted-default",
+        "plan": body.plan or "starter",
+        "entitlements": dict(body.entitlements or {}),
+        "limits": dict(body.limits or {}),
+        "identity": dict(body.identity or {}),
+        "auth_context": dict(body.auth_context or {}),
+        "access_state": body.access_state or "active",
+        "usage_snapshot": {
+            "tokens_used": int((body.usage or {}).get("tokens_used") or 0),
+            "tool_calls": int((body.usage or {}).get("tool_calls") or 0),
+            "runtime_credits_used": int((body.usage or {}).get("runtime_credits_used") or 0),
+        },
+        "created_at": now,
+        "updated_at": now,
+    }
+    with _hosted_runtime_lock:
+        _hosted_runtime_sessions[runtime_session_id] = record
+    response = _hosted_runtime_session_response(record)
+    response["ok"] = True
+    response["scaffolded"] = True
+    response["live_session_binding"] = False
+    return response
+
+
+@app.get("/api/hosted/runtime/sessions/{runtime_session_id}")
+async def hosted_runtime_session_status(request: Request, runtime_session_id: str):
+    _require_hosted_runtime_secret(request)
+    with _hosted_runtime_lock:
+        record = _hosted_runtime_sessions.get(runtime_session_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Hosted runtime session not found")
+    return _hosted_runtime_session_response(record)
+
+
+def _mutate_hosted_runtime_session(runtime_session_id: str, next_status: str) -> Dict[str, Any] | None:
+    with _hosted_runtime_lock:
+        record = _hosted_runtime_sessions.get(runtime_session_id)
+        if record is None:
+            return None
+        record["status"] = next_status
+        record["updated_at"] = datetime.now(timezone.utc).isoformat()
+        return dict(record)
+
+
+@app.post("/api/hosted/runtime/sessions/{runtime_session_id}/pause")
+async def hosted_runtime_pause(request: Request, runtime_session_id: str):
+    _require_hosted_runtime_secret(request)
+    record = _mutate_hosted_runtime_session(runtime_session_id, "paused")
+    if record is None:
+        raise HTTPException(status_code=404, detail="Hosted runtime session not found")
+    return {"ok": True, **_hosted_runtime_session_response(record)}
+
+
+@app.post("/api/hosted/runtime/sessions/{runtime_session_id}/resume")
+async def hosted_runtime_resume(request: Request, runtime_session_id: str):
+    _require_hosted_runtime_secret(request)
+    record = _mutate_hosted_runtime_session(runtime_session_id, "ready")
+    if record is None:
+        raise HTTPException(status_code=404, detail="Hosted runtime session not found")
+    return {"ok": True, **_hosted_runtime_session_response(record)}
+
+
+@app.post("/api/hosted/runtime/sessions/{runtime_session_id}/kill")
+async def hosted_runtime_kill(request: Request, runtime_session_id: str):
+    _require_hosted_runtime_secret(request)
+    record = _mutate_hosted_runtime_session(runtime_session_id, "killed")
+    if record is None:
+        raise HTTPException(status_code=404, detail="Hosted runtime session not found")
+    return {"ok": True, **_hosted_runtime_session_response(record)}
+
+
+@app.get("/api/hosted/runtime/usage/session/{runtime_session_id}")
+async def hosted_runtime_usage(request: Request, runtime_session_id: str):
+    _require_hosted_runtime_secret(request)
+    with _hosted_runtime_lock:
+        record = _hosted_runtime_sessions.get(runtime_session_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Hosted runtime session not found")
+    return {
+        "ok": True,
+        "runtime_session_id": runtime_session_id,
+        "usage_snapshot": _hosted_runtime_usage_snapshot(record),
+        "updated_at": record.get("updated_at"),
+    }
+
+
+@app.post("/api/hosted/runtime/usage/report")
+async def hosted_runtime_usage_report(request: Request, body: HostedRuntimeUsageBody):
+    _require_hosted_runtime_secret(request)
+    runtime_session_id = str(body.runtime_session_id or "").strip()
+    if not runtime_session_id:
+        raise HTTPException(status_code=400, detail="runtime_session_id is required")
+    with _hosted_runtime_lock:
+        record = _hosted_runtime_sessions.get(runtime_session_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Hosted runtime session not found")
+        usage = record.get("usage_snapshot") if isinstance(record.get("usage_snapshot"), dict) else {}
+        usage["runtime_credits_used"] = int(usage.get("runtime_credits_used") or 0) + max(0, int(body.credits or 0))
+        usage["tool_calls"] = int(usage.get("tool_calls") or 0) + (1 if str(body.source or "").strip() else 0)
+        record["usage_snapshot"] = usage
+        record["updated_at"] = datetime.now(timezone.utc).isoformat()
+        updated = dict(record)
+    return {
+        "ok": True,
+        "runtime_session_id": runtime_session_id,
+        "usage_snapshot": _hosted_runtime_usage_snapshot(updated),
+        "updated_at": updated.get("updated_at"),
+    }
+
+
+@app.post("/api/hosted/runtime/sessions/{runtime_session_id}/reply")
+async def hosted_runtime_reply(request: Request, runtime_session_id: str, body: HostedRuntimeReplyBody):
+    _require_hosted_runtime_secret(request)
+    normalized_runtime_session_id = str(body.runtime_session_id or runtime_session_id or "").strip()
+    if not normalized_runtime_session_id:
+        raise HTTPException(status_code=400, detail="runtime_session_id is required")
+    with _hosted_runtime_lock:
+        record = _hosted_runtime_sessions.get(normalized_runtime_session_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Hosted runtime session not found")
+        usage = record.get("usage_snapshot") if isinstance(record.get("usage_snapshot"), dict) else {}
+        usage["tool_calls"] = int(usage.get("tool_calls") or 0) + 1
+        record["usage_snapshot"] = usage
+        record["updated_at"] = datetime.now(timezone.utc).isoformat()
+        updated = dict(record)
+    reply_payload = _hosted_runtime_build_proof_reply(updated, str(body.prompt or ""))
+    return {
+        "ok": True,
+        "runtime_session_id": normalized_runtime_session_id,
+        "reply": reply_payload,
+        "usage_snapshot": _hosted_runtime_usage_snapshot(updated),
+        "updated_at": updated.get("updated_at"),
+    }
 
 
 _WINDOWS_11_MIN_BUILD = 22000

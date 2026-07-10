@@ -15,7 +15,12 @@ The routes:
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 import logging
+import os
 import threading
 import time
 from collections import defaultdict, deque
@@ -47,10 +52,87 @@ from hermes_cli.dashboard_auth.cookies import (
     set_session_cookies,
 )
 from hermes_cli.dashboard_auth.login_page import render_login_html
+from hermes_cli.dashboard_auth.base import Session
 
 _log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _oxaide_launch_secret() -> str:
+    return str(os.environ.get("HERMES_OXAIDE_DEMO_AUTH_SECRET", "") or "").strip()
+
+
+def _decode_oxaide_launch_token(token: str) -> dict:
+    secret = _oxaide_launch_secret()
+    if not secret:
+      raise HTTPException(status_code=503, detail="Oxaide demo auth secret is not configured")
+
+    try:
+        encoded, signature = token.split('.', 1)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Malformed launch token")
+
+    expected = hmac.new(secret.encode('utf-8'), encoded.encode('utf-8'), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        raise HTTPException(status_code=401, detail="Invalid launch token signature")
+
+    try:
+        payload_raw = base64.urlsafe_b64decode(encoded + '=' * ((4 - len(encoded) % 4) % 4))
+        payload = json.loads(payload_raw.decode('utf-8'))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid launch token payload")
+
+    exp = int(payload.get('exp') or 0)
+    if exp <= int(time.time()):
+        raise HTTPException(status_code=401, detail="Launch token expired")
+
+    return payload
+
+
+@router.get('/auth/oxaide-launch', name='auth_oxaide_launch')
+async def auth_oxaide_launch(request: Request, token: str = '', next: str = ''):
+    if not token:
+        raise HTTPException(status_code=400, detail='Missing launch token')
+
+    payload = _decode_oxaide_launch_token(token)
+    expires_at = max(int(payload.get('exp') or 0), int(time.time()) + 60)
+    user_id = str(payload.get('sub') or payload.get('user_id') or '').strip() or 'oxaide-user'
+    email = str(payload.get('email') or '').strip()
+    workspace_slug = str(payload.get('workspace_slug') or payload.get('workspace_id') or '').strip()
+    display_name = str(payload.get('name') or email or user_id).strip() or user_id
+
+    session = Session(
+        user_id=user_id,
+        email=email,
+        display_name=display_name,
+        org_id=workspace_slug,
+        provider='oxaide-demo',
+        expires_at=expires_at,
+        access_token=token,
+        refresh_token=token,
+    )
+
+    audit_log(
+        AuditEvent.LOGIN_SUCCESS,
+        provider='oxaide-demo',
+        user_id=session.user_id,
+        email=session.email,
+        org_id=session.org_id,
+        ip=_client_ip(request),
+    )
+
+    landing = _validate_post_login_target(next) or '/'
+    resp = RedirectResponse(url=landing, status_code=302)
+    set_session_cookies(
+        resp,
+        access_token=session.access_token,
+        refresh_token=session.refresh_token,
+        access_token_expires_in=max(60, session.expires_at - int(time.time())),
+        use_https=detect_https(request),
+        prefix=_prefix(request),
+    )
+    return resp
 
 
 def _redirect_uri(request: Request) -> str:
