@@ -4915,14 +4915,20 @@ class APIServerAdapter(BasePlatformAdapter):
             if is_network_accessible(self._host):
                 try:
                     from hermes_cli.config import load_config as _load_cfg
+                    from hermes_cli.tools_config import _get_platform_tools
+                    _loaded_config = _load_cfg() or {}
                     _backend = (
-                        ((_load_cfg() or {}).get("terminal") or {}).get(
+                        (_loaded_config.get("terminal") or {}).get(
                             "backend", "local"
                         )
                     )
+                    _terminal_enabled = "terminal" in _get_platform_tools(
+                        _loaded_config, "api_server"
+                    )
                 except Exception:
                     _backend = "local"
-                if str(_backend).lower() == "local":
+                    _terminal_enabled = True
+                if _terminal_enabled and str(_backend).lower() == "local":
                     logger.warning(
                         "[%s] API server is network-accessible (%s) AND the "
                         "terminal backend is 'local' (unsandboxed). Agent work "

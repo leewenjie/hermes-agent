@@ -6915,7 +6915,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             os.getenv(v, "").lower() in {"true", "1", "yes"}
             for v in _builtin_allow_all_vars + _plugin_allow_all_vars
         )
-        if not _any_allowlist and not _allow_all:
+        _has_enabled_messaging = any(
+            platform_config.enabled
+            and platform not in {Platform.API_SERVER, Platform.WEBHOOK, Platform.LOCAL}
+            for platform, platform_config in self.config.platforms.items()
+        )
+        if _has_enabled_messaging and not _any_allowlist and not _allow_all:
             logger.warning(
                 "No env user allowlists configured. Messaging platforms default to "
                 "pairing/allowlist policies and will deny unknown senders unless you "

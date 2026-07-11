@@ -117,6 +117,25 @@ def test_gated_html_redirects_to_login(gated_app):
     assert r.headers["location"].startswith("/auth/login?provider=stub")
 
 
+def test_password_only_provider_root_redirects_to_login(_gated_state):
+    """A sole password provider must render the login form, not start OAuth."""
+    class PasswordOnlyProvider(StubAuthProvider):
+        name = "password-only"
+        display_name = "Password only"
+        supports_password = True
+
+        def start_login(self, *, redirect_uri: str):
+            raise NotImplementedError("password providers have no OAuth flow")
+
+    register_provider(PasswordOnlyProvider())
+    client = _gated_state()
+
+    response = client.get("/", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "/login?next=%2F"
+
+
 def test_gated_auth_providers_is_public(gated_app):
     r = gated_app.get("/api/auth/providers")
     assert r.status_code == 200
@@ -131,6 +150,36 @@ def test_gated_login_html_is_public_and_lists_providers(gated_app):
     assert r.headers["content-type"].startswith("text/html")
     assert "Stub IdP" in r.text
     assert 'href="/auth/login?provider=stub"' in r.text
+
+
+def test_login_branding_is_environment_driven(gated_app, monkeypatch):
+    monkeypatch.setenv("HERMES_DASHBOARD_PRODUCT_NAME", "Oxaide Research Desk")
+    monkeypatch.setenv("HERMES_DASHBOARD_BRAND_NAME", "OXAIDE")
+    monkeypatch.setenv(
+        "HERMES_DASHBOARD_LOGIN_SUBTITLE",
+        "Sign in to continue to your Oxaide research desk.",
+    )
+    monkeypatch.setenv("HERMES_DASHBOARD_BRAND_BACKGROUND", "#071a12")
+    monkeypatch.setenv("HERMES_DASHBOARD_BRAND_ACCENT", "#10b981")
+
+    response = gated_app.get("/login")
+
+    assert response.status_code == 200
+    assert "Sign in — Oxaide Research Desk" in response.text
+    assert '<div class="brand">OXAIDE</div>' in response.text
+    assert "Sign in to continue to your Oxaide research desk." in response.text
+    assert "--background-base: #071a12" in response.text
+    assert "--midground: #10b981" in response.text
+
+
+def test_login_response_has_browser_security_headers(gated_app):
+    response = gated_app.get("/login")
+
+    assert response.headers["strict-transport-security"].startswith("max-age=31536000")
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
 
 
 def test_gated_static_asset_path_is_public(gated_app):

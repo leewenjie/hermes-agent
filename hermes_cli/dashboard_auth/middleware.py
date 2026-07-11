@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from typing import Awaitable, Callable
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from hermes_cli.dashboard_auth import list_session_providers
@@ -43,6 +43,7 @@ _log = logging.getLogger(__name__)
 _GATE_PUBLIC_PREFIXES: tuple[str, ...] = (
     "/auth/login",
     "/auth/callback",
+    "/auth/oxaide-launch",
     "/auth/password-login",
     "/auth/logout",
     "/login",
@@ -53,6 +54,8 @@ _GATE_PUBLIC_PREFIXES: tuple[str, ...] = (
     "/fonts/",
     "/fonts-terminal/",
 )
+
+_HOSTED_RUNTIME_API_PREFIX = "/api/hosted/runtime"
 
 
 def _path_is_public(path: str) -> bool:
@@ -187,6 +190,9 @@ def _auto_sso_response(request: Request) -> Response | None:
     from hermes_cli.dashboard_auth.prefix import prefix_from_request
 
     provider = providers[0]
+    # Password providers authenticate through the form on /login and do not
+    # implement an OAuth redirect. Auto-SSO must not call their start_login()
+    # path, which would turn an unauthenticated dashboard root into HTTP 500.
     if getattr(provider, "supports_password", False):
         return None
 
@@ -272,6 +278,15 @@ async def gated_auth_middleware(
         return await call_next(request)
 
     path = request.url.path
+    # The private hosted-runtime namespace carries its own shared-secret
+    # authentication. Let requests reach that guard just as the legacy
+    # dashboard middleware does; otherwise gated public dashboards return a
+    # cookie-auth 401 before X-Hermes-Hosted-Secret can be evaluated.
+    if path == _HOSTED_RUNTIME_API_PREFIX or path.startswith(
+        _HOSTED_RUNTIME_API_PREFIX + "/"
+    ):
+        return await call_next(request)
+
     if _path_is_public(path):
         return await call_next(request)
 
@@ -305,6 +320,17 @@ async def gated_auth_middleware(
     # good refresh token — defeating the whole transparent-refresh feature.
     session = None
     if at:
+        # Oxaide's thin client mints a short-lived HMAC launch token and the
+        # public /auth/oxaide-launch route stores that token in the normal
+        # dashboard session cookie. Verify it before consulting pluggable IDPs
+        # so the subsequent SPA and WebSocket-ticket requests remain bound to
+        # the authenticated Oxaide user/workspace for the token lifetime.
+        try:
+            from hermes_cli.dashboard_auth.routes import _oxaide_session_from_token
+            session = _oxaide_session_from_token(at)
+        except HTTPException:
+            session = None
+
         # Try every registered provider's verify_session in turn. A provider
         # that doesn't recognise the token returns None and we move on; the
         # first provider that returns a Session wins.
@@ -321,7 +347,7 @@ async def gated_auth_middleware(
         # 503 — distinguishing "transient IDP outage" (don't force re-login)
         # from "token genuinely invalid" (fall through to refresh/relogin).
         unreachable_provider: str | None = None
-        for provider in list_session_providers():
+        for provider in (() if session is not None else list_session_providers()):
             try:
                 session = provider.verify_session(access_token=at)
             except ProviderError as e:
