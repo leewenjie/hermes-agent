@@ -57,6 +57,8 @@ from hermes_cli.dashboard_auth.base import Session
 _log = logging.getLogger(__name__)
 
 router = APIRouter()
+_consumed_oxaide_launch_tokens: Dict[str, int] = {}
+_consumed_oxaide_launch_tokens_lock = threading.Lock()
 
 
 def _oxaide_launch_secret() -> str:
@@ -83,11 +85,68 @@ def _decode_oxaide_launch_token(token: str) -> dict:
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid launch token payload")
 
-    exp = int(payload.get('exp') or 0)
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid launch token payload")
+    try:
+        exp = int(payload.get('exp') or 0)
+        iat = int(payload.get('iat') or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid launch token timestamps")
+    if iat <= 0 or iat > int(time.time()) + 60:
+        raise HTTPException(status_code=401, detail="Invalid launch token issue time")
     if exp <= int(time.time()):
         raise HTTPException(status_code=401, detail="Launch token expired")
 
+    expected_workspace = str(os.environ.get("HERMES_OXAIDE_WORKSPACE_ID", "") or "").strip()
+    expected_runtime_key = str(os.environ.get("HERMES_OXAIDE_RUNTIME_KEY", "") or "").strip()
+    if expected_workspace:
+        if str(payload.get("workspace_id") or "").strip() != expected_workspace:
+            raise HTTPException(status_code=401, detail="Launch token workspace mismatch")
+        if str(payload.get("aud") or "").strip() != "oxaide-hermes-runtime":
+            raise HTTPException(status_code=401, detail="Invalid launch token audience")
+    if expected_runtime_key and str(payload.get("runtime_key") or "").strip() != expected_runtime_key:
+        raise HTTPException(status_code=401, detail="Launch token runtime mismatch")
+
     return payload
+
+
+def _consume_oxaide_launch_token(token: str, expires_at: int) -> None:
+    """Reject launch-URL replay while preserving cookie-session verification."""
+    digest = hashlib.sha256(token.encode('utf-8')).hexdigest()
+    now = int(time.time())
+    with _consumed_oxaide_launch_tokens_lock:
+        expired = [key for key, expiry in _consumed_oxaide_launch_tokens.items() if expiry <= now]
+        for key in expired:
+            _consumed_oxaide_launch_tokens.pop(key, None)
+        if digest in _consumed_oxaide_launch_tokens:
+            raise HTTPException(status_code=401, detail="Launch token already used")
+        _consumed_oxaide_launch_tokens[digest] = expires_at
+
+
+def _reset_oxaide_launch_tokens_for_tests() -> None:
+    with _consumed_oxaide_launch_tokens_lock:
+        _consumed_oxaide_launch_tokens.clear()
+
+
+def _oxaide_session_from_token(token: str) -> Session:
+    """Verify an Oxaide launch token and return its dashboard session."""
+    payload = _decode_oxaide_launch_token(token)
+    expires_at = int(payload.get('exp') or 0)
+    user_id = str(payload.get('sub') or payload.get('user_id') or '').strip() or 'oxaide-user'
+    email = str(payload.get('email') or '').strip()
+    workspace_id = str(payload.get('workspace_id') or '').strip()
+    display_name = str(payload.get('name') or email or user_id).strip() or user_id
+
+    return Session(
+        user_id=user_id,
+        email=email,
+        display_name=display_name,
+        org_id=workspace_id,
+        provider='oxaide-demo',
+        expires_at=expires_at,
+        access_token=token,
+        refresh_token=token,
+    )
 
 
 @router.get('/auth/oxaide-launch', name='auth_oxaide_launch')
@@ -95,23 +154,8 @@ async def auth_oxaide_launch(request: Request, token: str = '', next: str = ''):
     if not token:
         raise HTTPException(status_code=400, detail='Missing launch token')
 
-    payload = _decode_oxaide_launch_token(token)
-    expires_at = max(int(payload.get('exp') or 0), int(time.time()) + 60)
-    user_id = str(payload.get('sub') or payload.get('user_id') or '').strip() or 'oxaide-user'
-    email = str(payload.get('email') or '').strip()
-    workspace_slug = str(payload.get('workspace_slug') or payload.get('workspace_id') or '').strip()
-    display_name = str(payload.get('name') or email or user_id).strip() or user_id
-
-    session = Session(
-        user_id=user_id,
-        email=email,
-        display_name=display_name,
-        org_id=workspace_slug,
-        provider='oxaide-demo',
-        expires_at=expires_at,
-        access_token=token,
-        refresh_token=token,
-    )
+    session = _oxaide_session_from_token(token)
+    _consume_oxaide_launch_token(token, session.expires_at)
 
     audit_log(
         AuditEvent.LOGIN_SUCCESS,

@@ -22,6 +22,8 @@ class name MUST NOT change without updating
 from __future__ import annotations
 
 import html
+import os
+import re
 
 from hermes_cli.dashboard_auth import list_session_providers
 
@@ -38,7 +40,7 @@ _LOGIN_HTML_TEMPLATE = """\
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sign in — Hermes Agent</title>
+<title>Sign in — {product_name}</title>
 <style>
   /* Brand fonts shipped by @nous-research/ui — same files the SPA loads. */
   @font-face {{
@@ -71,9 +73,9 @@ _LOGIN_HTML_TEMPLATE = """\
   }}
 
   :root {{
-    --background-base: #170d02;
-    --background: #170d02;
-    --midground: #ffac02;
+    --background-base: {background_color};
+    --background: {background_color};
+    --midground: {accent_color};
     --foreground: #ffffff;
     --hairline: color-mix(in srgb, #ffac02 18%, transparent);
     --hairline-strong: color-mix(in srgb, #ffac02 35%, transparent);
@@ -302,16 +304,16 @@ _LOGIN_HTML_TEMPLATE = """\
 </head>
 <body>
 <main>
-  <div class="brand">Nous<span class="dot"></span>Research</div>
+  <div class="brand">{brand_name}</div>
   <div class="card">
     <h1>Sign in</h1>
-    <p class="subtitle">Choose a sign-in method to continue to the Hermes Agent dashboard.</p>
+    <p class="subtitle">{subtitle}</p>
     <div class="provider-list">
 {provider_buttons}
     </div>
   </div>
   <footer>
-    <span class="sep"></span>Public bind &middot; Auth required<span class="sep"></span>
+    <span class="sep"></span>{footer_text}<span class="sep"></span>
   </footer>
 </main>
 {password_script}
@@ -492,9 +494,25 @@ def render_login_html(*, next_path: str = "") -> str:
                 f'Sign in with {html.escape(p.display_name)}</a>'
             )
     script = _PASSWORD_FORM_SCRIPT if needs_password_script else ""
+    def _color(name: str, fallback: str) -> str:
+      value = os.getenv(name, "").strip()
+      return value if re.fullmatch(r"#[0-9a-fA-F]{6}", value) else fallback
+
     return _LOGIN_HTML_TEMPLATE.format(
         provider_buttons="\n".join(buttons),
         password_script=script,
+      product_name=html.escape(os.getenv("HERMES_DASHBOARD_PRODUCT_NAME", "Hermes Agent")),
+      brand_name=html.escape(os.getenv("HERMES_DASHBOARD_BRAND_NAME", "Nous Research")),
+      subtitle=html.escape(os.getenv(
+        "HERMES_DASHBOARD_LOGIN_SUBTITLE",
+        "Choose a sign-in method to continue to the Hermes Agent dashboard.",
+      )),
+      footer_text=html.escape(os.getenv(
+        "HERMES_DASHBOARD_LOGIN_FOOTER",
+        "Public bind · Auth required",
+      )),
+      background_color=_color("HERMES_DASHBOARD_BRAND_BACKGROUND", "#170d02"),
+      accent_color=_color("HERMES_DASHBOARD_BRAND_ACCENT", "#ffac02"),
     )
 
 
