@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="560" viewBox="0 0 960 560">
+<rect width="960" height="560" fill="#ffffff" />
+<text x="82" y="38" font-size="25" font-weight="700" fill="#111827">SPY daily adjusted-return distribution</text>
+<text x="82" y="66" font-size="14" fill="#4b5563">2016-07-11 to 2026-07-10</text>
+<line x1="82" y1="472" x2="930" y2="472" stroke="#9ca3af" />
+<rect x="83.00" y="471.53" width="19.20" height="0.47" fill="#10b981" opacity="0.82" />
+<rect x="104.20" y="472.00" width="19.20" height="0.00" fill="#10b981" opacity="0.82" />
+<rect x="125.40" y="471.53" width="19.20" height="0.47" fill="#10b981" opacity="0.82" />
+<rect x="146.60" y="472.00" width="19.20" height="0.00" fill="#10b981" opacity="0.82" />
+<rect x="167.80" y="472.00" width="19.20" height="0.00" fill="#10b981" opacity="0.82" />
+<rect x="189.00" y="471.53" width="19.20" height="0.47" fill="#10b981" opacity="0.82" />
+<rect x="210.20" y="472.00" width="19.20" height="0.00" fill="#10b981" opacity="0.82" />
+<rect x="231.40" y="472.00" width="19.20" height="0.00" fill="#10b981" opacity="0.82" />
+<rect x="252.60" y="472.00" width="19.20" height="0.00" fill="#10b981" opacity="0.82" />
+<rect x="273.80" y="471.06" width="19.20" height="0.94" fill="#10b981" opacity="0.82" />
+<rect x="295.00" y="471.53" width="19.20" height="0.47" fill="#10b981" opacity="0.82" />
+<rect x="316.20" y="471.06" width="19.20" height="0.94" fill="#10b981" opacity="0.82" />
+<rect x="337.40" y="468.71" width="19.20" height="3.29" fill="#10b981" opacity="0.82" />
+<rect x="358.60" y="469.65" width="19.20" height="2.35" fill="#10b981" opacity="0.82" />
+<rect x="379.80" y="464.00" width="19.20" height="8.00" fill="#10b981" opacity="0.82" />
+<rect x="401.00" y="460.24" width="19.20" height="11.76" fill="#10b981" opacity="0.82" />
+<rect x="422.20" y="453.18" width="19.20" height="18.82" fill="#10b981" opacity="0.82" />
+<rect x="443.40" y="427.31" width="19.20" height="44.69" fill="#10b981" opacity="0.82" />
+<rect x="464.60" y="394.38" width="19.20" height="77.62" fill="#10b981" opacity="0.82" />
+<rect x="485.80" y="273.47" width="19.20" height="198.53" fill="#10b981" opacity="0.82" />
+<rect x="507.00" y="90.00" width="19.20" height="382.00" fill="#10b981" opacity="0.82" />
+<rect x="528.20" y="238.66" width="19.20" height="233.34" fill="#10b981" opacity="0.82" />
+<rect x="549.40" y="358.15" width="19.20" height="113.85" fill="#10b981" opacity="0.82" />
+<rect x="570.60" y="421.66" width="19.20" height="50.34" fill="#10b981" opacity="0.82" />
+<rect x="591.80" y="456.00" width="19.20" height="16.00" fill="#10b981" opacity="0.82" />
+<rect x="613.00" y="463.53" width="19.20" height="8.47" fill="#10b981" opacity="0.82" />
+<rect x="634.20" y="467.77" width="19.20" height="4.23" fill="#10b981" opacity="0.82" />
+<rect x="655.40" y="472.00" width="19.20" height="0.00" fill="#10b981" opacity="0.82" />
+<rect x="676.60" y="471.06" width="19.20" height="0.94" fill="#10b981" opacity="0.82" />
+<rect x="697.80" y="471.53" width="19.20" height="0.47" fill="#10b981" opacity="0.82" />
+<rect x="719.00" y="470.59" width="19.20" height="1.41" fill="#10b981" opacity="0.82" />
+<rect x="740.20" y="471.53" width="19.20" height="0.47" fill="#10b981" opacity="0.82" />
+<rect x="761.40" y="471.53" width="19.20" height="0.47" fill="#10b981" opacity="0.82" />
+<rect x="782.60" y="472.00" width="19.20" height="0.00" fill="#10b981" opacity="0.82" />
+<rect x="803.80" y="472.00" width="19.20" height="0.00" fill="#10b981" opacity="0.82" />
+<rect x="825.00" y="472.00" width="19.20" height="0.00" fill="#10b981" opacity="0.82" />
+<rect x="846.20" y="471.53" width="19.20" height="0.47" fill="#10b981" opacity="0.82" />
+<rect x="867.40" y="471.53" width="19.20" height="0.47" fill="#10b981" opacity="0.82" />
+<rect x="888.60" y="472.00" width="19.20" height="0.00" fill="#10b981" opacity="0.82" />
+<rect x="909.80" y="471.53" width="19.20" height="0.47" fill="#10b981" opacity="0.82" />
+<line x1="514.71" y1="90" x2="514.71" y2="472" stroke="#111827" stroke-width="1.5" />
+<text x="82.00" y="508" text-anchor="middle" font-size="13" fill="#374151">-10.9%</text>
+<text x="251.60" y="508" text-anchor="middle" font-size="13" fill="#374151">-6.7%</text>
+<text x="421.20" y="508" text-anchor="middle" font-size="13" fill="#374151">-2.4%</text>
+<text x="590.80" y="508" text-anchor="middle" font-size="13" fill="#374151">1.9%</text>
+<text x="760.40" y="508" text-anchor="middle" font-size="13" fill="#374151">6.2%</text>
+<text x="930.00" y="508" text-anchor="middle" font-size="13" fill="#374151">10.5%</text>
+<text x="82" y="542" font-size="14" fill="#111827">n=2,513  mean=0.06%  vol=1.13%  p05=-1.67%  max drawdown=-33.72%</text>
+</svg>

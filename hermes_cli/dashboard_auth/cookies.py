@@ -194,13 +194,14 @@ def clear_session_cookies(response: Response, *, prefix: str = "") -> None:
     """
     path = _cookie_path(prefix)
     for variant in _NAME_VARIANTS:
+        secure = variant in {"__Host-", "__Secure-"}
         response.set_cookie(
             f"{variant}{SESSION_AT_COOKIE}", "", max_age=0,
-            path=path, httponly=True, samesite="lax",
+            path=path, httponly=True, samesite="lax", secure=secure,
         )
         response.set_cookie(
             f"{variant}{SESSION_RT_COOKIE}", "", max_age=0,
-            path=path, httponly=True, samesite="lax",
+            path=path, httponly=True, samesite="lax", secure=secure,
         )
 
 
@@ -218,9 +219,10 @@ def set_pkce_cookie(
 def clear_pkce_cookie(response: Response, *, prefix: str = "") -> None:
     path = _cookie_path(prefix)
     for variant in _NAME_VARIANTS:
+        secure = variant in {"__Host-", "__Secure-"}
         response.set_cookie(
             f"{variant}{PKCE_COOKIE}", "", max_age=0,
-            path=path, httponly=True, samesite="lax",
+            path=path, httponly=True, samesite="lax", secure=secure,
         )
 
 
@@ -283,9 +285,10 @@ def clear_sso_attempt_cookie(response: Response, *, prefix: str = "") -> None:
     """
     path = _cookie_path(prefix)
     for variant in _NAME_VARIANTS:
+        secure = variant in {"__Host-", "__Secure-"}
         response.set_cookie(
             f"{variant}{SSO_ATTEMPT_COOKIE}", "", max_age=0,
-            path=path, httponly=True, samesite="lax",
+            path=path, httponly=True, samesite="lax", secure=secure,
         )
 
 

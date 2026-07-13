@@ -1,0 +1,48 @@
+# Production template for ONE Oxaide workspace trust domain.
+# Use a distinct Compose project name, runtime port, and persistent volume for
+# every workspace. Never add multiple customer workspaces to this service via
+# Hermes profiles; profiles are not a hostile-tenant security boundary.
+services:
+  runtime:
+    build: .
+    image: ${HERMES_OXAIDE_IMAGE:-hermes-agent:oxaide}
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:${OXAIDE_RUNTIME_PORT:-9119}:9119"
+    volumes:
+      - workspace-data:/opt/data
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+      - /run:size=64m,mode=755
+    environment:
+      HERMES_HOME: /opt/data
+      HERMES_DASHBOARD_FILES_ROOT: /opt/data/workspace
+      HERMES_UID: ${HERMES_UID:-10000}
+      HERMES_GID: ${HERMES_GID:-10000}
+      HERMES_OXAIDE_WORKSPACE_ID: ${HERMES_OXAIDE_WORKSPACE_ID:?workspace pin required}
+      HERMES_OXAIDE_RUNTIME_KEY: ${HERMES_OXAIDE_RUNTIME_KEY:?runtime pin required}
+      HERMES_OXAIDE_DEMO_AUTH_SECRET: ${HERMES_OXAIDE_DEMO_AUTH_SECRET:?launch signing secret required}
+      HERMES_OXAIDE_USAGE_SIGNING_SECRET: ${HERMES_OXAIDE_USAGE_SIGNING_SECRET:?usage signing secret required}
+      HERMES_HOSTED_RUNTIME_SHARED_SECRET: ${HERMES_HOSTED_RUNTIME_SHARED_SECRET:?control-plane secret required}
+      OXAIDE_TURN_ENDPOINT: ${OXAIDE_TURN_ENDPOINT:-https://oxaide.com/api/agents/billing/usage/record}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+    command: ["dashboard", "--host", "0.0.0.0", "--port", "9119", "--no-open"]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 512
+    mem_limit: ${OXAIDE_RUNTIME_MEMORY:-4g}
+    cpus: ${OXAIDE_RUNTIME_CPUS:-2.0}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9119/api/status', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+
+volumes:
+  workspace-data:

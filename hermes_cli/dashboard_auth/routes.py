@@ -21,10 +21,13 @@ import hmac
 import json
 import logging
 import os
+import sqlite3
 import threading
 import time
+import uuid
 from collections import defaultdict, deque
 from typing import Any, Deque, Dict, Tuple
+from urllib.parse import urlencode, urlsplit
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -53,22 +56,44 @@ from hermes_cli.dashboard_auth.cookies import (
 )
 from hermes_cli.dashboard_auth.login_page import render_login_html
 from hermes_cli.dashboard_auth.base import Session
+from hermes_constants import get_hermes_home
 
 _log = logging.getLogger(__name__)
 
 router = APIRouter()
-_consumed_oxaide_launch_tokens: Dict[str, int] = {}
 _consumed_oxaide_launch_tokens_lock = threading.Lock()
+_OXAIDE_LAUNCH_AUDIENCE = "oxaide-hermes-runtime"
+_OXAIDE_LAUNCH_MAX_TTL_SECONDS = 15 * 60
+_OXAIDE_LOGOUT_AUDIENCE = "oxaide-runtime-logout"
+_OXAIDE_LOGOUT_TTL_SECONDS = 2 * 60
 
 
 def _oxaide_launch_secret() -> str:
     return str(os.environ.get("HERMES_OXAIDE_DEMO_AUTH_SECRET", "") or "").strip()
 
 
+def _required_oxaide_runtime_identity() -> tuple[str, str]:
+    workspace_id = str(
+        os.environ.get("HERMES_OXAIDE_WORKSPACE_ID", "") or ""
+    ).strip()
+    runtime_key = str(
+        os.environ.get("HERMES_OXAIDE_RUNTIME_KEY", "") or ""
+    ).strip()
+    if not workspace_id or not runtime_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Oxaide workspace runtime identity is not configured",
+        )
+    return workspace_id, runtime_key
+
+
 def _decode_oxaide_launch_token(token: str) -> dict:
     secret = _oxaide_launch_secret()
     if not secret:
-      raise HTTPException(status_code=503, detail="Oxaide demo auth secret is not configured")
+        raise HTTPException(
+            status_code=503,
+            detail="Oxaide demo auth secret is not configured",
+        )
 
     try:
         encoded, signature = token.split('.', 1)
@@ -96,15 +121,15 @@ def _decode_oxaide_launch_token(token: str) -> dict:
         raise HTTPException(status_code=401, detail="Invalid launch token issue time")
     if exp <= int(time.time()):
         raise HTTPException(status_code=401, detail="Launch token expired")
+    if exp - iat > _OXAIDE_LAUNCH_MAX_TTL_SECONDS:
+        raise HTTPException(status_code=401, detail="Launch token lifetime is too long")
+    if str(payload.get("aud") or "").strip() != _OXAIDE_LAUNCH_AUDIENCE:
+        raise HTTPException(status_code=401, detail="Invalid launch token audience")
 
-    expected_workspace = str(os.environ.get("HERMES_OXAIDE_WORKSPACE_ID", "") or "").strip()
-    expected_runtime_key = str(os.environ.get("HERMES_OXAIDE_RUNTIME_KEY", "") or "").strip()
-    if expected_workspace:
-        if str(payload.get("workspace_id") or "").strip() != expected_workspace:
-            raise HTTPException(status_code=401, detail="Launch token workspace mismatch")
-        if str(payload.get("aud") or "").strip() != "oxaide-hermes-runtime":
-            raise HTTPException(status_code=401, detail="Invalid launch token audience")
-    if expected_runtime_key and str(payload.get("runtime_key") or "").strip() != expected_runtime_key:
+    expected_workspace, expected_runtime_key = _required_oxaide_runtime_identity()
+    if str(payload.get("workspace_id") or "").strip() != expected_workspace:
+        raise HTTPException(status_code=401, detail="Launch token workspace mismatch")
+    if str(payload.get("runtime_key") or "").strip() != expected_runtime_key:
         raise HTTPException(status_code=401, detail="Launch token runtime mismatch")
 
     return payload
@@ -115,17 +140,28 @@ def _consume_oxaide_launch_token(token: str, expires_at: int) -> None:
     digest = hashlib.sha256(token.encode('utf-8')).hexdigest()
     now = int(time.time())
     with _consumed_oxaide_launch_tokens_lock:
-        expired = [key for key, expiry in _consumed_oxaide_launch_tokens.items() if expiry <= now]
-        for key in expired:
-            _consumed_oxaide_launch_tokens.pop(key, None)
-        if digest in _consumed_oxaide_launch_tokens:
-            raise HTTPException(status_code=401, detail="Launch token already used")
-        _consumed_oxaide_launch_tokens[digest] = expires_at
+        db_path = get_hermes_home() / "oxaide-launch-tokens.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(db_path, timeout=5.0) as connection:
+            connection.execute(
+                "create table if not exists consumed_tokens (digest text primary key, expires_at integer not null)"
+            )
+            connection.execute("delete from consumed_tokens where expires_at <= ?", (now,))
+            try:
+                connection.execute(
+                    "insert into consumed_tokens(digest, expires_at) values (?, ?)",
+                    (digest, expires_at),
+                )
+                connection.commit()
+            except sqlite3.IntegrityError:
+                raise HTTPException(status_code=401, detail="Launch token already used")
 
 
 def _reset_oxaide_launch_tokens_for_tests() -> None:
     with _consumed_oxaide_launch_tokens_lock:
-        _consumed_oxaide_launch_tokens.clear()
+        db_path = get_hermes_home() / "oxaide-launch-tokens.db"
+        if db_path.exists():
+            db_path.unlink()
 
 
 def _oxaide_session_from_token(token: str) -> Session:
@@ -147,6 +183,136 @@ def _oxaide_session_from_token(token: str) -> Session:
         access_token=token,
         refresh_token=token,
     )
+
+
+def _trusted_oxaide_context(payload: dict) -> dict:
+    """Return the minimal server-trusted identity needed by the live runtime."""
+    def bounded(name: str, value: object, maximum: int) -> str:
+        text = str(value or "").strip()
+        if not text or len(text) > maximum or "\x00" in text:
+            raise HTTPException(
+                status_code=401, detail=f"Launch token {name} is invalid"
+            )
+        return text
+
+    context = {
+        "workspace_id": bounded("workspace", payload.get("workspace_id"), 128),
+        "runtime_session_id": bounded(
+            "runtime session", payload.get("runtime_session_id"), 200
+        ),
+        "runtime_key": bounded("runtime key", payload.get("runtime_key"), 200),
+        "user_id": bounded(
+            "user", payload.get("sub") or payload.get("user_id"), 200
+        ),
+        "jti": bounded("jti", payload.get("jti"), 200),
+        "expires_at": int(payload.get("exp") or 0),
+    }
+    if not all(context.values()):
+        raise HTTPException(status_code=401, detail="Launch token context is incomplete")
+    return context
+
+
+def _oxaide_logout_url(payload: dict) -> str:
+    raw = str(payload.get("logout_url") or "").strip()
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        parsed = None
+    if (
+        parsed is None
+        or parsed.scheme != "https"
+        or parsed.hostname not in {"oxaide.com", "www.oxaide.com"}
+        or parsed.path != "/auth/runtime-logout"
+        or parsed.query
+        or parsed.fragment
+        or parsed.username
+        or parsed.password
+    ):
+        raise HTTPException(status_code=401, detail="Invalid Oxaide logout URL")
+    return raw
+
+
+def _oxaide_logout_continuation(launch_token: str) -> tuple[str, str]:
+    launch = _decode_oxaide_launch_token(launch_token)
+    logout_url = _oxaide_logout_url(launch)
+    now = int(time.time())
+    payload = {
+        "sub": str(launch.get("sub") or launch.get("user_id") or "").strip(),
+        "workspace_id": str(launch.get("workspace_id") or "").strip(),
+        "runtime_key": str(launch.get("runtime_key") or "").strip(),
+        "aud": _OXAIDE_LOGOUT_AUDIENCE,
+        "jti": uuid.uuid4().hex,
+        "iat": now,
+        "exp": now + _OXAIDE_LOGOUT_TTL_SECONDS,
+    }
+    if not payload["sub"] or not payload["workspace_id"] or not payload["runtime_key"]:
+        raise HTTPException(status_code=401, detail="Incomplete Oxaide logout identity")
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    signature = hmac.new(
+        _oxaide_launch_secret().encode("utf-8"),
+        encoded.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    return logout_url, f"{encoded}.{signature}"
+
+
+def _decode_oxaide_logout_token(token: str) -> dict:
+    secret = _oxaide_launch_secret()
+    if not secret:
+        raise HTTPException(status_code=503, detail="Oxaide auth secret is not configured")
+    try:
+        encoded, signature = token.split(".", 1)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Malformed logout token")
+    expected = hmac.new(
+        secret.encode("utf-8"), encoded.encode("ascii"), hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        raise HTTPException(status_code=401, detail="Invalid logout token signature")
+    try:
+        raw = base64.urlsafe_b64decode(encoded + "=" * ((4 - len(encoded) % 4) % 4))
+        payload = json.loads(raw.decode("utf-8"))
+        iat = int(payload.get("iat") or 0)
+        exp = int(payload.get("exp") or 0)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid logout token payload")
+    now = int(time.time())
+    if not isinstance(payload, dict) or iat <= 0 or iat > now + 60:
+        raise HTTPException(status_code=401, detail="Invalid logout token timestamps")
+    if exp <= now or exp - iat > 180:
+        raise HTTPException(status_code=401, detail="Logout token expired")
+    if str(payload.get("aud") or "") != _OXAIDE_LOGOUT_AUDIENCE:
+        raise HTTPException(status_code=401, detail="Invalid logout token audience")
+    expected_workspace, expected_runtime = _required_oxaide_runtime_identity()
+    if str(payload.get("workspace_id") or "").strip() != expected_workspace:
+        raise HTTPException(status_code=401, detail="Logout token workspace mismatch")
+    if str(payload.get("runtime_key") or "").strip() != expected_runtime:
+        raise HTTPException(status_code=401, detail="Logout token runtime mismatch")
+    if not str(payload.get("sub") or "").strip() or not str(payload.get("jti") or "").strip():
+        raise HTTPException(status_code=401, detail="Logout token identity is incomplete")
+    return payload
+
+
+def _oxaide_logout_return_url(payload: dict) -> str:
+    raw = str(payload.get("return_url") or "").strip()
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        parsed = None
+    if (
+        parsed is None
+        or parsed.scheme != "https"
+        or parsed.hostname not in {"oxaide.com", "www.oxaide.com"}
+        or parsed.path != "/auth/signin"
+        or parsed.query != "logout=true"
+        or parsed.fragment
+        or parsed.username
+        or parsed.password
+    ):
+        raise HTTPException(status_code=401, detail="Invalid logout return URL")
+    return raw
 
 
 @router.get('/auth/oxaide-launch', name='auth_oxaide_launch')
@@ -177,6 +343,28 @@ async def auth_oxaide_launch(request: Request, token: str = '', next: str = ''):
         prefix=_prefix(request),
     )
     return resp
+
+
+@router.get('/auth/oxaide-logout', name='auth_oxaide_logout')
+async def auth_oxaide_logout(request: Request, token: str = ''):
+    if not token:
+        raise HTTPException(status_code=400, detail='Missing logout token')
+    payload = _decode_oxaide_logout_token(token)
+    destination = _oxaide_logout_return_url(payload)
+    audit_log(
+        AuditEvent.LOGOUT,
+        provider='oxaide-demo',
+        user_id=str(payload.get('sub') or ''),
+        reason='oxaide_logout_command',
+        ip=_client_ip(request),
+    )
+    prefix = _prefix(request)
+    response = RedirectResponse(url=destination, status_code=302)
+    clear_session_cookies(response, prefix=prefix)
+    clear_pkce_cookie(response, prefix=prefix)
+    clear_sso_attempt_cookie(response, prefix=prefix)
+    response.headers['Cache-Control'] = 'no-store'
+    return response
 
 
 def _redirect_uri(request: Request) -> str:
@@ -512,7 +700,11 @@ def _validate_post_login_target(raw: str) -> str:
     if not raw:
         return ""
     from urllib.parse import unquote
+    if "\\" in raw or any(ord(char) < 32 or ord(char) == 127 for char in raw):
+        return ""
     decoded = unquote(raw)
+    if "\\" in decoded or any(ord(char) < 32 or ord(char) == 127 for char in decoded):
+        return ""
     if not decoded.startswith("/") or decoded.startswith("//"):
         return ""
     # Don't loop back to login pages or auth flow.
@@ -681,7 +873,13 @@ async def auth_password_login(request: Request, body: _PasswordLoginBody):
 
 @router.post("/auth/logout", name="auth_logout")
 async def auth_logout(request: Request):
-    _at, rt = read_session_cookies(request)
+    at, rt = read_session_cookies(request)
+    sess = getattr(request.state, "session", None)
+    if sess is None and at:
+        try:
+            sess = _oxaide_session_from_token(at)
+        except HTTPException:
+            sess = None
     if rt:
         # Best-effort revoke. Try every provider so a session minted by
         # any registered provider is revoked correctly. Failures are
@@ -695,7 +893,6 @@ async def auth_logout(request: Request):
                     provider.name, e,
                 )
 
-    sess = getattr(request.state, "session", None)
     audit_log(
         AuditEvent.LOGOUT,
         provider=(sess.provider if sess else "unknown"),
@@ -704,9 +901,28 @@ async def auth_logout(request: Request):
     )
 
     prefix = _prefix(request)
-    resp = RedirectResponse(url=f"{prefix}/login", status_code=302)
+    redirect_to = f"{prefix}/login"
+    logout_token = None
+    if sess is not None and sess.provider == "oxaide-demo" and at:
+        try:
+            redirect_to, logout_token = _oxaide_logout_continuation(at)
+        except HTTPException:
+            _log.warning("dashboard-auth: could not create Oxaide logout continuation")
+
+    wants_json = "application/json" in request.headers.get("accept", "").lower()
+    if wants_json:
+        payload: dict[str, Any] = {"ok": True, "redirect_to": redirect_to}
+        if logout_token:
+            payload["logout_token"] = logout_token
+        resp = JSONResponse(payload)
+    else:
+        location = redirect_to
+        if logout_token:
+            location = f"{redirect_to}?{urlencode({'token': logout_token})}"
+        resp = RedirectResponse(url=location, status_code=302)
     clear_session_cookies(resp, prefix=prefix)
     clear_pkce_cookie(resp, prefix=prefix)
+    clear_sso_attempt_cookie(resp, prefix=prefix)
     return resp
 
 
@@ -758,7 +974,16 @@ async def api_auth_ws_ticket(request: Request):
     # don't load the ticket store.
     from hermes_cli.dashboard_auth.ws_tickets import TTL_SECONDS, mint_ticket
 
-    ticket = mint_ticket(user_id=sess.user_id, provider=sess.provider)
+    trusted_context = None
+    if sess.provider == "oxaide-demo":
+        trusted_context = _trusted_oxaide_context(
+            _decode_oxaide_launch_token(sess.access_token)
+        )
+    ticket = mint_ticket(
+        user_id=sess.user_id,
+        provider=sess.provider,
+        trusted_context=trusted_context,
+    )
     audit_log(
         AuditEvent.WS_TICKET_MINTED,
         provider=sess.provider,

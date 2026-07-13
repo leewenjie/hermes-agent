@@ -332,11 +332,27 @@ export const api = {
     fetch(`${BASE}/auth/logout`, {
       method: "POST",
       credentials: "include",
-    }).then((r) => {
-      // /auth/logout returns 302 → /login. Follow that with a full-page
-      // navigation rather than letting fetch() opaquely consume the
-      // redirect — the SPA needs to leave the protected area.
-      window.location.assign("/login");
+      headers: { Accept: "application/json" },
+    }).then(async (r) => {
+      if (!r.ok) throw new Error(`/auth/logout: HTTP ${r.status}`);
+      const body = await r.json() as {
+        redirect_to?: string;
+        logout_token?: string;
+      };
+      if (body.logout_token && body.redirect_to) {
+        const form = document.createElement("form");
+        form.method = "POST";
+        form.action = body.redirect_to;
+        const token = document.createElement("input");
+        token.type = "hidden";
+        token.name = "token";
+        token.value = body.logout_token;
+        form.appendChild(token);
+        document.body.appendChild(form);
+        form.submit();
+        return r;
+      }
+      window.location.assign(body.redirect_to || `${BASE}/login`);
       return r;
     }),
   getSessions: (

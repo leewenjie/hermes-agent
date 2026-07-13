@@ -1,8 +1,19 @@
 import { mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { Readable } from 'node:stream'
+import type * as NodeV8 from 'node:v8'
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+vi.mock('node:v8', async importOriginal => {
+  const actual = await importOriginal<typeof NodeV8>()
+
+  return {
+    ...actual,
+    getHeapSnapshot: () => Readable.from(['{"snapshot":"test"}'])
+  }
+})
 
 import { performHeapDump } from './memory.js'
 

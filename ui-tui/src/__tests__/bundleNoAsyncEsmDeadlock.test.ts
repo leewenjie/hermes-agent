@@ -39,7 +39,9 @@ const uiTuiRoot = resolve(here, '..', '..')
 const bundlePath = resolve(uiTuiRoot, 'dist', 'entry.js')
 
 function bundleIsFresh(): boolean {
-  if (!existsSync(bundlePath)) return false
+  if (!existsSync(bundlePath)) {
+    return false
+  }
   try {
     const bundleMtime = statSync(bundlePath).mtimeMs
     const sourceMtime = statSync(

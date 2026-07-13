@@ -14804,7 +14804,9 @@ def _ws_auth_mode() -> str:
     return "loopback"
 
 
-def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
+def _ws_auth_context(
+    ws: "WebSocket",
+) -> tuple[Optional[str], str, Optional[dict[str, Any]]]:
     """Validate WS-upgrade auth; return ``(reason, credential)``.
 
     ``reason`` is None when the credential is accepted, else a short
@@ -14853,8 +14855,8 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
         internal = ws.query_params.get("internal", "")
         if internal:
             try:
-                consume_internal_credential(internal)
-                return None, "internal"
+                info = consume_internal_credential(internal)
+                return None, "internal", info.get("trusted_context")
             except TicketInvalid as exc:
                 audit_log(
                     AuditEvent.WS_TICKET_REJECTED,
@@ -14862,15 +14864,15 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
                     ip=(ws.client.host if ws.client else ""),
                     path=ws.url.path,
                 )
-                return "internal_invalid", "internal"
+                return "internal_invalid", "internal", None
 
         ticket = ws.query_params.get("ticket", "")
         if not ticket:
-            return "no_credential", "none"
+            return "no_credential", "none", None
 
         try:
-            consume_ticket(ticket)
-            return None, "ticket"
+            info = consume_ticket(ticket)
+            return None, "ticket", info.get("trusted_context")
         except TicketInvalid as exc:
             audit_log(
                 AuditEvent.WS_TICKET_REJECTED,
@@ -14878,14 +14880,19 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
                 ip=(ws.client.host if ws.client else ""),
                 path=ws.url.path,
             )
-            return "ticket_invalid", "ticket"
+            return "ticket_invalid", "ticket", None
 
     token = ws.query_params.get("token", "")
     if not token:
-        return "no_credential", "none"
+        return "no_credential", "none", None
     if hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
-        return None, "token"
-    return "token_mismatch", "token"
+        return None, "token", None
+    return "token_mismatch", "token", None
+
+
+def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
+    reason, credential, _context = _ws_auth_context(ws)
+    return reason, credential
 
 
 def _ws_auth_ok(ws: "WebSocket") -> bool:
@@ -14905,6 +14912,7 @@ def _resolve_chat_argv(
     sidecar_url: Optional[str] = None,
     profile: Optional[str] = None,
     active_session_file: Optional[str] = None,
+    trusted_context: Optional[dict[str, Any]] = None,
 ) -> tuple[list[str], Optional[str], Optional[dict]]:
     """Resolve the argv + cwd + env for the chat PTY.
 
@@ -15003,7 +15011,7 @@ def _resolve_chat_argv(
     # attach URL, gatewayClient spawns its own `tui_gateway.entry`, which
     # inherits the profile HERMES_HOME set above.
     if profile_dir is None:
-        if gateway_ws_url := _build_gateway_ws_url():
+        if gateway_ws_url := _build_gateway_ws_url(trusted_context=trusted_context):
             env["HERMES_TUI_GATEWAY_URL"] = gateway_ws_url
 
     return list(argv), str(cwd) if cwd else None, env
@@ -15047,7 +15055,9 @@ def _resolve_client_ws_host() -> Optional[str]:
     return host
 
 
-def _build_gateway_ws_url() -> Optional[str]:
+def _build_gateway_ws_url(
+    *, trusted_context: Optional[dict[str, Any]] = None,
+) -> Optional[str]:
     """ws:// URL the PTY child should attach to for JSON-RPC gateway traffic.
 
     Loopback / ``--insecure``: ``?token=<_SESSION_TOKEN>``.
@@ -15071,9 +15081,17 @@ def _build_gateway_ws_url() -> Optional[str]:
     )
 
     if getattr(app.state, "auth_required", False):
-        from hermes_cli.dashboard_auth.ws_tickets import internal_ws_credential
+        from hermes_cli.dashboard_auth.ws_tickets import (
+            internal_ws_credential,
+            scoped_internal_ws_credential,
+        )
 
-        qs = urllib.parse.urlencode({"internal": internal_ws_credential()})
+        credential = (
+            scoped_internal_ws_credential(trusted_context)
+            if trusted_context
+            else internal_ws_credential()
+        )
+        qs = urllib.parse.urlencode({"internal": credential})
     else:
         qs = urllib.parse.urlencode({"token": _SESSION_TOKEN})
 
@@ -15085,6 +15103,7 @@ async def _resolve_chat_argv_async(
     sidecar_url: Optional[str] = None,
     profile: Optional[str] = None,
     active_session_file: Optional[str] = None,
+    trusted_context: Optional[dict[str, Any]] = None,
 ) -> tuple[list[str], Optional[str], Optional[dict]]:
     """Resolve chat argv without blocking the dashboard event loop.
 
@@ -15101,6 +15120,8 @@ async def _resolve_chat_argv_async(
         "sidecar_url": sidecar_url,
         "profile": profile,
     }
+    if trusted_context is not None:
+        kwargs["trusted_context"] = trusted_context
     if active_session_file is not None:
         kwargs["active_session_file"] = active_session_file
 
@@ -15442,7 +15463,7 @@ async def console_ws(ws: WebSocket) -> None:
         await ws.close(code=4404, reason="embedded chat disabled")
         return
 
-    auth_reason, cred = _ws_auth_reason(ws)
+    auth_reason, cred, trusted_context = _ws_auth_context(ws)
     mode = _ws_auth_mode()
     if auth_reason is not None:
         _log.warning(
@@ -15466,7 +15487,10 @@ async def console_ws(ws: WebSocket) -> None:
 
     await ws.accept()
 
-    profile = _console_profile_from_ws(ws)
+    # A trusted Oxaide launch is already routed to a workspace-pinned
+    # container. Profiles are an operator convenience, not a hostile-tenant
+    # boundary, so never honor a browser-selected sibling profile here.
+    profile = None if trusted_context is not None else _console_profile_from_ws(ws)
     context = _dashboard_console_context()
     send_lock = asyncio.Lock()
 
@@ -15804,7 +15828,7 @@ async def pty_ws(ws: WebSocket) -> None:
     #     browser banner agree on the cause:
     #       4401 bad credential   4403 host/origin mismatch
     #       4408 peer not allowed  4404 chat disabled
-    auth_reason, cred = _ws_auth_reason(ws)
+    auth_reason, cred, trusted_context = _ws_auth_context(ws)
     mode = _ws_auth_mode()
     if auth_reason is not None:
         _log.warning(
@@ -15843,7 +15867,10 @@ async def pty_ws(ws: WebSocket) -> None:
 
     # --- spawn PTY ------------------------------------------------------
     resume = ws.query_params.get("resume") or None
-    profile = ws.query_params.get("profile") or None
+    # Oxaide uses one container + volume per workspace trust domain. A trusted
+    # launch must stay in that container's root profile; allowing a query-string
+    # profile would expose sibling profile state under the same Unix user.
+    profile = None if trusted_context is not None else ws.query_params.get("profile") or None
     channel = _channel_or_close_code(ws)
     sidecar_url = _build_sidecar_url(channel) if channel else None
     force_fresh = (ws.query_params.get("fresh") or "").strip().lower() in {
@@ -15867,6 +15894,8 @@ async def pty_ws(ws: WebSocket) -> None:
         "sidecar_url": sidecar_url,
         "profile": profile,
     }
+    if trusted_context is not None:
+        resolve_kwargs["trusted_context"] = trusted_context
     if active_session_file is not None:
         resolve_kwargs["active_session_file"] = str(active_session_file)
 
@@ -15975,7 +16004,8 @@ async def gateway_ws(ws: WebSocket) -> None:
         await ws.close(code=4403)
         return
 
-    if not _ws_auth_ok(ws):
+    auth_reason, _credential, trusted_context = _ws_auth_context(ws)
+    if auth_reason is not None:
         await ws.close(code=4401)
         return
 
@@ -15985,7 +16015,7 @@ async def gateway_ws(ws: WebSocket) -> None:
 
     from tui_gateway.ws import handle_ws
 
-    await handle_ws(ws)
+    await handle_ws(ws, trusted_context=trusted_context)
 
 
 # ---------------------------------------------------------------------------

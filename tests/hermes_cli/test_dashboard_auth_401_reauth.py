@@ -698,6 +698,14 @@ class TestValidatePostLoginTarget:
         assert _validate_post_login_target("//evil.com") == ""
         assert _validate_post_login_target("%2F%2Fevil.com") == ""
 
+    def test_rejects_backslash_and_control_payloads(self):
+        from hermes_cli.dashboard_auth.routes import _validate_post_login_target
+        assert _validate_post_login_target("/\\evil.example") == ""
+        assert _validate_post_login_target("/%5cevil.example") == ""
+        assert _validate_post_login_target(
+            "/sessions%0d%0aLocation:%20https://evil.example"
+        ) == ""
+
     def test_rejects_login_loop(self):
         from hermes_cli.dashboard_auth.routes import _validate_post_login_target
         assert _validate_post_login_target("/login") == ""
