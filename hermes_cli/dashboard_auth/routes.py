@@ -66,10 +66,20 @@ _OXAIDE_LAUNCH_AUDIENCE = "oxaide-hermes-runtime"
 _OXAIDE_LAUNCH_MAX_TTL_SECONDS = 15 * 60
 _OXAIDE_LOGOUT_AUDIENCE = "oxaide-runtime-logout"
 _OXAIDE_LOGOUT_TTL_SECONDS = 2 * 60
+_OXAIDE_CUSTOMER_LOGIN_URL = "https://oxaide.com/agents"
 
 
 def _oxaide_launch_secret() -> str:
     return str(os.environ.get("HERMES_OXAIDE_DEMO_AUTH_SECRET", "") or "").strip()
+
+
+def _is_oxaide_tenant_runtime() -> bool:
+    """Return true only when the runtime is fully pinned to one Oxaide tenant."""
+    return bool(
+        _oxaide_launch_secret()
+        and str(os.environ.get("HERMES_OXAIDE_WORKSPACE_ID", "") or "").strip()
+        and str(os.environ.get("HERMES_OXAIDE_RUNTIME_KEY", "") or "").strip()
+    )
 
 
 def _required_oxaide_runtime_identity() -> tuple[str, str]:
@@ -444,7 +454,25 @@ def _prefix(request: Request) -> str:
 
 
 @router.get("/login", name="login_page")
-async def login_page(request: Request) -> HTMLResponse:
+async def login_page(request: Request):
+    # Oxaide owns customer authentication and workspace selection. A fully
+    # pinned tenant runtime therefore sends ordinary visitors back through the
+    # Oxaide account entry, which returns with a signed, one-time launch token.
+    # The password provider remains available only through the explicit
+    # operator recovery URL; breakglass is a route selector, not a secret.
+    if (
+        _is_oxaide_tenant_runtime()
+        and request.query_params.get("breakglass", "") != "1"
+    ):
+        return RedirectResponse(
+            url=_OXAIDE_CUSTOMER_LOGIN_URL,
+            status_code=302,
+            headers={
+                "Cache-Control": "no-store",
+                "Referrer-Policy": "no-referrer",
+            },
+        )
+
     # Read the ``next=`` query the gate's ``_unauth_response`` set on
     # the redirect URL. Validate against the same same-origin rules the
     # callback applies (defence in depth — the gate already filters,
