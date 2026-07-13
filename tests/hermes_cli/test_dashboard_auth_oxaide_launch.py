@@ -125,6 +125,42 @@ def test_signed_launch_creates_verified_dashboard_session(gated_app):
     }
 
 
+def test_oxaide_tenant_login_redirects_to_single_customer_login(gated_app):
+    client, _secret = gated_app
+
+    response = client.get(
+        "/login?next=%2Fchat&redirect=https%3A%2F%2Fattacker.example",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "https://oxaide.com/agents"
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["referrer-policy"] == "no-referrer"
+
+
+def test_oxaide_tenant_breakglass_keeps_operator_login(gated_app):
+    client, _secret = gated_app
+
+    response = client.get(
+        "/login?breakglass=1&next=%2Fchat",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 200
+    assert "location" not in response.headers
+
+
+def test_incomplete_oxaide_pin_keeps_generic_hermes_login(gated_app, monkeypatch):
+    client, _secret = gated_app
+    monkeypatch.delenv("HERMES_OXAIDE_RUNTIME_KEY")
+
+    response = client.get("/login?next=%2Fchat", follow_redirects=False)
+
+    assert response.status_code == 200
+    assert "location" not in response.headers
+
+
 def test_oxaide_logout_clears_runtime_cookies_and_returns_signed_continuation(gated_app):
     client, secret = gated_app
     token = _launch_token(secret)
