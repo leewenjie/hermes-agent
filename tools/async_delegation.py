@@ -911,11 +911,16 @@ def interrupt_for_session(
 
 
 def _reset_for_tests() -> None:
-    """Test-only: clear all state and tear down the executor."""
+    """Test-only: stop all workers, then clear in-memory state.
+
+    Waiting is intentional: a non-waiting shutdown lets a worker from the
+    previous test publish onto the shared completion queue after the fixture
+    has drained it, leaking a stale event into the next test.
+    """
     global _executor, _executor_max_workers
     with _executor_lock:
         if _executor is not None:
-            _executor.shutdown(wait=False)
+            _executor.shutdown(wait=True, cancel_futures=True)
         _executor = None
         _executor_max_workers = 0
     with _records_lock:
