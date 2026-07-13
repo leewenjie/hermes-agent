@@ -128,6 +128,10 @@ def test_clear_session_cookies_emits_expired_at_and_rt():
     assert any(
         SESSION_RT_COOKIE in c and "Max-Age=0" in c for c in cookies
     )
+    for prefix in ("__Host-", "__Secure-"):
+        prefixed = [cookie for cookie in cookies if cookie.startswith(prefix)]
+        assert prefixed
+        assert all("Secure" in cookie for cookie in prefixed)
 
 
 def test_pkce_cookie_short_ttl_and_path_root():

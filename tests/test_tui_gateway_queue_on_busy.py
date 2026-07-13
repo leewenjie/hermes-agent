@@ -102,7 +102,9 @@ def test_drain_fires_queued_prompt_and_claims_running(monkeypatch):
     fired = {}
     monkeypatch.setattr(
         server, "_run_prompt_submit",
-        lambda rid, sid, session, text: fired.update(rid=rid, sid=sid, text=text),
+        lambda rid, sid, session, text, **_kwargs: fired.update(
+            rid=rid, sid=sid, text=text
+        ),
     )
     session = _session(queued_prompt={"text": "go", "transport": "ws-9"})
 

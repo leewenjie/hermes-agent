@@ -1,0 +1,108 @@
+# Oxaide workspace runtime boundary
+
+## Decision
+
+Run one long-lived Hermes container and one persistent volume for each Oxaide workspace trust domain.
+
+For the current one-seat Researcher plan, a workspace normally maps to one user. The Oxaide control plane owns authentication, workspace membership, entitlement, billing, runtime allocation, and routing. Hermes owns the workspace runtime, conversations, tools, files, memories, skills, and completed-turn usage emission.
+
+Do not serve unrelated customer workspaces from one Hermes process or one `/opt/data` volume. Do not treat Hermes profiles as a SaaS security boundary.
+
+## Why
+
+Hermes profiles isolate normal application paths, but profile processes still run as the same Unix user and can see sibling profile directories through terminal access. A shared process also has process-global session, terminal, background-process, and plugin registries. Profiles are useful for trusted operator organization, not hostile tenant isolation.
+
+A workspace-dedicated container gives the simplest meaningful boundary:
+
+- one `HERMES_HOME`
+- one session database
+- one memory and skill tree
+- one terminal/filesystem trust domain
+- one completed-turn outbox
+- one workspace/runtime identity pin
+- independent CPU, memory, PID, restart, and deletion controls
+
+## Runtime contract
+
+Provision each runtime with:
+
+- a distinct Compose project or orchestrator allocation
+- a dedicated persistent volume mounted at `/opt/data`
+- `HERMES_OXAIDE_WORKSPACE_ID` pinned to exactly one workspace
+- `HERMES_OXAIDE_RUNTIME_KEY` pinned to exactly one runtime allocation
+- `HERMES_OXAIDE_DEMO_AUTH_SECRET` supplied from the secret manager for launch tokens
+- `HERMES_OXAIDE_USAGE_SIGNING_SECRET` supplied separately for completed-turn events
+- `HERMES_HOSTED_RUNTIME_SHARED_SECRET` supplied from the secret manager
+- the model-provider credential required by that runtime
+- ingress through the Oxaide runtime router only
+- host exposure bound to loopback or a private container network
+- explicit CPU, memory, and PID limits
+
+The launch token must use audience `oxaide-hermes-runtime`, match both runtime pins, have a bounded lifetime, and be single-use at the browser handoff. A trusted Oxaide session cannot choose another Hermes profile or arbitrary startup CWD.
+
+## Routing sequence
+
+1. Oxaide authenticates the user and verifies workspace membership.
+2. Oxaide authorizes the requested completed turn before runtime work starts.
+3. The runtime router finds or starts the container pinned to that workspace.
+4. Oxaide signs a short-lived, single-use launch token for that workspace/runtime pair.
+5. Hermes verifies audience, signature, timestamps, workspace, and runtime key.
+6. Hermes creates or resumes a conversation inside the workspace container.
+7. Hermes emits `complete` only after a usable assistant answer; failures emit `release`.
+
+Do not send Stripe secrets, price IDs, webhook credentials, subscription mutation authority, or overage policy into Hermes.
+
+Launch and usage signatures are derived with different purpose strings. A key accepted for browser launch must not authenticate completed-turn events.
+
+## Product logout
+
+Logout is coordinated across both origins:
+
+- From Hermes, the runtime clears its Secure cookies and submits a signed two-minute `oxaide-runtime-logout` continuation to Oxaide. Oxaide verifies the user, workspace, and runtime binding before global Supabase sign-out.
+- From Oxaide, the shell resolves the authenticated workspace runtime before local sign-out, then visits a signed logout-only runtime command. The runtime clears its cookies and returns to Oxaide signin.
+
+The logout token cannot launch an agent, authorize a turn, or select another workspace. Redirect and return URLs are fixed to Oxaide HTTPS auth paths.
+
+## Conversation privacy
+
+The one-seat plan makes the workspace the user boundary. If multi-seat private conversations are introduced later, choose one of these before launch:
+
+1. one container per user, or
+2. add persistent session ownership and enforce it across list, resume, search, delete, branch, export, attachments, and live-session reuse.
+
+Do not infer private-session safety from the current workspace container boundary.
+
+## Skills
+
+Ship stable product skills in the image under `skills/`. Store workspace-created skills only in that workspace's `/opt/data/skills`. Never mount one writable skills directory across customer containers.
+
+Recommended research bundle:
+
+- `market-return-analysis` for reproducible distribution artifacts
+- `stocks` when raw quote/history lookup is needed
+- built-in web/search tools for source-linked evidence
+
+Avoid loading unrelated finance-modeling skills by default. Every loaded skill consumes prompt attention, so activate only the workflow needed for the conversation.
+
+## Deployment
+
+Use `docker-compose.oxaide-workspace.yml` as the local production-shape template. Give every workspace a unique project name so Compose creates a distinct `workspace-data` volume. The control plane should retain the project/container/volume mapping and delete it only through an explicit workspace-retention workflow.
+
+The template binds the runtime to host loopback. Put the runtime router or authenticated reverse proxy on the same host, or replace the host port with a private orchestrator network. Never publish the container directly to the public internet.
+
+## Verification
+
+Before accepting customer traffic:
+
+- launch with missing workspace pin and confirm startup/auth fails closed
+- present a token for a different workspace and confirm HTTP 401
+- present a token for a different runtime key and confirm HTTP 401
+- present a wrong audience or overlong token and confirm HTTP 401
+- attempt to select a sibling profile and confirm the root profile remains active
+- create files and sessions in two workspace containers and confirm volumes are disjoint
+- stop and restart one container and confirm only its own sessions return
+- confirm denied turns do not build an agent or consume model tokens
+- confirm completed turns use one immutable event ID across authorize and complete
+- confirm a launch key signature is rejected by the completed-turn endpoint
+- sign out from Hermes and confirm both Hermes and Oxaide sessions are gone
+- sign out from Oxaide and confirm an existing tenant-runtime cookie is cleared

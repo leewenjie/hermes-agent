@@ -1317,6 +1317,10 @@ def _start_agent_build(sid: str, session: dict) -> None:
     ready = session.get("agent_ready")
     if ready is None:
         return
+    if session.get("trusted_launch_context") and not session.get(
+        "_oxaide_agent_authorized"
+    ):
+        return
     # A lazy watch session spectating an in-flight child must stay lazy so the
     # subagent live-mirror keeps flowing. Incidental RPCs (session.info, model
     # metadata, etc.) resolve through _sess(), which would otherwise upgrade it
@@ -4709,6 +4713,7 @@ def _init_session(
             # Pin async event emissions to whichever transport created the
             # session (stdio for Ink, JSON-RPC WS for the dashboard sidebar).
             "transport": current_transport() or _stdio_transport,
+            "trusted_launch_context": _transport_trusted_context(),
         }
     db = session_db if session_db is not None else _get_db()
     if db is not None:
@@ -5157,11 +5162,25 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
         if not queued or session.get("running"):
             return False
         session["queued_prompt"] = None
+        try:
+            oxaide_turn = _authorize_oxaide_user_turn(session)
+        except Exception as exc:
+            code = str(
+                getattr(exc, "code", "") or "turn_authorization_unavailable"
+            )
+            _emit("error", sid, {"message": f"Oxaide turn denied: {code}"})
+            return True
         session["running"] = True
         if queued.get("transport") is not None:
             session["transport"] = queued["transport"]
     try:
-        _run_prompt_submit(rid, sid, session, queued["text"])
+        _run_prompt_submit(
+            rid,
+            sid,
+            session,
+            queued["text"],
+            oxaide_turn=oxaide_turn,
+        )
     except Exception as exc:
         print(
             f"[tui_gateway] queued prompt dispatch failed: "
@@ -5189,6 +5208,55 @@ def _inflight_snapshot(session: dict) -> dict | None:
     }
 
 
+def _transport_trusted_context() -> dict:
+    transport = current_transport()
+    context = getattr(transport, "trusted_context", None)
+    return dict(context) if context else {}
+
+
+def _authorize_oxaide_user_turn(session: dict):
+    context = session.get("trusted_launch_context")
+    if not context:
+        return None
+    from tui_gateway.oxaide_turns import OxaideTurnClient
+
+    turn = OxaideTurnClient(dict(context)).authorize()
+    session["_oxaide_agent_authorized"] = True
+    return turn
+
+
+def _release_oxaide_turn(turn) -> None:
+    if turn is None:
+        return
+    try:
+        turn.release()
+    except Exception:
+        logger.warning("Oxaide turn release could not be queued", exc_info=True)
+
+
+def _settle_oxaide_turn(turn, result: Any, raw: Any, status: str) -> None:
+    if turn is None:
+        return
+    successful_turn = bool(
+        status == "complete"
+        and isinstance(raw, str)
+        and raw.strip()
+        and not (
+            isinstance(result, dict)
+            and (
+                result.get("failed")
+                or result.get("partial")
+                or result.get("interrupted")
+                or result.get("error")
+            )
+        )
+    )
+    if successful_turn:
+        turn.complete()
+    else:
+        turn.release()
+
+
 # ── Methods: session ─────────────────────────────────────────────────
 
 
@@ -5199,6 +5267,7 @@ def _(rid, params: dict) -> dict:
     cols = int(params.get("cols", 80))
     history = _coerce_seed_history(params.get("messages"))
     title = str(params.get("title") or "").strip()
+    trusted_context = _transport_trusted_context()
     # When set, this is a branch: the new chat copies an existing conversation's
     # history and links back to it so list_sessions_rich keeps it visible and the
     # sidebar can nest it under its parent. Mirrors the TUI /branch marker.
@@ -5207,12 +5276,12 @@ def _(rid, params: dict) -> dict:
     # launch directory? Only an explicit choice is persisted as the session's
     # workspace (see _ensure_session_db_row); otherwise it lands in "No
     # workspace" instead of whatever folder the desktop launched in.
-    raw_cwd = str(params.get("cwd") or "").strip()
+    raw_cwd = "" if trusted_context else str(params.get("cwd") or "").strip()
     try:
         explicit_cwd = bool(raw_cwd) and os.path.isdir(os.path.abspath(os.path.expanduser(raw_cwd)))
     except Exception:
         explicit_cwd = False
-    resolved_cwd = _completion_cwd(params)
+    resolved_cwd = _default_session_cwd() if trusted_context else _completion_cwd(params)
     source = _resolve_session_source(str(params.get("source") or "").strip() or None)
     _enable_gateway_prompts()
 
@@ -5220,7 +5289,7 @@ def _(rid, params: dict) -> dict:
     # profile must build its agent + persist against THAT profile's home/state.db,
     # not the dashboard's launch profile. Stored on the session so _start_agent_build
     # and each turn re-bind HERMES_HOME. None/own profile → launch (unchanged).
-    profile = (params.get("profile") or "").strip() or None
+    profile = None if trusted_context else (params.get("profile") or "").strip() or None
     profile_home = _profile_home(profile)
 
     # The desktop composer owns its model/effort/fast as plain UI state and ships
@@ -5287,6 +5356,7 @@ def _(rid, params: dict) -> dict:
             "tool_progress_mode": _load_tool_progress_mode(),
             "tool_started_at": {},
             "transport": current_transport() or _stdio_transport,
+            "trusted_launch_context": trusted_context,
         }
         _register_session_cwd(_sessions[sid])
 
@@ -5301,7 +5371,10 @@ def _(rid, params: dict) -> dict:
     # + skeleton panel, then build the real AIAgent just after this response is
     # flushed.  This keeps startup responsive while still hydrating tools/skills
     # without requiring the user to submit a first prompt.
-    _schedule_agent_build(sid)
+    # Oxaide sessions must authorize the first real user turn before any agent
+    # construction. Local/non-Oxaide sessions retain the existing prewarm.
+    if not trusted_context:
+        _schedule_agent_build(sid)
     _schedule_session_cap_enforcement()  # trim detached idle sessions over the cap
 
     return _ok(
@@ -5539,6 +5612,7 @@ def _deferred_session_record(
         "tool_progress_mode": _load_tool_progress_mode(),
         "tool_started_at": {},
         "transport": current_transport() or _stdio_transport,
+        "trusted_launch_context": _transport_trusted_context(),
     }
 
 
@@ -5585,7 +5659,8 @@ def _(rid, params: dict) -> dict:
         cols = 80
     # ``profile`` (app-global remote mode): resume a session that lives in another
     # local profile's state.db. None/own profile → the launch profile (unchanged).
-    profile = (params.get("profile") or "").strip() or None
+    trusted_context = _transport_trusted_context()
+    profile = None if trusted_context else (params.get("profile") or "").strip() or None
     profile_home = _profile_home(profile)
 
     # In a profile scope, the agent OWNS a long-lived db handle bound to that
@@ -8477,6 +8552,7 @@ def _(rid, params: dict) -> dict:
         # the upgrade resumes the child's transcript as a normal conversation.
         if session.get("lazy") and _child_run_active(str(session.get("session_key") or "")):
             return _err(rid, 4009, "subagent still running — wait for it to finish")
+        pending_truncation = None
         if truncate_user_ordinal is not None:
             try:
                 ordinal = int(truncate_user_ordinal)
@@ -8491,7 +8567,16 @@ def _(rid, params: dict) -> dict:
             # via replace_messages — an unrecoverable overwrite of the session DB.
             if ordinal < 0 or ordinal >= len(user_indices):
                 return _err(rid, 4018, "target user message is no longer in session history")
-            truncated = history[: user_indices[ordinal]]
+            pending_truncation = history[: user_indices[ordinal]]
+        try:
+            oxaide_turn = _authorize_oxaide_user_turn(session)
+        except Exception as exc:
+            code = str(
+                getattr(exc, "code", "") or "turn_authorization_unavailable"
+            )
+            return _err(rid, 4020, f"Oxaide turn denied: {code}")
+        if pending_truncation is not None:
+            truncated = pending_truncation
             session["history"] = truncated
             session["history_version"] = int(session.get("history_version", 0)) + 1
             if (db := _get_db()) is not None:
@@ -8526,13 +8611,21 @@ def _(rid, params: dict) -> dict:
             with session["history_lock"]:
                 session["running"] = False
                 _clear_inflight_turn(session)
+            _release_oxaide_turn(oxaide_turn)
             return
         with session["history_lock"]:
             if session.get("_turn_cancel_requested") or not session.get("running"):
                 session["running"] = False
                 _clear_inflight_turn(session)
+                _release_oxaide_turn(oxaide_turn)
                 return
-        _run_prompt_submit(rid, sid, session, text)
+        _run_prompt_submit(
+            rid,
+            sid,
+            session,
+            text,
+            oxaide_turn=oxaide_turn,
+        )
 
     run_thread = threading.Thread(target=run_after_agent_ready, daemon=True)
     # Keep a handle so session.interrupt can tell a live turn from a stuck
@@ -8936,7 +9029,14 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
     return stop
 
 
-def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
+def _run_prompt_submit(
+    rid,
+    sid: str,
+    session: dict,
+    text: Any,
+    *,
+    oxaide_turn=None,
+) -> None:
     with session["history_lock"]:
         history = list(session["history"])
         history_version = int(session.get("history_version", 0))
@@ -8957,6 +9057,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
         session_tokens = []
         home_token = None  # per-turn HERMES_HOME override for a resumed remote profile
         goal_followup = None  # set by the post-turn goal hook below
+        oxaide_settled = False
         try:
             from tools.approval import (
                 reset_current_session_key,
@@ -9209,6 +9310,13 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                 _clear_inflight_turn(session)
             _emit("message.complete", sid, payload)
 
+            if oxaide_turn is not None:
+                # The answer is already visible. Treat settlement as terminal
+                # before delivery so an unexpected local I/O failure cannot
+                # fall through to a contradictory release in ``finally``.
+                oxaide_settled = True
+                _settle_oxaide_turn(oxaide_turn, result, raw, status)
+
             # ── /goal continuation (Ralph-style loop) ─────────────────
             # After every TUI turn, if a /goal is active, ask the judge
             # whether the goal is done and — if not and we're still under
@@ -9349,6 +9457,8 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
             )
             _emit("error", sid, {"message": str(e)})
         finally:
+            if oxaide_turn is not None and not oxaide_settled:
+                _release_oxaide_turn(oxaide_turn)
             try:
                 if approval_token is not None:
                     reset_current_session_key(approval_token)

@@ -44,6 +44,7 @@ _GATE_PUBLIC_PREFIXES: tuple[str, ...] = (
     "/auth/login",
     "/auth/callback",
     "/auth/oxaide-launch",
+    "/auth/oxaide-logout",
     "/auth/password-login",
     "/auth/logout",
     "/login",
@@ -168,6 +169,8 @@ def _auto_sso_response(request: Request) -> Response | None:
     ``/auth/login`` which runs the unchanged PKCE auth-code flow.
     """
     path = request.url.path
+    if "\\" in path or any(ord(char) < 32 or ord(char) == 127 for char in path):
+        return ""
     # APIs never auto-redirect (see _unauth_response). Only document loads.
     if path.startswith("/api/"):
         return None

@@ -69,6 +69,10 @@ def test_no_credentials_still_raises(tmp_path, monkeypatch):
     """Empty pool + no env var must still fail to resolve — no false positive."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     (tmp_path / "hermes").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        "agent.bedrock_adapter.has_aws_credentials",
+        lambda: False,
+    )
 
     from hermes_cli.auth import AuthError, resolve_provider
 

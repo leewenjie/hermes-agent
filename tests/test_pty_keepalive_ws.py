@@ -31,7 +31,11 @@ async def test_attach_token_reuses_same_session(monkeypatch):
 
     monkeypatch.setattr(web_server.PtyBridge, "spawn", staticmethod(fake_spawn))
     # bypass auth + argv resolution for the test
-    monkeypatch.setattr(web_server, "_ws_auth_reason", lambda ws: (None, "test"))
+    monkeypatch.setattr(
+        web_server,
+        "_ws_auth_context",
+        lambda ws: (None, "test", None),
+    )
     monkeypatch.setattr(web_server, "_ws_host_origin_reason", lambda ws: None)
     monkeypatch.setattr(web_server, "_ws_client_reason", lambda ws: None)
 

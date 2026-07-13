@@ -29,6 +29,7 @@ import json
 import logging
 import socket
 import threading
+from types import MappingProxyType
 from typing import Any
 
 from tui_gateway import server
@@ -89,11 +90,13 @@ class WSTransport:
         loop: asyncio.AbstractEventLoop,
         *,
         peer: str = "unknown",
+        trusted_context: dict[str, Any] | None = None,
     ) -> None:
         self._ws = ws
         self._loop = loop
         self._peer = peer
         self._closed = False
+        self.trusted_context = MappingProxyType(dict(trusted_context or {}))
         # Token-coalescing buffer (CF-2). Streamed token frames land here and a
         # short timer flushes the batch. The lock guards the buffer + the
         # "armed" flag against the worker threads that call write(); the timer
@@ -280,7 +283,7 @@ def _disable_nagle(ws: Any) -> None:
         _log.debug("ws TCP_NODELAY skip: %s", exc)
 
 
-async def handle_ws(ws: Any) -> None:
+async def handle_ws(ws: Any, *, trusted_context: dict[str, Any] | None = None) -> None:
     """Run one WebSocket session. Wire-compatible with ``tui_gateway.entry``."""
     peer = _ws_peer_label(ws)
     transport: WSTransport | None = None
@@ -298,7 +301,12 @@ async def handle_ws(ws: Any) -> None:
         _disable_nagle(ws)
         _log.info("ws accepted peer=%s", peer)
 
-        transport = WSTransport(ws, asyncio.get_running_loop(), peer=peer)
+        transport = WSTransport(
+            ws,
+            asyncio.get_running_loop(),
+            peer=peer,
+            trusted_context=trusted_context,
+        )
 
         # The desktop app and dashboard chat reach the agent through this WS
         # sidecar, NOT through tui_gateway.entry.main() (the stdio TUI path that

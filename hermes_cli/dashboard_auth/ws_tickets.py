@@ -48,6 +48,7 @@ _tickets: Dict[str, Tuple[int, Dict[str, Any]]] = {}  # ticket -> (expires_at, i
 #: minted on first ``internal_ws_credential()`` call and stable for the life
 #: of the process. Guarded by ``_lock``.
 _internal_credential: Optional[str] = None
+_scoped_internal_credentials: Dict[str, Dict[str, Any]] = {}
 
 #: Identity recorded for connections that authenticate via the internal
 #: credential, so audit logs distinguish them from browser-initiated tickets.
@@ -59,7 +60,12 @@ class TicketInvalid(Exception):
     """Ticket missing, expired, or already consumed."""
 
 
-def mint_ticket(*, user_id: str, provider: str) -> str:
+def mint_ticket(
+    *,
+    user_id: str,
+    provider: str,
+    trusted_context: Optional[Dict[str, Any]] = None,
+) -> str:
     """Generate a one-shot ticket bound to this user identity.
 
     The returned token is base64url, 43 bytes of entropy (32-byte random
@@ -72,6 +78,8 @@ def mint_ticket(*, user_id: str, provider: str) -> str:
         "provider": provider,
         "minted_at": int(time.time()),
     }
+    if trusted_context:
+        info["trusted_context"] = dict(trusted_context)
     with _lock:
         _tickets[ticket] = (int(time.time()) + TTL_SECONDS, info)
         _gc_expired_locked()
@@ -126,6 +134,14 @@ def internal_ws_credential() -> str:
         return _internal_credential
 
 
+def scoped_internal_ws_credential(trusted_context: Dict[str, Any]) -> str:
+    """Mint a reusable internal credential bound to one trusted launch context."""
+    credential = secrets.token_urlsafe(32)
+    with _lock:
+        _scoped_internal_credentials[credential] = dict(trusted_context)
+    return credential
+
+
 def consume_internal_credential(value: str) -> Dict[str, Any]:
     """Validate an internal credential. Raises :class:`TicketInvalid` on mismatch.
 
@@ -142,7 +158,14 @@ def consume_internal_credential(value: str) -> Dict[str, Any]:
     credential has been minted yet, any value is rejected.
     """
     with _lock:
+        scoped_context = _scoped_internal_credentials.get(value)
         expected = _internal_credential
+    if scoped_context is not None:
+        return {
+            "user_id": str(scoped_context.get("user_id") or INTERNAL_USER_ID),
+            "provider": "oxaide-internal",
+            "trusted_context": dict(scoped_context),
+        }
     if not value or expected is None:
         raise TicketInvalid("no internal credential")
     if not secrets.compare_digest(value.encode(), expected.encode()):
@@ -158,4 +181,5 @@ def _reset_for_tests() -> None:
     global _internal_credential
     with _lock:
         _tickets.clear()
+        _scoped_internal_credentials.clear()
         _internal_credential = None
