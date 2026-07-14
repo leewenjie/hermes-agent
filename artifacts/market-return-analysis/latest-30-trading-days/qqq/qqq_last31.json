@@ -1,0 +1,130 @@
+{
+  "symbol": "QQQ",
+  "source_url": "https://query1.finance.yahoo.com/v8/finance/chart/QQQ?range=3mo&interval=1d&events=history",
+  "prices": [
+    {
+      "date": "2026-05-28",
+      "adjusted_close": 734.79248046875
+    },
+    {
+      "date": "2026-05-29",
+      "adjusted_close": 737.49951171875
+    },
+    {
+      "date": "2026-06-01",
+      "adjusted_close": 741.9246826171875
+    },
+    {
+      "date": "2026-06-02",
+      "adjusted_close": 745.3408813476562
+    },
+    {
+      "date": "2026-06-03",
+      "adjusted_close": 743.39306640625
+    },
+    {
+      "date": "2026-06-04",
+      "adjusted_close": 739.7969970703125
+    },
+    {
+      "date": "2026-06-05",
+      "adjusted_close": 704.2860107421875
+    },
+    {
+      "date": "2026-06-08",
+      "adjusted_close": 715.283935546875
+    },
+    {
+      "date": "2026-06-09",
+      "adjusted_close": 707.052978515625
+    },
+    {
+      "date": "2026-06-10",
+      "adjusted_close": 692.9285278320312
+    },
+    {
+      "date": "2026-06-11",
+      "adjusted_close": 716.332763671875
+    },
+    {
+      "date": "2026-06-12",
+      "adjusted_close": 720.5481567382812
+    },
+    {
+      "date": "2026-06-15",
+      "adjusted_close": 743.1832885742188
+    },
+    {
+      "date": "2026-06-16",
+      "adjusted_close": 729.0587768554688
+    },
+    {
+      "date": "2026-06-17",
+      "adjusted_close": 721.7168579101562
+    },
+    {
+      "date": "2026-06-18",
+      "adjusted_close": 739.8070068359375
+    },
+    {
+      "date": "2026-06-22",
+      "adjusted_close": 737.9500122070312
+    },
+    {
+      "date": "2026-06-23",
+      "adjusted_close": 713.6500244140625
+    },
+    {
+      "date": "2026-06-24",
+      "adjusted_close": 710.6199951171875
+    },
+    {
+      "date": "2026-06-25",
+      "adjusted_close": 716.3800048828125
+    },
+    {
+      "date": "2026-06-26",
+      "adjusted_close": 706.52001953125
+    },
+    {
+      "date": "2026-06-29",
+      "adjusted_close": 724.0800170898438
+    },
+    {
+      "date": "2026-06-30",
+      "adjusted_close": 736.4000244140625
+    },
+    {
+      "date": "2026-07-01",
+      "adjusted_close": 725.1699829101562
+    },
+    {
+      "date": "2026-07-02",
+      "adjusted_close": 712.5999755859375
+    },
+    {
+      "date": "2026-07-06",
+      "adjusted_close": 722.8200073242188
+    },
+    {
+      "date": "2026-07-07",
+      "adjusted_close": 709.4299926757812
+    },
+    {
+      "date": "2026-07-08",
+      "adjusted_close": 711.4400024414062
+    },
+    {
+      "date": "2026-07-09",
+      "adjusted_close": 723.280029296875
+    },
+    {
+      "date": "2026-07-10",
+      "adjusted_close": 725.510009765625
+    },
+    {
+      "date": "2026-07-13",
+      "adjusted_close": 711.739990234375
+    }
+  ]
+}

@@ -1,0 +1,160 @@
+{
+  "disclaimer": "Research and decision support only; not financial advice, a personalized recommendation, portfolio management, or a guarantee of returns.",
+  "end_date": "2026-07-13",
+  "frequency": "daily",
+  "limitations": [
+    "Historical observations do not forecast future returns.",
+    "Daily sampling does not describe intraday or monthly distributions.",
+    "The sample can mix materially different market regimes.",
+    "Yahoo Finance is an unofficial source and may revise or omit data."
+  ],
+  "observation_count": 31,
+  "price_field": "adjusted_close",
+  "proxy_note": "QQQ is analyzed as the selected market proxy.",
+  "retrieved_at": "2026-07-14T03:02:22+00:00",
+  "return_count": 30,
+  "returns": [
+    {
+      "date": "2026-05-29",
+      "return": 0.0036840758744198787
+    },
+    {
+      "date": "2026-06-01",
+      "return": 0.00600023569930852
+    },
+    {
+      "date": "2026-06-02",
+      "return": 0.004604508800567064
+    },
+    {
+      "date": "2026-06-03",
+      "return": -0.002613320951729392
+    },
+    {
+      "date": "2026-06-04",
+      "return": -0.004837372714978083
+    },
+    {
+      "date": "2026-06-05",
+      "return": -0.04800098739080161
+    },
+    {
+      "date": "2026-06-08",
+      "return": 0.015615708159669062
+    },
+    {
+      "date": "2026-06-09",
+      "return": -0.01150725833784727
+    },
+    {
+      "date": "2026-06-10",
+      "return": -0.019976509699805467
+    },
+    {
+      "date": "2026-06-11",
+      "return": 0.03377582954055702
+    },
+    {
+      "date": "2026-06-12",
+      "return": 0.005884685554236491
+    },
+    {
+      "date": "2026-06-15",
+      "return": 0.03141376689991193
+    },
+    {
+      "date": "2026-06-16",
+      "return": -0.019005421591015037
+    },
+    {
+      "date": "2026-06-17",
+      "return": -0.010070407460121666
+    },
+    {
+      "date": "2026-06-18",
+      "return": 0.02506543768170255
+    },
+    {
+      "date": "2026-06-22",
+      "return": -0.002510106841037363
+    },
+    {
+      "date": "2026-06-23",
+      "return": -0.03292904314791367
+    },
+    {
+      "date": "2026-06-24",
+      "return": -0.00424581964999271
+    },
+    {
+      "date": "2026-06-25",
+      "return": 0.008105611726665796
+    },
+    {
+      "date": "2026-06-26",
+      "return": -0.013763624451209266
+    },
+    {
+      "date": "2026-06-29",
+      "return": 0.024854210883145544
+    },
+    {
+      "date": "2026-06-30",
+      "return": 0.017014704222517052
+    },
+    {
+      "date": "2026-07-01",
+      "return": -0.015249920059198452
+    },
+    {
+      "date": "2026-07-02",
+      "return": -0.017333877050142776
+    },
+    {
+      "date": "2026-07-06",
+      "return": 0.014341891788415717
+    },
+    {
+      "date": "2026-07-07",
+      "return": -0.0185246873533641
+    },
+    {
+      "date": "2026-07-08",
+      "return": 0.0028332742996159954
+    },
+    {
+      "date": "2026-07-09",
+      "return": 0.01664234062582648
+    },
+    {
+      "date": "2026-07-10",
+      "return": 0.0030831495111482976
+    },
+    {
+      "date": "2026-07-13",
+      "return": -0.01897977883957569
+    }
+  ],
+  "schema_version": 1,
+  "source_url": "https://query1.finance.yahoo.com/v8/finance/chart/QQQ?range=3mo&interval=1d&events=history",
+  "start_date": "2026-05-28",
+  "statistics": {
+    "annualized_return": -0.23490390759425206,
+    "annualized_volatility": 0.3008740118965014,
+    "best_day": 0.03377582954055702,
+    "daily_volatility": 0.018953281224772186,
+    "excess_kurtosis": -0.13844913273361348,
+    "historical_expected_shortfall_95": -0.04046501526935764,
+    "maximum_drawdown": -0.07031997684181479,
+    "mean_daily_return": -0.0008876234757008383,
+    "median_daily_return": 0.0001615837292893163,
+    "p01": -0.0436301235603641,
+    "p05": -0.027100403096264977,
+    "p95": 0.02855701875171769,
+    "p99": 0.033090831374769945,
+    "positive_day_ratio": 0.5,
+    "skewness": -0.21957767945613138,
+    "worst_day": -0.04800098739080161
+  },
+  "symbol": "QQQ"
+}
