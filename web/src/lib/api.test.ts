@@ -52,12 +52,33 @@ describe("api.getModelOptions", () => {
 describe("api.logout", () => {
   it("returns an Oxaide-branded loopback session to the account shell", async () => {
     const assign = vi.fn();
-    vi.stubGlobal("window", { location: { assign } });
+    vi.stubGlobal("window", { location: { assign, origin: "http://127.0.0.1:9119" } });
     vi.stubGlobal("fetch", jsonFetchMock({ ok: true, redirect_to: "/login" }));
 
     await api.logout("https://oxaide.com");
 
     expect(assign).toHaveBeenCalledWith("https://oxaide.com");
+  });
+
+  it("uses the signed same-origin bridge for an Oxaide runtime logout", async () => {
+    const assign = vi.fn();
+    vi.stubGlobal("window", {
+      location: {
+        assign,
+        origin: "https://runtimekey1234567890abcd.oxaide.com",
+      },
+    });
+    vi.stubGlobal("fetch", jsonFetchMock({
+      ok: true,
+      redirect_to: "https://oxaide.com/auth/runtime-logout",
+      logout_token: "signed.logout-token",
+    }));
+
+    await api.logout("https://oxaide.com");
+
+    expect(assign).toHaveBeenCalledWith(
+      "https://oxaide.com/auth/runtime-logout?token=signed.logout-token",
+    );
   });
 });
 

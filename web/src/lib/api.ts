@@ -340,16 +340,14 @@ export const api = {
         logout_token?: string;
       };
       if (body.logout_token && body.redirect_to) {
-        const form = document.createElement("form");
-        form.method = "POST";
-        form.action = body.redirect_to;
-        const token = document.createElement("input");
-        token.type = "hidden";
-        token.name = "token";
-        token.value = body.logout_token;
-        form.appendChild(token);
-        document.body.appendChild(form);
-        form.submit();
+        // Enter Oxaide through its signed GET bridge. That page immediately
+        // posts the token back to its own origin, so privacy settings and
+        // reverse proxies cannot strip the cross-origin POST Origin header.
+        // The token remains short-lived, tenant-bound, and verified before
+        // either the Oxaide or runtime session is cleared.
+        const continuation = new URL(body.redirect_to, window.location.origin);
+        continuation.searchParams.set("token", body.logout_token);
+        window.location.assign(continuation.toString());
         return r;
       }
       const redirectTo = body.redirect_to || `${BASE}/login`;

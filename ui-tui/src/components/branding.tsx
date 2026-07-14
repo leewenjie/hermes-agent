@@ -224,7 +224,8 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
   // hermes_cli/banner.py) and the "connected" label on the collapse toggle.
   const mcpServers = info.mcp_servers ?? []
   const mcpConnected = mcpServers.filter(s => s.connected).length
-  const showRuntimeDetails = t.brand.org !== 'Oxaide'
+  const isHostedOxaide = t.brand.org === 'Oxaide'
+  const showRuntimeDetails = !isHostedOxaide
 
   const toolsBody = () => {
     const shown = toolEntries.slice(0, TOOLSETS_MAX)
@@ -312,8 +313,8 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
           <Box justifyContent="center" marginBottom={1}>
             <Text bold color={t.color.primary}>
               {t.brand.name}
-              {info.version ? ` v${info.version}` : ''}
-              {info.release_date ? ` (${info.release_date})` : ''}
+              {!isHostedOxaide && info.version ? ` v${info.version}` : ''}
+              {!isHostedOxaide && info.release_date ? ` (${info.release_date})` : ''}
             </Text>
           </Box>
         ) : (
