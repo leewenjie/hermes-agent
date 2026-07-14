@@ -4,6 +4,7 @@ import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { cn } from "@/lib/utils";
 import { PluginSlot } from "@/plugins";
+import { getDashboardBranding } from "@/lib/branding";
 
 export const HERMES_DOCS_URL = "https://hermes-agent.nousresearch.com/docs/";
 
@@ -18,11 +19,18 @@ const DS_BUTTON_OUTLINED_LINK_CN = cn(
 export default function DocsPage() {
   const { t } = useI18n();
   const { setEnd } = usePageHeader();
+  const branding = getDashboardBranding({
+    name: t.app.brand,
+    shortName: t.app.brandShort,
+    orgName: t.app.footer.org,
+    docsUrl: HERMES_DOCS_URL,
+  });
+  const docsUrl = branding.docsUrl;
 
   useLayoutEffect(() => {
     setEnd(
       <a
-        href={HERMES_DOCS_URL}
+        href={docsUrl}
         target="_blank"
         rel="noopener noreferrer"
         className={DS_BUTTON_OUTLINED_LINK_CN}
@@ -34,7 +42,30 @@ export default function DocsPage() {
     return () => {
       setEnd(null);
     };
-  }, [setEnd, t]);
+  }, [docsUrl, setEnd, t]);
+
+  if (branding.product === "oxaide") {
+    return (
+      <div className="flex min-h-0 w-full min-w-0 flex-1 items-center justify-center p-6">
+        <div className="max-w-xl rounded border border-current/20 bg-background-base p-8 text-center">
+          <img src="/oxaide-mark.svg" alt="" className="mx-auto mb-4 h-12 w-12" />
+          <h2 className="text-xl font-bold tracking-wide text-midground">Oxaide Research documentation</h2>
+          <p className="mt-3 text-sm leading-6 text-text-secondary">
+            Research workflow, privacy, billing, and product guidance live in the Oxaide account shell.
+          </p>
+          <a
+            href={docsUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={`${DS_BUTTON_OUTLINED_LINK_CN} mt-6`}
+          >
+            <ExternalLink className="size-3.5" />
+            Open Oxaide docs
+          </a>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -46,7 +77,7 @@ export default function DocsPage() {
       <PluginSlot name="docs:top" />
       <iframe
         title={t.app.nav.documentation}
-        src={HERMES_DOCS_URL}
+        src={docsUrl}
         className={cn(
           "min-h-0 w-full min-w-0 flex-1",
           "rounded-sm border border-current/20",

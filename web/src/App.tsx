@@ -101,6 +101,7 @@ import { useTheme } from "@/themes";
 import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
 import { api } from "@/lib/api";
 import type { StatusResponse, UpdateCheckResponse } from "@/lib/api";
+import { brandingLines, getDashboardBranding } from "@/lib/branding";
 
 function RootRedirect() {
   return <Navigate to="/sessions" replace />;
@@ -120,6 +121,8 @@ const CHAT_NAV_ITEM: NavItem = {
   label: "Chat",
   icon: Terminal,
 };
+
+const OXAIDE_NAV_PATHS = new Set(["/chat", "/sessions", "/files", "/skills", "/docs"]);
 
 /**
  * Built-in routes except /chat.  Chat is rendered persistently (outside
@@ -348,6 +351,16 @@ const SIDEBAR_COLLAPSED_KEY = "hermes-sidebar-collapsed";
 
 export default function App() {
   const { t } = useI18n();
+  const branding = useMemo(
+    () =>
+      getDashboardBranding({
+        name: t.app.brand,
+        shortName: t.app.brandShort,
+        orgName: t.app.footer.org,
+      }),
+    [t.app.brand, t.app.brandShort, t.app.footer.org],
+  );
+  const [brandFirstLine, brandSecondLine] = brandingLines(branding.name);
   const { pathname } = useLocation();
   const { manifests, loading: pluginsLoading } = usePlugins();
   const { theme } = useTheme();
@@ -378,6 +391,15 @@ export default function App() {
   const normalizedPath = pathname.replace(/\/$/, "") || "/";
   const isChatRoute = normalizedPath === "/chat";
   const embeddedChat = isDashboardEmbeddedChatEnabled();
+
+  useEffect(() => {
+    document.title = `${branding.name} - Workspace`;
+    const icon = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+    if (icon && branding.product === "oxaide") {
+      icon.href = "/oxaide-mark.svg";
+      icon.type = "image/svg+xml";
+    }
+  }, [branding.name, branding.product]);
 
   // `dashboard.show_token_analytics` gates the Analytics nav item.  The
   // page itself remains reachable by URL (it renders an explanation when
@@ -430,14 +452,17 @@ export default function App() {
     const base = embeddedChat
       ? [CHAT_NAV_ITEM, ...BUILTIN_NAV_REST]
       : BUILTIN_NAV_REST;
-    return showTokenAnalytics
+    const analyticsFiltered = showTokenAnalytics
       ? base
       : base.filter((n) => n.path !== "/analytics");
-  }, [embeddedChat, showTokenAnalytics]);
+    return branding.product === "oxaide"
+      ? analyticsFiltered.filter((item) => OXAIDE_NAV_PATHS.has(item.path))
+      : analyticsFiltered;
+  }, [branding.product, embeddedChat, showTokenAnalytics]);
 
   const sidebarNav = useMemo(
-    () => partitionSidebarNav(builtinNav, manifests),
-    [builtinNav, manifests],
+    () => partitionSidebarNav(builtinNav, branding.product === "oxaide" ? [] : manifests),
+    [branding.product, builtinNav, manifests],
   );
   const routes = useMemo(
     () => buildRoutes(builtinRoutes, manifests),
@@ -520,7 +545,7 @@ export default function App() {
         </Button>
 
         <Typography className="font-bold text-[0.95rem] leading-[0.95] tracking-[0.05em] text-midground">
-          {t.app.brand}
+          {branding.name}
         </Typography>
       </header>
 
@@ -573,12 +598,14 @@ export default function App() {
                   collapsed && "lg:hidden",
                 )}
               >
+                {branding.product === "oxaide" ? (
+                  <img src="/oxaide-mark.svg" alt="" className="h-8 w-8 shrink-0" />
+                ) : null}
                 <PluginSlot name="header-left" />
 
                 <Typography className="font-bold text-[1.125rem] leading-[0.95] tracking-[0.0525rem] text-midground uppercase">
-                  Hermes
-                  <br />
-                  Agent
+                  {brandFirstLine}
+                  {brandSecondLine ? <><br />{brandSecondLine}</> : null}
                 </Typography>
               </div>
 
@@ -609,7 +636,9 @@ export default function App() {
               </Button>
             </div>
 
-            <ProfileSwitcher collapsed={isDesktopCollapsed} />
+            {branding.product !== "oxaide" ? (
+              <ProfileSwitcher collapsed={isDesktopCollapsed} />
+            ) : null}
 
             <nav
               className="min-h-0 w-full flex-1 overflow-y-auto overflow-x-hidden border-t border-current/10 py-2"
@@ -661,12 +690,15 @@ export default function App() {
               )}
             </nav>
 
-            <SidebarSystemActions
-              collapsed={isDesktopCollapsed}
-              onNavigate={closeMobile}
-              status={sidebarStatus}
-              tooltipWarmRef={tooltipWarmRef}
-            />
+            {branding.product !== "oxaide" ? (
+              <SidebarSystemActions
+                allowUpdate
+                collapsed={isDesktopCollapsed}
+                onNavigate={closeMobile}
+                status={sidebarStatus}
+                tooltipWarmRef={tooltipWarmRef}
+              />
+            ) : null}
 
             <div
               className={cn(
@@ -711,7 +743,7 @@ export default function App() {
               )}
             >
               <AuthWidget />
-              <SidebarFooter status={sidebarStatus} />
+              <SidebarFooter branding={branding} status={sidebarStatus} />
             </div>
           </aside>
 
@@ -892,6 +924,7 @@ function SidebarNavLink({
 }
 
 function SidebarSystemActions({
+  allowUpdate,
   collapsed,
   onNavigate,
   status,
@@ -953,7 +986,7 @@ function SidebarSystemActions({
       spin: true,
     },
   ];
-  if (canUpdateHermes) {
+  if (allowUpdate && canUpdateHermes) {
     items.push({
       action: "update",
       icon: Download,
@@ -1325,6 +1358,7 @@ interface SidebarNavLinkProps {
 }
 
 interface SidebarSystemActionsProps {
+  allowUpdate: boolean;
   collapsed: boolean;
   onNavigate: () => void;
   status: StatusResponse | null;

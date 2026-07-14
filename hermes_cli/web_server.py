@@ -14899,6 +14899,35 @@ def _ws_auth_ok(ws: "WebSocket") -> bool:
     """True when the WS-upgrade credential is accepted. See _ws_auth_reason."""
     return _ws_auth_reason(ws)[0] is None
 
+
+def _dashboard_branding_settings() -> dict[str, str]:
+    config = load_config() or {}
+    dashboard = config.get("dashboard") if isinstance(config.get("dashboard"), dict) else {}
+    configured = dashboard.get("branding") if isinstance(dashboard.get("branding"), dict) else {}
+    oxaide_runtime = bool(
+        str(os.environ.get("HERMES_OXAIDE_DEMO_AUTH_SECRET") or "").strip()
+        and str(os.environ.get("HERMES_OXAIDE_WORKSPACE_ID") or "").strip()
+        and str(os.environ.get("HERMES_OXAIDE_RUNTIME_KEY") or "").strip()
+    )
+    product = str(configured.get("product") or "").strip().lower()
+    is_oxaide = oxaide_runtime or product == "oxaide"
+    configured_values = configured if not oxaide_runtime or product == "oxaide" else {}
+    defaults = {
+        "product": "oxaide" if is_oxaide else "hermes",
+        "name": "Oxaide Research" if is_oxaide else "Hermes Agent",
+        "short_name": "Oxaide" if is_oxaide else "HA",
+        "org_name": "Oxaide" if is_oxaide else "Nous Research",
+        "org_url": "https://oxaide.com" if is_oxaide else "https://nousresearch.com",
+        "account_url": "https://oxaide.com/app" if is_oxaide else "",
+        "billing_url": "https://oxaide.com/console/billing" if is_oxaide else "",
+        "docs_url": "https://oxaide.com/docs" if is_oxaide else "https://hermes-agent.nousresearch.com/docs/",
+    }
+    result: dict[str, str] = {}
+    for key, fallback in defaults.items():
+        value = str(configured_values.get(key) or fallback).strip()
+        result[key] = value[:500]
+    return result
+
 # Per-channel subscriber registry used by /api/pub (PTY-side gateway → dashboard)
 # and /api/events (dashboard → browser sidebar).  Keyed by an opaque channel id
 # the chat tab generates on mount; entries auto-evict when the last subscriber
@@ -14984,6 +15013,8 @@ def _resolve_chat_argv(
     # setdefault so an explicit operator value still wins.
     env.setdefault("COLORTERM", "truecolor")
     env["HERMES_TUI_DASHBOARD"] = "1"
+    if _dashboard_branding_settings()["product"] == "oxaide":
+        env["HERMES_INTERNAL_TUI_SKIN"] = "oxaide"
 
     if profile_dir is not None:
         env["HERMES_HOME"] = str(profile_dir)
@@ -16163,12 +16194,14 @@ def mount_spa(application: FastAPI):
         chat_js = "true" if _DASHBOARD_EMBEDDED_CHAT_ENABLED else "false"
         gated = bool(getattr(app.state, "auth_required", False))
         gated_js = "true" if gated else "false"
+        branding_json = json.dumps(_dashboard_branding_settings(), separators=(",", ":")).replace("<", "\\u003c")
         if gated:
             bootstrap_script = (
                 f"<script>"
                 f"window.__HERMES_DASHBOARD_EMBEDDED_CHAT__={chat_js};"
                 f'window.__HERMES_BASE_PATH__="{prefix}";'
                 f"window.__HERMES_AUTH_REQUIRED__={gated_js};"
+                f"window.__HERMES_DASHBOARD_BRANDING__={branding_json};"
                 f"</script>"
             )
         else:
@@ -16177,6 +16210,7 @@ def mount_spa(application: FastAPI):
                 f"window.__HERMES_DASHBOARD_EMBEDDED_CHAT__={chat_js};"
                 f'window.__HERMES_BASE_PATH__="{prefix}";'
                 f"window.__HERMES_AUTH_REQUIRED__={gated_js};"
+                f"window.__HERMES_DASHBOARD_BRANDING__={branding_json};"
                 f"</script>"
             )
         if prefix:

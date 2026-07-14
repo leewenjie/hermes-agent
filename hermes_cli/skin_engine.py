@@ -113,6 +113,7 @@ Activate with ``/skin <name>`` in the CLI or ``display.skin: <name>`` in config.
 """
 
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -188,6 +189,8 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
         },
         "branding": {
             "agent_name": "Hermes Agent",
+            "org_name": "Nous Research",
+            "tagline": "Messenger of the Digital Gods",
             "welcome": "Welcome to Hermes Agent! Type your message or /help for commands.",
             "goodbye": "Goodbye! ⚕",
             "response_label": " ⚕ Hermes ",
@@ -195,6 +198,56 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             "help_header": "(^_^)? Available Commands",
         },
         "tool_prefix": "┊",
+    },
+    "oxaide": {
+        "name": "oxaide",
+        "description": "Oxaide Research — emerald workspace",
+        "colors": {
+            "banner_border": "#2A8B78",
+            "banner_title": "#E8F5F1",
+            "banner_accent": "#5FD0B8",
+            "banner_dim": "#3D8F80",
+            "banner_text": "#D9E9E5",
+            "ui_accent": "#5FD0B8",
+            "ui_label": "#8ADBCB",
+            "ui_ok": "#70D6B8",
+            "ui_error": "#F08A8A",
+            "ui_warn": "#E5C56E",
+            "prompt": "#F8F7F3",
+            "input_rule": "#2A8B78",
+            "response_border": "#5FD0B8",
+            "status_bar_bg": "#06221E",
+            "status_bar_text": "#D9E9E5",
+            "status_bar_strong": "#8ADBCB",
+            "status_bar_dim": "#5D817A",
+            "status_bar_good": "#70D6B8",
+            "status_bar_warn": "#E5C56E",
+            "status_bar_bad": "#F0A36B",
+            "status_bar_critical": "#F08A8A",
+            "session_label": "#8ADBCB",
+            "session_border": "#5D817A",
+        },
+        "spinner": {
+            "thinking_verbs": ["reviewing evidence", "testing the thesis", "checking sources"],
+        },
+        "branding": {
+            "agent_name": "Oxaide Research",
+            "org_name": "Oxaide",
+            "tagline": "Source-linked research workspace",
+            "welcome": "Welcome to Oxaide Research. Ask a focused research question or use /help.",
+            "goodbye": "Research session closed.",
+            "response_label": " Oxaide Research ",
+            "prompt_symbol": "❯",
+            "help_header": "Oxaide Research commands",
+        },
+        "tool_prefix": "│",
+        "banner_logo": """[bold #5FD0B8]╭────────────────────────╮[/]
+[bold #2A8B78]│[/] [bold #E8F5F1]OXAIDE RESEARCH[/]        [bold #2A8B78]│[/]
+[bold #5FD0B8]╰────────────────────────╯[/]""",
+        "banner_hero": """[#2A8B78]      ╭────────╮[/]
+[#5FD0B8]   ╭──╯   ◇    ╰──╮[/]
+[#8ADBCB]   ╰──╮        ╭──╯[/]
+[#2A8B78]      ╰────────╯[/]""",
     },
     "ares": {
         "name": "ares",
@@ -795,7 +848,7 @@ def init_skin_from_config(config: dict) -> None:
     display = config.get("display") or {}
     if not isinstance(display, dict):
         display = {}
-    skin_name = display.get("skin", "default")
+    skin_name = os.environ.get("HERMES_INTERNAL_TUI_SKIN") or display.get("skin", "default")
     if isinstance(skin_name, str) and skin_name.strip():
         set_active_skin(skin_name.strip())
     else:

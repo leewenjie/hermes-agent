@@ -25,7 +25,7 @@ const buildUiState = (): UiState => ({
   sessionTitle: '',
   showReasoning: false,
   sid: null,
-  status: 'summoning hermes…',
+  status: process.env.HERMES_INTERNAL_TUI_SKIN === 'oxaide' ? 'opening research workspace…' : 'summoning hermes…',
   statusBar: 'top',
   streaming: true,
   theme: DEFAULT_THEME,
