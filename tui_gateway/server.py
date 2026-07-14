@@ -5234,7 +5234,78 @@ def _release_oxaide_turn(turn) -> None:
         logger.warning("Oxaide turn release could not be queued", exc_info=True)
 
 
-def _settle_oxaide_turn(turn, result: Any, raw: Any, status: str) -> None:
+def _oxaide_usage_snapshot(agent) -> dict[str, Any]:
+    integer_fields = {
+        "api_calls": "session_api_calls",
+        "cache_read_tokens": "session_cache_read_tokens",
+        "cache_write_tokens": "session_cache_write_tokens",
+        "input_tokens": "session_input_tokens",
+        "output_tokens": "session_output_tokens",
+        "reasoning_tokens": "session_reasoning_tokens",
+    }
+    snapshot = {
+        key: max(0, int(getattr(agent, attribute, 0) or 0))
+        for key, attribute in integer_fields.items()
+    }
+    snapshot["estimated_cost_usd"] = max(
+        0.0, float(getattr(agent, "session_estimated_cost_usd", 0.0) or 0.0)
+    )
+    return snapshot
+
+
+def _oxaide_completion_details(
+    agent,
+    baseline: dict[str, Any] | None,
+    started_at: float | None,
+) -> dict[str, Any]:
+    before = baseline or {}
+    after = _oxaide_usage_snapshot(agent)
+    details: dict[str, Any] = {
+        "schema_version": "2026-07-14-v1",
+        "origin": "interactive",
+        "model": str(getattr(agent, "model", "") or "")[:200],
+        "provider": str(getattr(agent, "provider", "") or "")[:100],
+        "cost_status": str(
+            getattr(agent, "session_cost_status", "unknown") or "unknown"
+        )[:50],
+        "cost_source": str(
+            getattr(agent, "session_cost_source", "none") or "none"
+        )[:100],
+        "duration_ms": max(
+            0,
+            int((time.monotonic() - started_at) * 1000)
+            if started_at is not None
+            else 0,
+        ),
+    }
+    for key in (
+        "api_calls",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "input_tokens",
+        "output_tokens",
+        "reasoning_tokens",
+    ):
+        details[key] = max(0, int(after[key]) - int(before.get(key, 0) or 0))
+    details["estimated_cost_usd"] = round(
+        max(
+            0.0,
+            float(after["estimated_cost_usd"])
+            - float(before.get("estimated_cost_usd", 0.0) or 0.0),
+        ),
+        8,
+    )
+    return details
+
+
+def _settle_oxaide_turn(
+    turn,
+    result: Any,
+    raw: Any,
+    status: str,
+    *,
+    details: dict[str, Any] | None = None,
+) -> None:
     if turn is None:
         return
     successful_turn = bool(
@@ -5252,7 +5323,7 @@ def _settle_oxaide_turn(turn, result: Any, raw: Any, status: str) -> None:
         )
     )
     if successful_turn:
-        turn.complete()
+        turn.complete(details=details)
     else:
         turn.release()
 
@@ -9058,6 +9129,8 @@ def _run_prompt_submit(
         home_token = None  # per-turn HERMES_HOME override for a resumed remote profile
         goal_followup = None  # set by the post-turn goal hook below
         oxaide_settled = False
+        oxaide_usage_baseline = None
+        oxaide_started_at = None
         try:
             from tools.approval import (
                 reset_current_session_key,
@@ -9080,6 +9153,9 @@ def _run_prompt_submit(
             # re-running is a harmless no-op.)
             _wire_callbacks(sid)
             _sync_agent_model_with_config(sid, session)
+            if oxaide_turn is not None:
+                oxaide_usage_baseline = _oxaide_usage_snapshot(agent)
+                oxaide_started_at = time.monotonic()
             cwd = _session_cwd(session)
             _register_session_cwd(session)
             cols = session.get("cols", 80)
@@ -9315,7 +9391,17 @@ def _run_prompt_submit(
                 # before delivery so an unexpected local I/O failure cannot
                 # fall through to a contradictory release in ``finally``.
                 oxaide_settled = True
-                _settle_oxaide_turn(oxaide_turn, result, raw, status)
+                _settle_oxaide_turn(
+                    oxaide_turn,
+                    result,
+                    raw,
+                    status,
+                    details=_oxaide_completion_details(
+                        agent,
+                        oxaide_usage_baseline,
+                        oxaide_started_at,
+                    ),
+                )
 
             # ── /goal continuation (Ralph-style loop) ─────────────────
             # After every TUI turn, if a /goal is active, ask the judge

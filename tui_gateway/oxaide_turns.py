@@ -51,8 +51,8 @@ class OxaideTurn:
     client: "OxaideTurnClient"
     event_id: str
 
-    def complete(self) -> None:
-        self.client.settle("complete", self.event_id)
+    def complete(self, details: dict[str, Any] | None = None) -> None:
+        self.client.settle("complete", self.event_id, details=details)
 
     def release(self) -> None:
         self.client.settle("release", self.event_id)
@@ -105,10 +105,16 @@ class OxaideTurnClient:
         self._request("authorize", event_id)
         return OxaideTurn(client=self, event_id=event_id)
 
-    def settle(self, phase: str, event_id: str) -> None:
+    def settle(
+        self,
+        phase: str,
+        event_id: str,
+        *,
+        details: dict[str, Any] | None = None,
+    ) -> None:
         if phase not in {"complete", "release"}:
             raise ValueError("settlement phase must be complete or release")
-        payload = self._payload(phase, event_id)
+        payload = self._payload(phase, event_id, details=details)
         pending = None
         try:
             pending = self._write_outbox(payload)
@@ -150,7 +156,13 @@ class OxaideTurnClient:
             except Exception:
                 logger.debug("Oxaide turn outbox retry deferred", exc_info=True)
 
-    def _payload(self, phase: str, event_id: str) -> dict[str, Any]:
+    def _payload(
+        self,
+        phase: str,
+        event_id: str,
+        *,
+        details: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "phase": phase,
             "workspace_id": self.workspace_id,
@@ -161,6 +173,8 @@ class OxaideTurnClient:
             payload["completed_at"] = (
                 datetime.now(timezone.utc).isoformat(timespec="seconds")
             )
+            if details:
+                payload["details"] = details
         return payload
 
     def _request(self, phase: str, event_id: str) -> dict[str, Any]:
