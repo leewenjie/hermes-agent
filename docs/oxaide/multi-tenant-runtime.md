@@ -76,13 +76,34 @@ Do not infer private-session safety from the current workspace container boundar
 
 Ship stable product skills in the image under `skills/`. Store workspace-created skills only in that workspace's `/opt/data/skills`. Never mount one writable skills directory across customer containers.
 
-Recommended research bundle:
+Required research bundle:
 
+- `investment-research` for source-linked research structure and non-advisory framing
 - `market-return-analysis` for reproducible distribution artifacts
-- `stocks` when raw quote/history lookup is needed
+- `stocks` for bounded, timestamped Yahoo quote, search, adjusted-history, comparison, and crypto-proxy data
 - built-in web/search tools for source-linked evidence
 
 Avoid loading unrelated finance-modeling skills by default. Every loaded skill consumes prompt attention, so activate only the workflow needed for the conversation.
+
+## Hosted feature policy
+
+Oxaide tenant runtimes must set both environment pins exactly:
+
+- `HERMES_TUI_TOOLSETS=web,terminal,file,memory,session_search,clarify,delegation,todo,vision`
+- `HERMES_TUI_SKILLS=investment-research,market-return-analysis,stocks`
+
+The TUI gateway validates this contract whenever both Oxaide workspace and runtime pins are present. Missing, incomplete, or expanded policies fail agent creation rather than falling back to personal-agent defaults.
+
+The default hosted product intentionally excludes:
+
+- browser automation, because a local browser can reach private container networks
+- arbitrary skill management, plugins, and MCP servers, because they expand executable trust
+- code execution, because terminal already covers the approved deterministic scripts
+- cron jobs, until scheduled model work is workspace-bound and metered
+- project switching and Kanban, which are not part of the one-seat research product
+- finance-modeling skills, which add large prompt and spreadsheet dependency surfaces
+
+Delegation is capped to two leaf workers, one spawn level, sixteen iterations, and a four-minute child timeout. Orchestrator spawning and subagent auto-approval are disabled. Persistent memory writes require customer approval.
 
 ## Deployment
 
@@ -104,5 +125,8 @@ Before accepting customer traffic:
 - confirm denied turns do not build an agent or consume model tokens
 - confirm completed turns use one immutable event ID across authorize and complete
 - confirm a launch key signature is rejected by the completed-turn endpoint
+- remove `HERMES_TUI_TOOLSETS` and confirm Oxaide agent creation fails closed
+- add `browser`, `code_execution`, an MCP server, or an arbitrary skill and confirm policy validation rejects it
+- confirm the three required research skills preload successfully
 - sign out from Hermes and confirm both Hermes and Oxaide sessions are gone
 - sign out from Oxaide and confirm an existing tenant-runtime cookie is cleared

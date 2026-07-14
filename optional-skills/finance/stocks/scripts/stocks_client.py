@@ -7,6 +7,7 @@ Zero external dependencies - Python stdlib only.
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -26,6 +27,10 @@ AV_BASE = "https://www.alphavantage.co/query"
 
 MAX_RETRIES = 3
 BACKOFF_BASE = 1.5  # seconds
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+MAX_SYMBOLS = 10
+MAX_QUERY_LENGTH = 200
+SYMBOL_PATTERN = re.compile(r"^[A-Z0-9^=.-]{1,32}$")
 
 # Global cookie jar + opener (handles Yahoo Finance session cookies)
 _cookie_jar = CookieJar()
@@ -39,6 +44,46 @@ _crumb: str | None = None
 
 def print_json(data: dict | list) -> None:
     print(json.dumps(data, indent=2, ensure_ascii=False))
+
+
+def retrieved_at() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def normalize_symbol(value: str) -> str:
+    symbol = str(value or "").strip().upper()
+    if not SYMBOL_PATTERN.fullmatch(symbol):
+        raise ValueError(
+            "Symbol must be 1-32 characters using letters, numbers, ^, =, ., or -."
+        )
+    return symbol
+
+
+def normalize_symbols(values: list[str], *, minimum: int = 1) -> list[str]:
+    if not minimum <= len(values) <= MAX_SYMBOLS:
+        raise ValueError(f"Expected {minimum}-{MAX_SYMBOLS} symbols")
+    normalized = [normalize_symbol(value) for value in values]
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("Duplicate symbols are not allowed")
+    return normalized
+
+
+def public_chart_url(symbol: str, interval: str, range_: str) -> str:
+    encoded = urllib.parse.quote(normalize_symbol(symbol), safe="")
+    query = urllib.parse.urlencode({"interval": interval, "range": range_})
+    return f"{YF_BASE}/v8/finance/chart/{encoded}?{query}"
+
+
+def source_metadata(url: str, *, price_field: str | None = None) -> dict:
+    metadata = {
+        "provider": "Yahoo Finance",
+        "source_url": url,
+        "retrieved_at": retrieved_at(),
+        "unofficial_endpoint": True,
+    }
+    if price_field:
+        metadata["price_field"] = price_field
+    return metadata
 
 
 def fmt_price(value) -> str | None:
@@ -121,7 +166,9 @@ def fetch_url(url: str, headers: dict | None = None, retries: int = MAX_RETRIES)
         try:
             req = _build_request(url, headers)
             with _opener.open(req, timeout=15) as resp:
-                raw = resp.read()
+                raw = resp.read(MAX_RESPONSE_BYTES + 1)
+                if len(raw) > MAX_RESPONSE_BYTES:
+                    raise ValueError("Provider response exceeded the 8 MiB safety limit")
                 return json.loads(raw.decode("utf-8", errors="replace"))
         except urllib.error.HTTPError as e:
             last_err = e
@@ -133,7 +180,7 @@ def fetch_url(url: str, headers: dict | None = None, retries: int = MAX_RETRIES)
             last_err = e
             wait = BACKOFF_BASE ** attempt
             time.sleep(wait)
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, ValueError) as e:
             last_err = e
             break
     return None
@@ -194,21 +241,25 @@ def yf_url(path: str, params: dict | None = None) -> str:
 
 
 def yf_chart(symbol: str, interval: str = "1d", range_: str = "1d") -> dict | None:
+    symbol = normalize_symbol(symbol)
     params = {"interval": interval, "range": range_}
     crumb = _fetch_crumb()
     if crumb:
         params["crumb"] = crumb
     qs = urllib.parse.urlencode(params)
-    url = f"{YF_BASE}/v8/finance/chart/{urllib.parse.quote(symbol)}?{qs}"
+    url = f"{YF_BASE}/v8/finance/chart/{urllib.parse.quote(symbol, safe='')}?{qs}"
     data = fetch_url(url)
     if data is None:
         # fallback to query2
-        url2 = f"{YF_BASE2}/v8/finance/chart/{urllib.parse.quote(symbol)}?{qs}"
+        url2 = f"{YF_BASE2}/v8/finance/chart/{urllib.parse.quote(symbol, safe='')}?{qs}"
         data = fetch_url(url2)
     return data
 
 
 def yf_search(query: str, count: int = 5) -> dict | None:
+    query = str(query or "").strip()
+    if not query or len(query) > MAX_QUERY_LENGTH:
+        raise ValueError(f"Search query must be 1-{MAX_QUERY_LENGTH} characters")
     params = {"q": query, "quotesCount": count, "newsCount": 0}
     crumb = _fetch_crumb()
     if crumb:
@@ -224,16 +275,17 @@ def yf_search(query: str, count: int = 5) -> dict | None:
 
 def yf_quote_summary(symbol: str) -> dict | None:
     """Fetch detailed quote summary (quoteSummary) for PE, market cap, etc."""
+    symbol = normalize_symbol(symbol)
     modules = "summaryDetail,defaultKeyStatistics,price"
     params = {"modules": modules}
     crumb = _fetch_crumb()
     if crumb:
         params["crumb"] = crumb
     qs = urllib.parse.urlencode(params)
-    url = f"{YF_BASE}/v11/finance/quoteSummary/{urllib.parse.quote(symbol)}?{qs}"
+    url = f"{YF_BASE}/v11/finance/quoteSummary/{urllib.parse.quote(symbol, safe='')}?{qs}"
     data = fetch_url(url)
     if data is None:
-        url2 = f"{YF_BASE2}/v11/finance/quoteSummary/{urllib.parse.quote(symbol)}?{qs}"
+        url2 = f"{YF_BASE2}/v11/finance/quoteSummary/{urllib.parse.quote(symbol, safe='')}?{qs}"
         data = fetch_url(url2)
     return data
 
@@ -355,9 +407,13 @@ def extract_quote_summary_fields(qs_data: dict) -> dict:
 def cmd_quote(symbols: list[str]) -> None:
     results = []
 
-    for sym in symbols:
-        sym = sym.upper().strip()
-        entry = {"symbol": sym, "data_source": "Yahoo Finance"}
+    for sym in normalize_symbols(symbols):
+        chart_source = public_chart_url(sym, "1d", "1d")
+        entry = {
+            "symbol": sym,
+            "data_source": "Yahoo Finance",
+            "source": source_metadata(chart_source, price_field="regular_market_price"),
+        }
 
         # Fetch chart for price data
         chart_data = yf_chart(sym, interval="1d", range_="1d")
@@ -408,6 +464,7 @@ def cmd_quote(symbols: list[str]) -> None:
 
 
 def cmd_search(query: str) -> None:
+    query = str(query or "").strip()
     data = yf_search(query, count=5)
     if not data:
         print_json({"error": "Search failed or no results", "query": query, "data_source": "Yahoo Finance"})
@@ -432,6 +489,9 @@ def cmd_search(query: str) -> None:
         "query": query,
         "matches": results,
         "data_source": "Yahoo Finance",
+        "source": source_metadata(
+            f"{YF_BASE}/v1/finance/search?{urllib.parse.urlencode({'q': query, 'quotesCount': 5, 'newsCount': 0})}"
+        ),
     }
     print_json(output)
 
@@ -447,7 +507,7 @@ def cmd_history(symbol: str, range_: str = "1mo") -> None:
         print_json({"error": f"Invalid range '{range_}'. Valid: {', '.join(valid_ranges)}"})
         return
 
-    sym = symbol.upper().strip()
+    sym = normalize_symbol(symbol)
     chart_data = yf_chart(sym, interval="1d", range_=range_)
 
     if not chart_data:
@@ -465,6 +525,8 @@ def cmd_history(symbol: str, range_: str = "1mo") -> None:
     indicators = r.get("indicators", {})
     quote_list = indicators.get("quote") or [{}]
     ohlcv = quote_list[0] if quote_list else {}
+    adjusted_list = indicators.get("adjclose") or [{}]
+    adjusted = adjusted_list[0].get("adjclose") if adjusted_list else []
 
     opens = ohlcv.get("open") or []
     closes = ohlcv.get("close") or []
@@ -488,11 +550,17 @@ def cmd_history(symbol: str, range_: str = "1mo") -> None:
             "high": _v(highs, i),
             "low": _v(lows, i),
             "volume": _v(volumes, i),
+            "adjusted_close": _v(adjusted or [], i),
         }
         history.append(entry)
 
-    # Stats
-    valid_closes = [c["close"] for c in history if c["close"] is not None]
+    # Total return prefers adjusted close so distributions and splits are not
+    # silently treated as losses. Raw OHLC fields remain available separately.
+    valid_closes = [
+        c["adjusted_close"] if c["adjusted_close"] is not None else c["close"]
+        for c in history
+        if c["adjusted_close"] is not None or c["close"] is not None
+    ]
     stats = {}
     if valid_closes:
         stats["min"] = fmt_price(min(valid_closes))
@@ -514,6 +582,10 @@ def cmd_history(symbol: str, range_: str = "1mo") -> None:
         "stats": stats,
         "history": history,
         "data_source": "Yahoo Finance",
+        "source": source_metadata(
+            public_chart_url(sym, "1d", range_),
+            price_field="adjusted_close_with_raw_ohlcv",
+        ),
     }
     print_json(output)
 
@@ -530,8 +602,8 @@ def cmd_compare(symbols: list[str]) -> None:
 
     comparisons = []
 
-    for sym in symbols:
-        sym = sym.upper().strip()
+    normalized_symbols = normalize_symbols(symbols, minimum=2)
+    for sym in normalized_symbols:
         entry = {
             "symbol": sym,
             "name": None,
@@ -584,8 +656,12 @@ def cmd_compare(symbols: list[str]) -> None:
 
     output = {
         "comparison": comparisons,
-        "symbols": [s.upper() for s in symbols],
+        "symbols": normalized_symbols,
         "data_source": "Yahoo Finance",
+        "sources": [
+            source_metadata(public_chart_url(symbol, "1d", "1d"), price_field="regular_market_price")
+            for symbol in normalized_symbols
+        ],
     }
     print_json(output)
 
@@ -596,8 +672,8 @@ def cmd_compare(symbols: list[str]) -> None:
 
 
 def cmd_crypto(symbol: str, vs: str = "USD") -> None:
-    sym = symbol.upper().strip()
-    vs = vs.upper().strip()
+    sym = normalize_symbol(symbol)
+    vs = normalize_symbol(vs)
 
     # If user already passed BTC-USD, keep as-is; otherwise append
     if "-" not in sym:
@@ -661,6 +737,10 @@ def cmd_crypto(symbol: str, vs: str = "USD") -> None:
         "exchange": meta.get("exchangeName"),
         "short_name": meta.get("shortName") or meta.get("longName"),
         "data_source": "Yahoo Finance",
+        "source": source_metadata(
+            public_chart_url(ticker, "1d", "1d"),
+            price_field="regular_market_price",
+        ),
     }
     print_json(output)
 

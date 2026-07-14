@@ -2639,12 +2639,52 @@ def _load_tool_progress_mode() -> str:
     return mode if mode in {"off", "new", "all", "verbose"} else "all"
 
 
+_OXAIDE_APPROVED_TOOLSETS = frozenset(
+    {
+        "web",
+        "terminal",
+        "file",
+        "memory",
+        "session_search",
+        "clarify",
+        "delegation",
+        "todo",
+        "vision",
+    }
+)
+_OXAIDE_REQUIRED_SKILLS = frozenset(
+    {"investment-research", "market-return-analysis", "stocks"}
+)
+
+
+def _is_oxaide_tenant_runtime() -> bool:
+    return bool(
+        os.environ.get("HERMES_OXAIDE_WORKSPACE_ID", "").strip()
+        and os.environ.get("HERMES_OXAIDE_RUNTIME_KEY", "").strip()
+    )
+
+
 def _load_enabled_toolsets() -> list[str] | None:
     explicit = [
         item.strip()
         for item in os.environ.get("HERMES_TUI_TOOLSETS", "").split(",")
         if item.strip()
     ]
+    if _is_oxaide_tenant_runtime():
+        if not explicit:
+            raise RuntimeError("Oxaide tenant runtime requires HERMES_TUI_TOOLSETS")
+        requested = set(explicit)
+        rejected = sorted(requested - _OXAIDE_APPROVED_TOOLSETS)
+        missing = sorted(_OXAIDE_APPROVED_TOOLSETS - requested)
+        if rejected or missing:
+            parts = []
+            if rejected:
+                parts.append(f"unapproved: {', '.join(rejected)}")
+            if missing:
+                parts.append(f"missing: {', '.join(missing)}")
+            raise RuntimeError(
+                "Invalid Oxaide tenant tool policy (" + "; ".join(parts) + ")"
+            )
     cfg = None
     fallback_notice = None
 
@@ -4160,6 +4200,19 @@ def _parse_tui_skills_env() -> list[str]:
         if item and item not in seen:
             seen.add(item)
             skills.append(item)
+    if _is_oxaide_tenant_runtime():
+        requested = set(skills)
+        rejected = sorted(requested - _OXAIDE_REQUIRED_SKILLS)
+        missing = sorted(_OXAIDE_REQUIRED_SKILLS - requested)
+        if rejected or missing:
+            parts = []
+            if rejected:
+                parts.append(f"unapproved: {', '.join(rejected)}")
+            if missing:
+                parts.append(f"missing: {', '.join(missing)}")
+            raise RuntimeError(
+                "Invalid Oxaide tenant skill policy (" + "; ".join(parts) + ")"
+            )
     return skills
 
 
