@@ -1,0 +1,160 @@
+{
+  "disclaimer": "Research and decision support only; not financial advice, a personalized recommendation, portfolio management, or a guarantee of returns.",
+  "end_date": "2026-07-13",
+  "frequency": "daily",
+  "limitations": [
+    "Historical observations do not forecast future returns.",
+    "Daily sampling does not describe intraday or monthly distributions.",
+    "The sample can mix materially different market regimes.",
+    "Yahoo Finance is an unofficial source and may revise or omit data."
+  ],
+  "observation_count": 31,
+  "price_field": "adjusted_close",
+  "proxy_note": "SPY is an investable S&P 500 proxy, not the index itself.",
+  "retrieved_at": "2026-07-14T03:02:22+00:00",
+  "return_count": 30,
+  "returns": [
+    {
+      "date": "2026-05-29",
+      "return": 0.0024914048034492264
+    },
+    {
+      "date": "2026-06-01",
+      "return": 0.0027231134609038143
+    },
+    {
+      "date": "2026-06-02",
+      "return": 0.0013579397972762752
+    },
+    {
+      "date": "2026-06-03",
+      "return": -0.00701718232049986
+    },
+    {
+      "date": "2026-06-04",
+      "return": 0.0037786857621391334
+    },
+    {
+      "date": "2026-06-05",
+      "return": -0.025809371248925683
+    },
+    {
+      "date": "2026-06-08",
+      "return": 0.002264172608771542
+    },
+    {
+      "date": "2026-06-09",
+      "return": -0.0029354505508077944
+    },
+    {
+      "date": "2026-06-10",
+      "return": -0.015765562508027298
+    },
+    {
+      "date": "2026-06-11",
+      "return": 0.016996847886747934
+    },
+    {
+      "date": "2026-06-12",
+      "return": 0.005408247901529384
+    },
+    {
+      "date": "2026-06-15",
+      "return": 0.01763396989375332
+    },
+    {
+      "date": "2026-06-16",
+      "return": -0.005961562844234103
+    },
+    {
+      "date": "2026-06-17",
+      "return": -0.012487870885051433
+    },
+    {
+      "date": "2026-06-18",
+      "return": 0.010396992441959574
+    },
+    {
+      "date": "2026-06-22",
+      "return": -0.003146979693962715
+    },
+    {
+      "date": "2026-06-23",
+      "return": -0.014521954010491611
+    },
+    {
+      "date": "2026-06-24",
+      "return": -0.0004635170636431152
+    },
+    {
+      "date": "2026-06-25",
+      "return": 0.0014456352254532678
+    },
+    {
+      "date": "2026-06-26",
+      "return": -0.007231373616869652
+    },
+    {
+      "date": "2026-06-29",
+      "return": 0.016474862380159383
+    },
+    {
+      "date": "2026-06-30",
+      "return": 0.007786800986842035
+    },
+    {
+      "date": "2026-07-01",
+      "return": -0.001352504438058455
+    },
+    {
+      "date": "2026-07-02",
+      "return": -0.001314069480687241
+    },
+    {
+      "date": "2026-07-06",
+      "return": 0.008727409093039817
+    },
+    {
+      "date": "2026-07-07",
+      "return": -0.004751899671231685
+    },
+    {
+      "date": "2026-07-08",
+      "return": -0.0030894297130047432
+    },
+    {
+      "date": "2026-07-09",
+      "return": 0.00846525000257925
+    },
+    {
+      "date": "2026-07-10",
+      "return": 0.0043101596888019955
+    },
+    {
+      "date": "2026-07-13",
+      "return": -0.007656174850540931
+    }
+  ],
+  "schema_version": 1,
+  "source_url": "https://query1.finance.yahoo.com/v8/finance/chart/SPY?range=3mo&interval=1d&events=history",
+  "start_date": "2026-05-28",
+  "statistics": {
+    "annualized_return": -0.038298561774842366,
+    "annualized_volatility": 0.15609228246979803,
+    "best_day": 0.01763396989375332,
+    "daily_volatility": 0.009832889547417442,
+    "excess_kurtosis": 0.2916884137430582,
+    "historical_expected_shortfall_95": -0.02078746687847649,
+    "maximum_drawdown": -0.04494652583696357,
+    "mean_daily_return": -0.00010811369875434555,
+    "median_daily_return": 0.00044721136681658,
+    "p01": -0.02289666671406515,
+    "p05": -0.01520593868413624,
+    "p95": 0.016761954408783086,
+    "p99": 0.017449204511721758,
+    "positive_day_ratio": 0.5,
+    "skewness": -0.32154245269748416,
+    "worst_day": -0.025809371248925683
+  },
+  "symbol": "SPY"
+}
