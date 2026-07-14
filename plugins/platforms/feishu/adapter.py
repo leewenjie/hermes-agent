@@ -61,6 +61,7 @@ import re
 import threading
 import time
 import uuid
+import warnings
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -86,6 +87,12 @@ except ImportError:
     websockets = None  # type: ignore[assignment]
 
 try:
+    warnings.filterwarnings(
+        "ignore",
+        message=r"pkg_resources is deprecated as an API.*",
+        category=UserWarning,
+        module=r"lark_oapi\.ws\.pb\.google",
+    )
     import lark_oapi as lark
     from lark_oapi.api.application.v6 import GetApplicationRequest
     from lark_oapi.api.im.v1 import (
