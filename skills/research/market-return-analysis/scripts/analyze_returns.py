@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+import html
 import json
 import math
 from pathlib import Path
+import re
 import statistics
 from typing import Any, Iterable
 import urllib.parse
@@ -15,9 +17,48 @@ import urllib.request
 
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 VALID_RANGES = ("1y", "2y", "5y", "10y", "max")
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+SYMBOL_PATTERN = re.compile(r"^[A-Z0-9^=.-]{1,32}$")
+
+
+def normalize_symbol(value: str) -> str:
+    symbol = str(value or "").strip().upper()
+    if not SYMBOL_PATTERN.fullmatch(symbol):
+        raise ValueError(
+            "Symbol must be 1-32 characters using letters, numbers, ^, =, ., or -."
+        )
+    return symbol
+
+
+def artifact_symbol(symbol: str) -> str:
+    return re.sub(r"[^A-Z0-9.-]+", "_", normalize_symbol(symbol)).strip("._")
+
+
+def normalize_prices(prices: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_date: dict[str, float] = {}
+    for item in prices:
+        if not isinstance(item, dict):
+            continue
+        raw_date = str(item.get("date") or "").strip()
+        value = item.get("adjusted_close")
+        try:
+            parsed_date = date.fromisoformat(raw_date).isoformat()
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if numeric > 0 and math.isfinite(numeric):
+            by_date[parsed_date] = numeric
+    normalized = [
+        {"date": observed_at, "adjusted_close": by_date[observed_at]}
+        for observed_at in sorted(by_date)
+    ]
+    if len(normalized) < 2:
+        raise ValueError("At least two valid adjusted-price observations are required")
+    return normalized
 
 
 def fetch_prices(symbol: str, period: str) -> tuple[list[dict[str, Any]], str]:
+    symbol = normalize_symbol(symbol)
     encoded_symbol = urllib.parse.quote(symbol, safe="")
     source_url = YAHOO_CHART_URL.format(symbol=encoded_symbol)
     source_url += "?" + urllib.parse.urlencode(
@@ -31,7 +72,10 @@ def fetch_prices(symbol: str, period: str) -> tuple[list[dict[str, Any]], str]:
         },
     )
     with urllib.request.urlopen(request, timeout=20) as response:
-        payload = json.loads(response.read(8 * 1024 * 1024))
+        raw = response.read(MAX_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raise RuntimeError("Yahoo Finance response exceeded the 8 MiB safety limit")
+        payload = json.loads(raw)
 
     chart = payload.get("chart") if isinstance(payload, dict) else None
     error = chart.get("error") if isinstance(chart, dict) else None
@@ -60,30 +104,21 @@ def fetch_prices(symbol: str, period: str) -> tuple[list[dict[str, Any]], str]:
             continue
         date = datetime.fromtimestamp(int(timestamp), tz=timezone.utc).date().isoformat()
         prices.append({"date": date, "adjusted_close": float(value)})
-    if len(prices) < 2:
-        raise RuntimeError("Fewer than two valid adjusted-price observations")
-    return prices, source_url
+    try:
+        return normalize_prices(prices), source_url
+    except ValueError as exc:
+        raise RuntimeError("Fewer than two valid adjusted-price observations") from exc
 
 
 def load_fixture(path: Path) -> tuple[str, list[dict[str, Any]], str]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("Input JSON must be an object")
-    symbol = str(payload.get("symbol") or "SPY").strip().upper()
+    symbol = normalize_symbol(str(payload.get("symbol") or "SPY"))
     raw_prices = payload.get("prices")
     if not isinstance(raw_prices, list):
         raise ValueError("Input JSON requires a prices array")
-    prices = []
-    for item in raw_prices:
-        if not isinstance(item, dict):
-            continue
-        date = str(item.get("date") or "").strip()
-        value = item.get("adjusted_close")
-        if date and isinstance(value, (int, float)) and float(value) > 0:
-            prices.append({"date": date, "adjusted_close": float(value)})
-    prices.sort(key=lambda row: row["date"])
-    if len(prices) < 2:
-        raise ValueError("Input JSON requires at least two valid prices")
+    prices = normalize_prices(raw_prices)
     source = str(payload.get("source_url") or path.resolve().as_uri())
     return symbol, prices, source
 
@@ -116,6 +151,8 @@ def _maximum_drawdown(prices: Iterable[float]) -> float:
 
 
 def analyze(symbol: str, prices: list[dict[str, Any]], source_url: str) -> dict[str, Any]:
+    symbol = normalize_symbol(symbol)
+    prices = normalize_prices(prices)
     returns = [
         prices[index]["adjusted_close"] / prices[index - 1]["adjusted_close"] - 1.0
         for index in range(1, len(prices))
@@ -143,7 +180,10 @@ def analyze(symbol: str, prices: list[dict[str, Any]], source_url: str) -> dict[
     p99 = percentile(returns, 0.99)
     tail = [value for value in returns if value <= p05]
     periods_per_year = 252
-    years = max((len(prices) - 1) / periods_per_year, 1 / periods_per_year)
+    start = date.fromisoformat(prices[0]["date"])
+    end = date.fromisoformat(prices[-1]["date"])
+    elapsed_days = (end - start).days
+    years = max(elapsed_days / 365.2425, 1 / 365.2425)
     annualized_return = (
         (prices[-1]["adjusted_close"] / prices[0]["adjusted_close"]) ** (1 / years)
         - 1.0
@@ -237,6 +277,9 @@ def render_svg(report: dict[str, Any]) -> str:
             f'height="{bar_height:.2f}" fill="#10b981" opacity="0.82" />'
         )
     stats = report["statistics"]
+    symbol = html.escape(str(report["symbol"]), quote=True)
+    start_date = html.escape(str(report["start_date"]), quote=True)
+    end_date = html.escape(str(report["end_date"]), quote=True)
     summary = (
         f"n={report['return_count']:,}  mean={stats['mean_daily_return']:.2%}  "
         f"vol={stats['daily_volatility']:.2%}  p05={stats['p05']:.2%}  "
@@ -260,8 +303,8 @@ def render_svg(report: dict[str, Any]) -> str:
         [
             '<svg xmlns="http://www.w3.org/2000/svg" width="960" height="560" viewBox="0 0 960 560">',
             '<rect width="960" height="560" fill="#ffffff" />',
-            f'<text x="{left}" y="38" font-size="25" font-weight="700" fill="#111827">{report["symbol"]} daily adjusted-return distribution</text>',
-            f'<text x="{left}" y="66" font-size="14" fill="#4b5563">{report["start_date"]} to {report["end_date"]}</text>',
+            f'<text x="{left}" y="38" font-size="25" font-weight="700" fill="#111827">{symbol} daily adjusted-return distribution</text>',
+            f'<text x="{left}" y="66" font-size="14" fill="#4b5563">{start_date} to {end_date}</text>',
             f'<line x1="{left}" y1="{top + chart_height}" x2="{left + chart_width}" y2="{top + chart_height}" stroke="#9ca3af" />',
             *bars,
             zero_line,
@@ -275,7 +318,9 @@ def render_svg(report: dict[str, Any]) -> str:
 def render_markdown(report: dict[str, Any]) -> str:
     stats = report["statistics"]
     pct = lambda value: f"{value:.2%}"
-    return f"""# {report['symbol']} return distribution
+    symbol = str(report["symbol"]).replace("\\", "\\\\").replace("`", "\\`")
+    source_url = str(report["source_url"]).replace(">", "%3E").replace("<", "%3C")
+    return f"""# {symbol} return distribution
 
 ## Measurement contract
 
@@ -304,7 +349,7 @@ def render_markdown(report: dict[str, Any]) -> str:
 | Skewness | {stats['skewness']:.3f} |
 | Excess kurtosis | {stats['excess_kurtosis']:.3f} |
 
-![Return distribution]({report['symbol']}_return_distribution.svg)
+![Return distribution]({artifact_symbol(report['symbol'])}_return_distribution.svg)
 
 ## Limits
 
@@ -312,7 +357,7 @@ def render_markdown(report: dict[str, Any]) -> str:
 
 ## Source
 
-- URL: {report['source_url']}
+- URL: <{source_url}>
 - Retrieved: {report['retrieved_at']}
 
 > {report['disclaimer']}
@@ -321,7 +366,7 @@ def render_markdown(report: dict[str, Any]) -> str:
 
 def write_artifacts(report: dict[str, Any], output_dir: Path) -> dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"{report['symbol']}_return_distribution"
+    stem = f"{artifact_symbol(report['symbol'])}_return_distribution"
     paths = {
         "json": output_dir / f"{stem}.json",
         "markdown": output_dir / f"{stem}.md",
@@ -351,9 +396,10 @@ def main() -> int:
     if args.input_json:
         symbol, prices, source_url = load_fixture(args.input_json)
     else:
-        symbol = args.symbol.strip().upper()
-        if not symbol:
-            raise SystemExit("--symbol cannot be empty")
+        try:
+            symbol = normalize_symbol(args.symbol)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
         prices, source_url = fetch_prices(symbol, args.period)
     report = analyze(symbol, prices, source_url)
     paths = write_artifacts(report, args.output_dir)

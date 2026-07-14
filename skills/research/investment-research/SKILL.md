@@ -36,14 +36,14 @@ suitability decisions, guaranteed returns, or unsupported price targets.
 - The `web_search` and `web_extract` tools for current public sources when no
   structured finance source is configured.
 - Install optional skills only when their data or output is required:
-  - `official/finance/stocks` for Yahoo quotes, history, and comparisons.
   - `official/blockchain/hyperliquid` for read-only perp/spot data and trade review.
   - `official/finance/excel-author` plus `dcf-model` or `comps-analysis` for models.
   - `official/research/blogwatcher` for recurring feed monitoring.
   - `official/research/polymarket` for prediction-market prices and history.
 
-The custom `market-return-analysis` skill is bundled and needs no API key. It
-uses Yahoo adjusted-close data as a proxy source and writes an evidence pack.
+The bundled `stocks` skill provides timestamped Yahoo quotes, adjusted history,
+and comparisons. The bundled `market-return-analysis` skill needs no API key,
+uses Yahoo adjusted-close data as a proxy source, and writes an evidence pack.
 
 ## How to Run
 
@@ -67,7 +67,7 @@ uses Yahoo adjusted-close data as a proxy source and writes an evidence pack.
 | Question | Primary skill | Output |
 | --- | --- | --- |
 | S&P/ETF return distribution, drawdowns, tails | `market-return-analysis` | JSON, Markdown, SVG |
-| Current quote, OHLCV, ticker search, side-by-side | optional `stocks` | JSON |
+| Current quote, OHLCV, ticker search, side-by-side | `stocks` | JSON |
 | Peer valuation and operating metrics | `comps-analysis` + `excel-author` | Auditable `.xlsx` |
 | Intrinsic-value scenarios and sensitivity | `dcf-model` + `excel-author` | Formula-driven `.xlsx` |
 | Crypto candles, funding, order book, trade review | optional `hyperliquid` | JSON or review memo |

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 from pathlib import Path
 import re
+from unittest.mock import patch
 
+import pytest
 import yaml
 
 
@@ -67,3 +70,38 @@ def test_artifact_pack_is_complete_and_linked(tmp_path):
     assert "not financial advice" in markdown
     assert "<svg" in svg
     assert "daily adjusted-return distribution" in svg
+
+
+def test_symbol_validation_confines_artifact_paths(tmp_path):
+    module = _module()
+    for value in ("../../escape", "AAPL<script>", "", "A" * 33):
+        with pytest.raises(ValueError):
+            module.normalize_symbol(value)
+
+    report = module.analyze("^GSPC", _prices(), "https://example.test/index")
+    paths = module.write_artifacts(report, tmp_path)
+    assert all(Path(path).parent == tmp_path.resolve() for path in paths.values())
+    assert Path(paths["svg"]).name == "GSPC_return_distribution.svg"
+
+
+def test_prices_are_sorted_deduplicated_and_annualized_by_calendar_time():
+    module = _module()
+    prices = [
+        {"date": "2025-01-01", "adjusted_close": 100},
+        {"date": "2026-01-01", "adjusted_close": 110},
+        {"date": "2025-01-01", "adjusted_close": 101},
+        {"date": "not-a-date", "adjusted_close": 999},
+    ]
+    report = module.analyze("SPY", prices, "https://example.test/spy")
+    assert report["observation_count"] == 2
+    assert report["start_date"] == "2025-01-01"
+    assert report["end_date"] == "2026-01-01"
+    assert report["statistics"]["annualized_return"] == pytest.approx(110 / 101 - 1, rel=0.002)
+
+
+def test_live_fetch_rejects_oversized_payload():
+    module = _module()
+    response = io.BytesIO(b"x" * (module.MAX_RESPONSE_BYTES + 1))
+    with patch.object(module.urllib.request, "urlopen", return_value=response):
+        with pytest.raises(RuntimeError, match="8 MiB"):
+            module.fetch_prices("SPY", "1y")
