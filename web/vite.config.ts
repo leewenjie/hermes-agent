@@ -86,6 +86,9 @@ export default defineConfig({
   build: {
     outDir: "../hermes_cli/web_dist",
     emptyOutDir: true,
+    // The dashboard intentionally ships as one authenticated SPA with its
+    // terminal, charting, and plugin shells available immediately.
+    chunkSizeWarningLimit: 2200,
   },
   server: {
     proxy: {
