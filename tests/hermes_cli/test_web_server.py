@@ -3188,6 +3188,69 @@ class TestWebServerEndpoints:
 
         assert seen_encodings == {"index": "utf-8", "css": "utf-8"}
 
+    def test_spa_injects_oxaide_branding_from_dashboard_config(self, monkeypatch, tmp_path):
+        from fastapi import FastAPI
+        from starlette.testclient import TestClient
+        import hermes_cli.web_server as ws
+
+        dist = tmp_path / "web_dist"
+        (dist / "assets").mkdir(parents=True)
+        (dist / "index.html").write_text("<html><head></head><body>UI</body></html>", encoding="utf-8")
+        monkeypatch.setattr(ws, "WEB_DIST", dist)
+        monkeypatch.setattr(ws, "load_config", lambda: {
+            "dashboard": {
+                "branding": {
+                    "product": "oxaide",
+                    "name": "Oxaide Research",
+                    "org_name": "Oxaide",
+                    "org_url": "https://oxaide.com",
+                    "billing_url": "https://oxaide.com/console/billing",
+                }
+            }
+        })
+
+        app_ = FastAPI()
+        ws.mount_spa(app_)
+        response = TestClient(app_).get("/chat")
+
+        assert response.status_code == 200
+        assert "window.__HERMES_DASHBOARD_BRANDING__=" in response.text
+        assert '"product":"oxaide"' in response.text
+        assert '"name":"Oxaide Research"' in response.text
+        assert '"billing_url":"https://oxaide.com/console/billing"' in response.text
+
+    def test_spa_uses_oxaide_defaults_for_pinned_tenant_runtime(self, monkeypatch, tmp_path):
+        from fastapi import FastAPI
+        from starlette.testclient import TestClient
+        import hermes_cli.web_server as ws
+
+        dist = tmp_path / "web_dist"
+        (dist / "assets").mkdir(parents=True)
+        (dist / "index.html").write_text("<html><head></head><body>UI</body></html>", encoding="utf-8")
+        monkeypatch.setattr(ws, "WEB_DIST", dist)
+        monkeypatch.setattr(ws, "load_config", lambda: {
+            "dashboard": {
+                "branding": {
+                    "product": "hermes",
+                    "name": "Hermes Agent",
+                    "org_name": "Nous Research",
+                }
+            }
+        })
+        monkeypatch.setenv("HERMES_OXAIDE_DEMO_AUTH_SECRET", "secret")
+        monkeypatch.setenv("HERMES_OXAIDE_WORKSPACE_ID", "workspace-1")
+        monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", "runtime-1")
+
+        app_ = FastAPI()
+        ws.mount_spa(app_)
+        response = TestClient(app_).get("/chat")
+
+        assert response.status_code == 200
+        assert '"product":"oxaide"' in response.text
+        assert '"name":"Oxaide Research"' in response.text
+        assert '"org_name":"Oxaide"' in response.text
+        assert '"account_url":"https://oxaide.com/app"' in response.text
+
     def test_headless_serve_disables_spa_even_with_a_dist(self, monkeypatch, tmp_path):
         """`hermes serve` (HERMES_SERVE_HEADLESS) must NOT serve the SPA even
         when a built dist is present — only the API/WS surface is reachable."""

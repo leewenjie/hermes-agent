@@ -111,6 +111,7 @@ export function AuthWidget({ className }: AuthWidgetProps) {
   // populates user_id; the fallthroughs are forward-compat for a future
   // Portal that adds a userinfo endpoint (OQ-C1 in the plan).
   const label = me.display_name || me.email || truncateUserId(me.user_id);
+  const providerLabel = me.provider === "oxaide-demo" ? "Oxaide account" : me.provider;
 
   return (
     <div
@@ -129,14 +130,14 @@ export function AuthWidget({ className }: AuthWidgetProps) {
           {label}
         </span>
         <span className="truncate text-muted-foreground/70">
-          via {me.provider}
+          via {providerLabel}
         </span>
       </div>
       <button
         type="button"
         onClick={handleLogout}
         className={cn(
-          "shrink-0 rounded p-1.5 text-muted-foreground/70",
+          "flex shrink-0 items-center gap-1 rounded px-2 py-1.5 text-muted-foreground/70",
           "transition-colors hover:bg-current/10 hover:text-foreground",
           "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-current/40",
         )}
@@ -144,6 +145,7 @@ export function AuthWidget({ className }: AuthWidgetProps) {
         title="Log out"
       >
         <LogOut className="h-3.5 w-3.5" />
+        <span>Sign out</span>
       </button>
     </div>
   );

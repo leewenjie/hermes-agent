@@ -140,7 +140,7 @@ export const coreCommands: SlashCommand[] = [
   },
 
   {
-    help: 'update Hermes Agent to the latest version (exits TUI)',
+    help: 'update the agent runtime to the latest version (exits TUI)',
     name: 'update',
     run: (_arg, ctx) => {
       if (DASHBOARD_TUI_MODE) {

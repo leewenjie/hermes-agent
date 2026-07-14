@@ -36,6 +36,8 @@ export interface ThemeColors {
 
 export interface ThemeBrand {
   name: string
+  org: string
+  tagline: string
   icon: string
   prompt: string
   welcome: string
@@ -233,12 +235,23 @@ function normalizeAnsiForeground(color: string): string {
 
 // ── Defaults ─────────────────────────────────────────────────────────
 
+const OXAIDE_STARTUP = process.env.HERMES_INTERNAL_TUI_SKIN === 'oxaide'
+const OXAIDE_STARTUP_LOGO = `[bold #5FD0B8]╭────────────────────────╮[/]
+[bold #2A8B78]│[/] [bold #E8F5F1]OXAIDE RESEARCH[/]        [bold #2A8B78]│[/]
+[bold #5FD0B8]╰────────────────────────╯[/]`
+const OXAIDE_STARTUP_HERO = `[#2A8B78]      ╭────────╮[/]
+[#5FD0B8]   ╭──╯   ◇    ╰──╮[/]
+[#8ADBCB]   ╰──╮        ╭──╯[/]
+[#2A8B78]      ╰────────╯[/]`
+
 const BRAND: ThemeBrand = {
-  name: 'Hermes Agent',
+  name: OXAIDE_STARTUP ? 'Oxaide Research' : 'Hermes Agent',
+  org: OXAIDE_STARTUP ? 'Oxaide' : 'Nous Research',
+  tagline: OXAIDE_STARTUP ? 'Source-linked research workspace' : 'Messenger of the Digital Gods',
   icon: '⚕',
   prompt: '❯',
-  welcome: 'Type your message or /help for commands.',
-  goodbye: 'Goodbye! ⚕',
+  welcome: OXAIDE_STARTUP ? 'Ask a focused research question or use /help.' : 'Type your message or /help for commands.',
+  goodbye: OXAIDE_STARTUP ? 'Research session closed.' : 'Goodbye! ⚕',
   tool: '┊',
   helpHeader: '(^_^)? Commands'
 }
@@ -297,8 +310,8 @@ export const DARK_THEME: Theme = {
 
   brand: BRAND,
 
-  bannerLogo: '',
-  bannerHero: ''
+  bannerLogo: OXAIDE_STARTUP ? OXAIDE_STARTUP_LOGO : '',
+  bannerHero: OXAIDE_STARTUP ? OXAIDE_STARTUP_HERO : ''
 }
 
 // Light-terminal palette: darker golds/ambers that stay legible on white
@@ -576,6 +589,8 @@ export function fromSkin(
 
       brand: {
         name: branding.agent_name ?? d.brand.name,
+        org: branding.org_name ?? d.brand.org,
+        tagline: branding.tagline ?? d.brand.tagline,
         icon: d.brand.icon,
         prompt: cleanPromptSymbol(branding.prompt_symbol, d.brand.prompt),
         welcome: branding.welcome ?? d.brand.welcome,

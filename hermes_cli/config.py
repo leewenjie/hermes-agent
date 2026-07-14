@@ -1954,6 +1954,19 @@ DEFAULT_CONFIG = {
     # Web dashboard settings
     "dashboard": {
         "theme": "default",  # Dashboard visual theme: "default", "midnight", "ember", "mono", "cyberpunk", "rose"
+        "branding": {
+            # Generic Hermes remains the default. Oxaide-hosted runtimes
+            # automatically receive the Oxaide defaults in web_server.py;
+            # local Oxaide development can opt in through config.yaml.
+            "product": "hermes",
+            "name": "Hermes Agent",
+            "short_name": "HA",
+            "org_name": "Nous Research",
+            "org_url": "https://nousresearch.com",
+            "account_url": "",
+            "billing_url": "",
+            "docs_url": "https://hermes-agent.nousresearch.com/docs/",
+        },
         # Hide the token/cost analytics surfaces (Analytics page, token bars and
         # cost figures on the Models page) by default.  The numbers shown there
         # are a local debug estimate: they only count successful main-agent

@@ -155,6 +155,16 @@ class TestSkinManagement:
         init_skin_from_config({"display": {"skin": "ares"}})
         assert get_active_skin_name() == "ares"
 
+    def test_internal_oxaide_skin_override_wins_for_dashboard_child(self, monkeypatch):
+        from hermes_cli.skin_engine import init_skin_from_config, get_active_skin, get_active_skin_name
+
+        monkeypatch.setenv("HERMES_INTERNAL_TUI_SKIN", "oxaide")
+        init_skin_from_config({"display": {"skin": "default"}})
+
+        assert get_active_skin_name() == "oxaide"
+        assert get_active_skin().get_branding("agent_name") == "Oxaide Research"
+        assert get_active_skin().get_branding("org_name") == "Oxaide"
+
     def test_init_skin_from_empty_config(self):
         from hermes_cli.skin_engine import init_skin_from_config, get_active_skin_name
         init_skin_from_config({})
