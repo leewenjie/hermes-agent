@@ -49,6 +49,18 @@ describe("api.getModelOptions", () => {
   });
 });
 
+describe("api.logout", () => {
+  it("returns an Oxaide-branded loopback session to the account shell", async () => {
+    const assign = vi.fn();
+    vi.stubGlobal("window", { location: { assign } });
+    vi.stubGlobal("fetch", jsonFetchMock({ ok: true, redirect_to: "/login" }));
+
+    await api.logout("https://oxaide.com");
+
+    expect(assign).toHaveBeenCalledWith("https://oxaide.com");
+  });
+});
+
 describe("api OAuth helpers", () => {
   it("starts OAuth login in gated mode without requiring an injected session token", async () => {
     vi.stubGlobal("window", { __HERMES_AUTH_REQUIRED__: true });

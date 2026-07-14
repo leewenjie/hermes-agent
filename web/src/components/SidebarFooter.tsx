@@ -2,13 +2,14 @@ import { Typography } from "@nous-research/ui/ui/components/typography/index";
 import type { StatusResponse } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { DashboardBranding } from "@/lib/branding";
-import { CreditCard, ExternalLink, UserRound } from "lucide-react";
+import { CreditCard, ExternalLink, LogOut, UserRound } from "lucide-react";
+import { api } from "@/lib/api";
 
 export function SidebarFooter({ branding, status }: SidebarFooterProps) {
   return (
     <div className="shrink-0 border-t border-current/10">
       {(branding.accountUrl || branding.billingUrl) ? (
-        <div className="grid grid-cols-2 gap-1 px-3 py-2">
+        <div className={cn("grid gap-1 px-3 py-2", branding.product === "oxaide" ? "grid-cols-3" : "grid-cols-2")}>
           {branding.accountUrl ? (
             <a
               href={branding.accountUrl}
@@ -29,14 +30,23 @@ export function SidebarFooter({ branding, status }: SidebarFooterProps) {
               <CreditCard className="h-3.5 w-3.5" /> Billing
             </a>
           ) : null}
+          {branding.product === "oxaide" ? (
+            <button
+              type="button"
+              onClick={() => void api.logout(branding.orgUrl)}
+              className="flex items-center justify-center gap-1.5 rounded px-2 py-1.5 text-xs text-text-secondary transition-colors hover:bg-current/10 hover:text-midground"
+            >
+              <LogOut className="h-3.5 w-3.5" /> Sign out
+            </button>
+          ) : null}
         </div>
       ) : null}
       <div className="flex items-center justify-between gap-2 border-t border-current/10 px-5 py-2.5">
-        <Typography
+        {branding.product !== "oxaide" ? <Typography
           className="font-mono-ui text-xs tabular-nums tracking-[0.08em] text-text-tertiary lowercase"
         >
           {status?.version != null ? `v${status.version}` : "—"}
-        </Typography>
+        </Typography> : <span />}
 
         <a
           href={branding.orgUrl}

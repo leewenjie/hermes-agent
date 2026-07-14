@@ -224,6 +224,7 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
   // hermes_cli/banner.py) and the "connected" label on the collapse toggle.
   const mcpServers = info.mcp_servers ?? []
   const mcpConnected = mcpServers.filter(s => s.connected).length
+  const showRuntimeDetails = t.brand.org !== 'Oxaide'
 
   const toolsBody = () => {
     const shown = toolEntries.slice(0, TOOLSETS_MAX)
@@ -291,11 +292,13 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
             <Text color={t.color.muted}> · {t.brand.org}</Text>
           </Text>
 
-          <Text color={t.color.muted} wrap="truncate-end">
-            {info.cwd || process.cwd()}
-          </Text>
+          {showRuntimeDetails ? (
+            <Text color={t.color.muted} wrap="truncate-end">
+              {info.cwd || process.cwd()}
+            </Text>
+          ) : null}
 
-          {sid && (
+          {showRuntimeDetails && sid && (
             <Text>
               <Text color={t.color.sessionLabel}>Session: </Text>
               <Text color={t.color.sessionBorder}>{sid}</Text>
@@ -321,10 +324,12 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
               {info.model.split('/').pop()}
               <Text color={t.color.muted}> · {t.brand.org}</Text>
             </Text>
-            <Text color={t.color.muted} wrap="truncate-end">
-              {info.cwd || process.cwd()}
-            </Text>
-            {sid && (
+            {showRuntimeDetails ? (
+              <Text color={t.color.muted} wrap="truncate-end">
+                {info.cwd || process.cwd()}
+              </Text>
+            ) : null}
+            {showRuntimeDetails && sid && (
               <Text wrap="truncate-end">
                 <Text color={t.color.sessionLabel}>Session: </Text>
                 <Text color={t.color.sessionBorder}>{sid}</Text>
