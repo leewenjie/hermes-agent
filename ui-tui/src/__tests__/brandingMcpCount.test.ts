@@ -5,7 +5,7 @@ import React from 'react'
 import { describe, expect, it } from 'vitest'
 
 import { SessionPanel } from '../components/branding.js'
-import { DEFAULT_THEME } from '../theme.js'
+import { DEFAULT_THEME, fromSkin } from '../theme.js'
 import type { McpServerStatus, SessionInfo } from '../types.js'
 
 // Invariant under test: the TUI banner's MCP headline counts *connected*
@@ -50,10 +50,10 @@ const baseInfo = (mcp_servers: McpServerStatus[]): SessionInfo => ({
   tools: { file: ['read_file', 'write_file'] }
 })
 
-async function renderFooter(info: SessionInfo): Promise<string> {
+async function renderFooter(info: SessionInfo, t = DEFAULT_THEME): Promise<string> {
   const streams = makeStreams()
 
-  const instance = renderSync(React.createElement(SessionPanel, { info, sid: 'test', t: DEFAULT_THEME }), {
+  const instance = renderSync(React.createElement(SessionPanel, { info, sid: 'test', t }), {
     patchConsole: false,
     stderr: streams.stderr as NodeJS.WriteStream,
     stdin: streams.stdin as NodeJS.ReadStream,
@@ -107,5 +107,35 @@ describe('branding MCP headline count', () => {
 
     expect(frame).toContain('2 MCP')
     expect(frame).not.toContain('3 MCP')
+  })
+})
+
+describe('Oxaide hosted banner privacy', () => {
+  it('hides upstream identity and runtime metadata', async () => {
+    const oxaideTheme = fromSkin(
+      {},
+      {
+        agent_name: 'Oxaide Research',
+        org_name: 'Oxaide',
+        tagline: 'Source-linked research workspace'
+      }
+    )
+
+    const frame = await renderFooter(
+      {
+        ...baseInfo([]),
+        cwd: '/opt/hermes',
+        release_date: '2026.7.2',
+        version: '0.18.2'
+      },
+      oxaideTheme
+    )
+
+    expect(frame).toContain('Oxaide Research')
+    expect(frame).not.toContain('Hermes')
+    expect(frame).not.toContain('Nous Research')
+    expect(frame).not.toContain('/opt/hermes')
+    expect(frame).not.toContain('Session:')
+    expect(frame).not.toContain('0.18.2')
   })
 })

@@ -469,7 +469,7 @@ const StatusRulePane = memo(function StatusRulePane({
         bgCount={ui.bgTasks.size}
         busy={ui.busy}
         cols={composer.cols}
-        cwdLabel={status.cwdLabel}
+        cwdLabel={ui.theme.brand.org === 'Oxaide' ? '' : status.cwdLabel}
         indicatorStyle={ui.indicatorStyle}
         lastTurnEndedAt={status.lastTurnEndedAt}
         liveSessionCount={ui.liveSessionCount}
@@ -484,7 +484,7 @@ const StatusRulePane = memo(function StatusRulePane({
         t={ui.theme}
         turnStartedAt={status.turnStartedAt}
         usage={ui.usage}
-        voiceLabel={status.voiceLabel}
+        voiceLabel={ui.theme.brand.org === 'Oxaide' ? '' : status.voiceLabel}
       />
     </Box>
   )
