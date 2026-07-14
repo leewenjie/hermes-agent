@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import urllib.error
 
 import pytest
@@ -245,7 +246,14 @@ def test_same_event_id_authorizes_and_completes_once_without_content(monkeypatch
 
     monkeypatch.setattr("tui_gateway.oxaide_turns.urllib.request.urlopen", urlopen)
     turn = OxaideTurnClient(dict(_CONTEXT_A)).authorize()
-    turn.complete()
+    turn.complete(
+        {
+            "schema_version": "2026-07-14-v1",
+            "input_tokens": 120,
+            "output_tokens": 30,
+            "estimated_cost_usd": 0.0012,
+        }
+    )
 
     assert [payload["phase"] for payload in payloads] == ["authorize", "complete"]
     assert payloads[0]["hermes_event_id"] == payloads[1]["hermes_event_id"]
@@ -254,6 +262,12 @@ def test_same_event_id_authorizes_and_completes_once_without_content(monkeypatch
     assert "real user prompt" not in serialized
     assert "assistant" not in serialized
     assert "runtime_key" not in serialized
+    assert payloads[1]["details"] == {
+        "schema_version": "2026-07-14-v1",
+        "input_tokens": 120,
+        "output_tokens": 30,
+        "estimated_cost_usd": 0.0012,
+    }
 
 
 def test_established_runtime_session_outlives_launch_token(monkeypatch):
@@ -285,15 +299,24 @@ def test_success_completes_once_and_failed_turns_release():
             self.completed = 0
             self.released = 0
 
-        def complete(self):
+        def complete(self, details=None):
             self.completed += 1
+            self.details = details
 
         def release(self):
             self.released += 1
 
     success = _Turn()
-    server._settle_oxaide_turn(success, {"final_response": "answer"}, "answer", "complete")
+    details = {"input_tokens": 10, "output_tokens": 2}
+    server._settle_oxaide_turn(
+        success,
+        {"final_response": "answer"},
+        "answer",
+        "complete",
+        details=details,
+    )
     assert (success.completed, success.released) == (1, 0)
+    assert success.details == details
 
     for result, raw, status in (
         ({"failed": True}, "answer", "complete"),
@@ -309,6 +332,53 @@ def test_success_completes_once_and_failed_turns_release():
 
 def test_synthetic_turn_is_unmetered_noop():
     server._settle_oxaide_turn(None, {"failed": False}, "synthetic answer", "complete")
+
+
+def test_completion_details_are_private_per_turn_deltas():
+    class _Agent:
+        model = "gpt-5.4-mini"
+        provider = "azure-foundry"
+        session_api_calls = 8
+        session_input_tokens = 1400
+        session_output_tokens = 260
+        session_cache_read_tokens = 900
+        session_cache_write_tokens = 50
+        session_reasoning_tokens = 40
+        session_estimated_cost_usd = 0.01234567
+        session_cost_status = "estimated"
+        session_cost_source = "model_catalog"
+
+    baseline = {
+        "api_calls": 5,
+        "input_tokens": 1000,
+        "output_tokens": 200,
+        "cache_read_tokens": 700,
+        "cache_write_tokens": 20,
+        "reasoning_tokens": 10,
+        "estimated_cost_usd": 0.01,
+    }
+    details = server._oxaide_completion_details(
+        _Agent(), baseline, time.monotonic()
+    )
+
+    assert details == {
+        "schema_version": "2026-07-14-v1",
+        "origin": "interactive",
+        "model": "gpt-5.4-mini",
+        "provider": "azure-foundry",
+        "cost_status": "estimated",
+        "cost_source": "model_catalog",
+        "duration_ms": pytest.approx(0, abs=10),
+        "api_calls": 3,
+        "cache_read_tokens": 200,
+        "cache_write_tokens": 30,
+        "input_tokens": 400,
+        "output_tokens": 60,
+        "reasoning_tokens": 30,
+        "estimated_cost_usd": 0.00234567,
+    }
+    assert "prompt" not in details
+    assert "response" not in details
 
 
 def test_usage_signing_does_not_fall_back_to_launch_secret(monkeypatch):
