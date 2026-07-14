@@ -700,41 +700,40 @@ export default function App() {
               />
             ) : null}
 
-            <div
-              className={cn(
-                "flex shrink-0 items-center gap-2",
-                "px-3 py-2",
-                "border-t border-current/20",
-                isDesktopCollapsed
-                  ? "lg:flex-col lg:items-start lg:gap-3 lg:py-3"
-                  : "justify-between",
-              )}
-            >
+            {branding.product !== "oxaide" ? (
               <div
                 className={cn(
-                  "flex min-w-0 items-center gap-2",
-                  isDesktopCollapsed && "lg:flex-col lg:items-start",
+                  "flex shrink-0 items-center gap-2",
+                  "border-t border-current/20 px-3 py-2",
+                  isDesktopCollapsed ? "lg:flex-col lg:items-start lg:gap-3 lg:py-3" : "justify-between",
                 )}
               >
-                <PluginSlot name="header-right" />
-
-                <SidebarIconWithTooltip
-                  collapsed={isDesktopCollapsed}
-                  label={t.theme?.switchTheme ?? "Switch theme"}
-                  tooltipWarmRef={tooltipWarmRef}
+                <div
+                  className={cn(
+                    "flex min-w-0 items-center gap-2",
+                    isDesktopCollapsed && "lg:flex-col lg:items-start",
+                  )}
                 >
-                  <ThemeSwitcher collapsed={isDesktopCollapsed} dropUp />
-                </SidebarIconWithTooltip>
+                  <PluginSlot name="header-right" />
 
-                <SidebarIconWithTooltip
-                  collapsed={isDesktopCollapsed}
-                  label={t.language.switchTo}
-                  tooltipWarmRef={tooltipWarmRef}
-                >
-                  <LanguageSwitcher collapsed={isDesktopCollapsed} dropUp />
-                </SidebarIconWithTooltip>
+                  <SidebarIconWithTooltip
+                    collapsed={isDesktopCollapsed}
+                    label={t.theme?.switchTheme ?? "Switch theme"}
+                    tooltipWarmRef={tooltipWarmRef}
+                  >
+                    <ThemeSwitcher collapsed={isDesktopCollapsed} dropUp />
+                  </SidebarIconWithTooltip>
+
+                  <SidebarIconWithTooltip
+                    collapsed={isDesktopCollapsed}
+                    label={t.language.switchTo}
+                    tooltipWarmRef={tooltipWarmRef}
+                  >
+                    <LanguageSwitcher collapsed={isDesktopCollapsed} dropUp />
+                  </SidebarIconWithTooltip>
+                </div>
               </div>
-            </div>
+            ) : null}
 
             <div
               className={cn(
@@ -742,7 +741,7 @@ export default function App() {
                 isDesktopCollapsed && "lg:hidden",
               )}
             >
-              <AuthWidget />
+              <AuthWidget hideLogout={branding.product === "oxaide"} />
               <SidebarFooter branding={branding} status={sidebarStatus} />
             </div>
           </aside>

@@ -30,6 +30,7 @@ import { LogOut } from "lucide-react";
 
 interface AuthWidgetProps {
   className?: string;
+  hideLogout?: boolean;
 }
 
 /** Truncate ``user_id`` to fit a small UI without revealing the full
@@ -40,7 +41,7 @@ function truncateUserId(id: string): string {
   return `${id.slice(0, 14)}…`;
 }
 
-export function AuthWidget({ className }: AuthWidgetProps) {
+export function AuthWidget({ className, hideLogout = false }: AuthWidgetProps) {
   const [me, setMe] = useState<AuthMeResponse | null>(null);
   const [hidden, setHidden] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -133,7 +134,7 @@ export function AuthWidget({ className }: AuthWidgetProps) {
           via {providerLabel}
         </span>
       </div>
-      <button
+      {!hideLogout ? <button
         type="button"
         onClick={handleLogout}
         className={cn(
@@ -146,7 +147,7 @@ export function AuthWidget({ className }: AuthWidgetProps) {
       >
         <LogOut className="h-3.5 w-3.5" />
         <span>Sign out</span>
-      </button>
+      </button> : null}
     </div>
   );
 }

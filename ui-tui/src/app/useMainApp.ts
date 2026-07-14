@@ -575,10 +575,11 @@ export function useMainApp(gw: GatewayClient) {
 
   const marker = overlay.approval || overlay.sudo || overlay.secret || overlay.clarify ? '⚠' : ui.busy ? '⏳' : '✓'
 
-  const tabCwd = ui.info?.cwd
+  const managedOxaide = ui.theme.brand.org === 'Oxaide'
+  const tabCwd = managedOxaide ? undefined : ui.info?.cwd
 
   useTerminalTitle(
-    model ? composeTabTitle(marker, ui.sessionTitle, model, tabCwd ? shortCwd(tabCwd, 24) : '') : 'Hermes'
+    model ? composeTabTitle(marker, ui.sessionTitle, model, tabCwd ? shortCwd(tabCwd, 24) : '') : ui.theme.brand.name
   )
 
   useEffect(() => {
@@ -1111,7 +1112,7 @@ export function useMainApp(gw: GatewayClient) {
       // Cap the status-bar cwd/branch label tighter than the shared default so
       // it doesn't dominate the bar; the status rule reserves the left-side
       // essentials and truncates this further on narrow terminals.
-      cwdLabel: fmtCwdBranch(cwd, gitBranch, 28),
+      cwdLabel: managedOxaide ? '' : fmtCwdBranch(cwd, gitBranch, 28),
       goodVibesTick,
       lastTurnEndedAt: ui.sid ? lastTurnEndedAt : null,
       sessionStartedAt: ui.sid ? sessionStartedAt : null,
@@ -1125,13 +1126,16 @@ export function useMainApp(gw: GatewayClient) {
         ? '● REC'
         : voiceProcessing
           ? '◉ STT'
-          : `voice ${voiceEnabled ? 'on' : 'off'}${voiceTts ? ' [tts]' : ''}`
+          : managedOxaide && !voiceEnabled
+            ? ''
+            : `voice ${voiceEnabled ? 'on' : 'off'}${voiceTts ? ' [tts]' : ''}`
     }),
     [
       cwd,
       gitBranch,
       goodVibesTick,
       lastTurnEndedAt,
+      managedOxaide,
       sessionStartedAt,
       stickyPrompt,
       turnStartedAt,

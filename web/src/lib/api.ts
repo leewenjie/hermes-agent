@@ -328,7 +328,7 @@ export const api = {
     fetchJSON<AuthMeResponse>("/api/auth/me", undefined, {
       allowUnauthorized: true,
     }),
-  logout: () =>
+  logout: (fallbackRedirect?: string) =>
     fetch(`${BASE}/auth/logout`, {
       method: "POST",
       credentials: "include",
@@ -352,7 +352,9 @@ export const api = {
         form.submit();
         return r;
       }
-      window.location.assign(body.redirect_to || `${BASE}/login`);
+      const redirectTo = body.redirect_to || `${BASE}/login`;
+      const localLogin = redirectTo === "/login" || redirectTo === `${BASE}/login`;
+      window.location.assign(fallbackRedirect && localLogin ? fallbackRedirect : redirectTo);
       return r;
     }),
   getSessions: (
