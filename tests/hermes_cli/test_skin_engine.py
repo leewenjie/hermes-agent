@@ -164,8 +164,9 @@ class TestSkinManagement:
         assert get_active_skin_name() == "oxaide"
         assert get_active_skin().get_branding("agent_name") == "Oxaide Research"
         assert get_active_skin().get_branding("org_name") == "Oxaide"
-        assert "OXAIDE RESEARCH CENTER" in get_active_skin().banner_logo
-        assert len(get_active_skin().banner_logo.splitlines()) == 3
+        assert "OXAIDE RESEARCH" in get_active_skin().banner_logo
+        assert "RESEARCH CENTER" not in get_active_skin().banner_logo
+        assert len(get_active_skin().banner_logo.splitlines()) == 1
 
     def test_init_skin_from_empty_config(self):
         from hermes_cli.skin_engine import init_skin_from_config, get_active_skin_name
