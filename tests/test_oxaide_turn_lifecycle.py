@@ -334,6 +334,15 @@ def test_synthetic_turn_is_unmetered_noop():
     server._settle_oxaide_turn(None, {"failed": False}, "synthetic answer", "complete")
 
 
+def test_hosted_full_turn_without_authorization_fails_closed(monkeypatch):
+    monkeypatch.setenv("HERMES_OXAIDE_WORKSPACE_ID", "workspace-a")
+    monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", "runtime-key-a")
+    session = {"history": [], "history_lock": threading.Lock()}
+
+    with pytest.raises(RuntimeError, match="require pre-runtime authorization"):
+        server._run_prompt_submit("rid", "sid", session, "synthetic")
+
+
 def test_completion_details_are_private_per_turn_deltas():
     class _Agent:
         model = "gpt-5.4-mini"

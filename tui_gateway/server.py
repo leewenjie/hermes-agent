@@ -2658,10 +2658,44 @@ _OXAIDE_REQUIRED_SKILLS = frozenset(
 
 
 def _is_oxaide_tenant_runtime() -> bool:
-    return bool(
-        os.environ.get("HERMES_OXAIDE_WORKSPACE_ID", "").strip()
-        and os.environ.get("HERMES_OXAIDE_RUNTIME_KEY", "").strip()
+    def configured(name: str) -> bool:
+        value = os.environ.get(name, "").strip()
+        return bool(
+            value
+            and not value.lower().startswith("replace-with-")
+            and not value.startswith("__REPLACE_WITH_")
+        )
+
+    return configured("HERMES_OXAIDE_WORKSPACE_ID") and configured(
+        "HERMES_OXAIDE_RUNTIME_KEY"
     )
+
+
+_OXAIDE_MAX_PARENT_ITERATIONS = 16
+_OXAIDE_MAX_OUTPUT_TOKENS = 8192
+
+
+def _oxaide_managed_runtime() -> tuple[str, str]:
+    """Return the deployment-pinned Oxaide model/provider pair.
+
+    Hosted tenants must not derive these values from tenant-writable config or
+    persisted session overrides. The deployment environment is the authority.
+    """
+    model = (
+        os.environ.get("HERMES_OXAIDE_MODEL", "").strip()
+        or os.environ.get("HERMES_MODEL", "").strip()
+        or os.environ.get("HERMES_INFERENCE_MODEL", "").strip()
+    )
+    provider = (
+        os.environ.get("HERMES_OXAIDE_PROVIDER", "").strip()
+        or os.environ.get("HERMES_TUI_PROVIDER", "").strip()
+        or os.environ.get("HERMES_INFERENCE_PROVIDER", "").strip()
+    )
+    if not model or not provider:
+        raise RuntimeError(
+            "Oxaide tenant runtime requires deployment-pinned model and provider"
+        )
+    return model, provider
 
 
 def _load_enabled_toolsets() -> list[str] | None:
@@ -2897,6 +2931,12 @@ def _apply_model_switch(
     parsed_flags: tuple[str, str, bool, bool, bool] | None = None,
     persist_override: bool | None = None,
 ) -> dict:
+    if _is_oxaide_tenant_runtime():
+        managed_model, managed_provider = _oxaide_managed_runtime()
+        raise ValueError(
+            f"Model selection is managed by Oxaide ({managed_model} via {managed_provider})."
+        )
+
     from hermes_cli.model_switch import (
         parse_model_flags,
         resolve_persist_behavior,
@@ -3082,6 +3122,8 @@ def _sync_agent_model_with_config(sid: str, session: dict) -> None:
     message. Sessions pinned with /model keep their choice; a failed switch
     keeps the current model and never blocks the turn.
     """
+    if _is_oxaide_tenant_runtime():
+        return
     agent = session.get("agent")
     if agent is None or session.get("model_override"):
         return
@@ -4181,14 +4223,19 @@ def _apply_personality_to_session(
 
 
 def _cfg_max_turns(cfg: dict, default: int) -> int:
+    resolved = default
     try:
         env_max = int(os.environ.get("HERMES_TUI_MAX_TURNS", "") or 0)
         if env_max > 0:
-            return env_max
+            resolved = env_max
+        else:
+            agent_cfg = cfg.get("agent") or {}
+            resolved = int(agent_cfg.get("max_turns") or cfg.get("max_turns") or default)
     except (TypeError, ValueError):
-        pass
-    agent_cfg = cfg.get("agent") or {}
-    return int(agent_cfg.get("max_turns") or cfg.get("max_turns") or default)
+        resolved = default
+    if _is_oxaide_tenant_runtime():
+        return max(1, min(resolved, _OXAIDE_MAX_PARENT_ITERATIONS))
+    return resolved
 
 
 def _parse_tui_skills_env() -> list[str]:
@@ -4225,6 +4272,8 @@ def _load_fallback_model():
     order, with legacy ``fallback_model`` entries merged in afterwards
     (deduped on provider/model/base_url).
     """
+    if _is_oxaide_tenant_runtime():
+        return []
     from hermes_cli.fallback_config import get_fallback_chain
 
     return get_fallback_chain(_load_cfg())
@@ -4624,6 +4673,10 @@ def _make_agent(
             system_prompt = "\n\n".join(
                 part for part in (system_prompt, skills_prompt) if part
             ).strip()
+    if _is_oxaide_tenant_runtime():
+        model_override = None
+        provider_override = None
+
     # Prefer a per-session model override (set by a prior in-session /model
     # switch) over global config/env resolution. Resume-time stored sessions may
     # also pass scalar model/provider/runtime knobs from the persisted DB row.
@@ -4668,7 +4721,10 @@ def _make_agent(
         if override_api_mode:
             runtime["api_mode"] = override_api_mode
     else:
-        model, requested_provider = _resolve_startup_runtime()
+        if _is_oxaide_tenant_runtime():
+            model, requested_provider = _oxaide_managed_runtime()
+        else:
+            model, requested_provider = _resolve_startup_runtime()
         if isinstance(model_override, str) and model_override:
             model = model_override
         if provider_override:
@@ -4681,6 +4737,8 @@ def _make_agent(
     return AIAgent(
         model=model,
         max_iterations=_cfg_max_turns(cfg, 90),
+        max_tokens=_OXAIDE_MAX_OUTPUT_TOKENS if _is_oxaide_tenant_runtime() else None,
+        hard_max_output_tokens=_OXAIDE_MAX_OUTPUT_TOKENS if _is_oxaide_tenant_runtime() else None,
         provider=runtime.get("provider"),
         base_url=runtime.get("base_url"),
         api_key=runtime.get("api_key"),
@@ -4722,7 +4780,7 @@ def _make_agent(
         pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
         skip_context_files=is_truthy_value(os.environ.get("HERMES_IGNORE_RULES")),
         skip_memory=is_truthy_value(os.environ.get("HERMES_IGNORE_RULES")),
-        fallback_model=_load_fallback_model(),
+        fallback_model=[] if _is_oxaide_tenant_runtime() else _load_fallback_model(),
         **_agent_cbs(sid),
     )
 
@@ -9016,6 +9074,11 @@ def _notification_poller_loop(
         _claim = claim_event_delivery(evt, "tui-poller")
         if _claim is None:
             continue
+        if _is_oxaide_tenant_runtime():
+            complete_event_delivery(evt, _claim)
+            with session["history_lock"]:
+                session["running"] = False
+            continue
         try:
             _emit("message.start", sid)
             _run_prompt_submit(rid, sid, session, text)
@@ -9075,6 +9138,11 @@ def _notification_poller_loop(
         )
         _claim = claim_event_delivery(evt, "tui-poller")
         if _claim is None:
+            continue
+        if _is_oxaide_tenant_runtime():
+            complete_event_delivery(evt, _claim)
+            with session["history_lock"]:
+                session["running"] = False
             continue
         try:
             _emit("message.start", sid)
@@ -9161,6 +9229,8 @@ def _run_prompt_submit(
     *,
     oxaide_turn=None,
 ) -> None:
+    if _is_oxaide_tenant_runtime() and oxaide_turn is None:
+        raise RuntimeError("Oxaide hosted turns require pre-runtime authorization")
     with session["history_lock"]:
         history = list(session["history"])
         history_version = int(session.get("history_version", 0))
@@ -9464,7 +9534,12 @@ def _run_prompt_submit(
             # ("✓ Goal achieved" / "⏸ budget exhausted") is surfaced as
             # a system line so the user sees progress regardless of
             # outcome. Mirrors gateway/run._post_turn_goal_continuation.
-            if status == "complete" and isinstance(raw, str) and raw.strip():
+            if (
+                not _is_oxaide_tenant_runtime()
+                and status == "complete"
+                and isinstance(raw, str)
+                and raw.strip()
+            ):
                 try:
                     from hermes_cli.goals import GoalManager
 
@@ -9530,6 +9605,8 @@ def _run_prompt_submit(
                         pass
 
             if (
+                not _is_oxaide_tenant_runtime()
+                and
                 status == "complete"
                 and isinstance(raw, str)
                 and raw.strip()
@@ -9668,6 +9745,12 @@ def _run_prompt_submit(
                 )
                 _claim = claim_event_delivery(_evt, "tui-post-turn")
                 if _claim is None:
+                    continue
+                if _is_oxaide_tenant_runtime():
+                    _emit("status.update", sid, {"kind": "process", "text": synth})
+                    complete_event_delivery(_evt, _claim)
+                    with session["history_lock"]:
+                        session["running"] = False
                     continue
                 try:
                     _emit("message.start", sid)
@@ -10356,6 +10439,8 @@ def _(rid, params: dict) -> dict:
 
 @method("preview.restart")
 def _(rid, params: dict) -> dict:
+    if _is_oxaide_tenant_runtime():
+        return _err(rid, 4030, "Preview restart agents are unavailable in managed Oxaide workspaces.")
     session, err = _sess(params, rid)
     if err:
         return err
@@ -10534,6 +10619,9 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     key, value = params.get("key", ""), params.get("value", "")
     session = _sessions.get(params.get("session_id", ""))
+
+    if _is_oxaide_tenant_runtime() and key in {"model", "fast", "reasoning"}:
+        return _err(rid, 4030, f"{key} is managed by Oxaide for this workspace.")
 
     if key == "model":
         try:
@@ -12304,6 +12392,8 @@ def _(rid, params: dict) -> dict:
 
         return _ok(rid, {"type": "send", "message": build_learn_prompt(arg)})
     if name == "moa":
+        if _is_oxaide_tenant_runtime():
+            return _err(rid, 4030, "Mixture-of-agents mode is unavailable in managed Oxaide workspaces.")
         # /moa is one-shot sugar only: run a single prompt through the default
         # MoA preset, then restore the prior model. To *switch* to a MoA preset
         # for the rest of the session, pick it from the model picker (MoA
@@ -12421,6 +12511,8 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, {"type": "send", "message": arg})
 
     if name == "goal":
+        if _is_oxaide_tenant_runtime():
+            return _err(rid, 4030, "Goals are unavailable in managed Oxaide workspaces.")
         if not session:
             return _err(rid, 4001, "no active session")
         try:
@@ -13189,6 +13281,30 @@ def _(rid, params: dict) -> dict:
 
 @method("model.options")
 def _(rid, params: dict) -> dict:
+    if _is_oxaide_tenant_runtime():
+        try:
+            model, provider = _oxaide_managed_runtime()
+        except Exception as exc:
+            return _err(rid, 5033, str(exc))
+        return _ok(
+            rid,
+            {
+                "managed": True,
+                "current_provider": provider,
+                "current_model": model,
+                "providers": [
+                    {
+                        "slug": provider,
+                        "name": provider,
+                        "is_current": True,
+                        "authenticated": True,
+                        "models": [model],
+                        "total_models": 1,
+                        "read_only": True,
+                    }
+                ],
+            },
+        )
     try:
         from hermes_cli.inventory import build_models_payload, load_picker_context
 
@@ -13241,6 +13357,8 @@ def _(rid, params: dict) -> dict:
     Returns the provider dict with models populated (same shape as
     model.options entries) on success.
     """
+    if _is_oxaide_tenant_runtime():
+        return _err(rid, 4030, "Provider credentials are managed by Oxaide.")
     try:
         from hermes_cli.auth import PROVIDER_REGISTRY
         from hermes_cli.config import is_managed, save_env_value
@@ -13321,6 +13439,8 @@ def _(rid, params: dict) -> dict:
 
     Returns success status and the provider's slug.
     """
+    if _is_oxaide_tenant_runtime():
+        return _err(rid, 4030, "Provider credentials are managed by Oxaide.")
     try:
         from hermes_cli.auth import PROVIDER_REGISTRY, clear_provider_auth
         from hermes_cli.config import remove_env_value

@@ -25,6 +25,16 @@ services:
       HERMES_OXAIDE_DEMO_AUTH_SECRET: ${HERMES_OXAIDE_DEMO_AUTH_SECRET:?launch signing secret required}
       HERMES_OXAIDE_USAGE_SIGNING_SECRET: ${HERMES_OXAIDE_USAGE_SIGNING_SECRET:?usage signing secret required}
       HERMES_HOSTED_RUNTIME_SHARED_SECRET: ${HERMES_HOSTED_RUNTIME_SHARED_SECRET:?control-plane secret required}
+      HERMES_OXAIDE_MODEL: ${HERMES_OXAIDE_MODEL:-gpt-5.4-mini}
+      HERMES_OXAIDE_PROVIDER: ${HERMES_OXAIDE_PROVIDER:-azure-foundry}
+      HERMES_OXAIDE_MANAGED_POLICY: "true"
+      HERMES_MODEL: ${HERMES_OXAIDE_MODEL:-gpt-5.4-mini}
+      HERMES_TUI_PROVIDER: ${HERMES_OXAIDE_PROVIDER:-azure-foundry}
+      HERMES_TUI_MAX_TURNS: "16"
+      HERMES_TUI_TOOLSETS: web,terminal,file,memory,session_search,clarify,delegation,todo,vision
+      HERMES_TUI_SKILLS: investment-research,market-return-analysis,stocks
+      DELEGATION_MAX_CONCURRENT_CHILDREN: "2"
+      DELEGATION_CHILD_TIMEOUT_SECONDS: "240"
       OXAIDE_TURN_ENDPOINT: ${OXAIDE_TURN_ENDPOINT:-https://oxaide.com/api/agents/billing/usage/record}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
