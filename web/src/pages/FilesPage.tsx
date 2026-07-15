@@ -69,9 +69,9 @@ function formatBytes(size: number | null): string {
   return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
-function downloadDataUrl(dataUrl: string, name: string) {
+function downloadUrl(url: string, name: string) {
   const link = document.createElement("a");
-  link.href = dataUrl;
+  link.href = url;
   link.download = name || "download";
   document.body.appendChild(link);
   link.click();
@@ -262,14 +262,9 @@ export default function FilesPage() {
     void uploadFiles(event.dataTransfer.files);
   };
 
-  const downloadFile = async (entry: ManagedFileEntry) => {
+  const downloadFile = (entry: ManagedFileEntry) => {
     if (entry.is_directory) return;
-    try {
-      const file = await api.readFile(entry.path);
-      downloadDataUrl(file.data_url, file.name);
-    } catch (e) {
-      showToast(`Download failed: ${e}`, "error");
-    }
+    downloadUrl(api.downloadFileUrl(entry.path), entry.name);
   };
 
   const openPreview = async (entry: ManagedFileEntry) => {
@@ -553,7 +548,7 @@ export default function FilesPage() {
                         ghost
                         size="icon"
                         type="button"
-                        onClick={() => void downloadFile(entry)}
+                        onClick={() => downloadFile(entry)}
                         aria-label={`Download ${entry.name}`}
                       >
                         <Download />
@@ -691,7 +686,7 @@ export default function FilesPage() {
             {previewEntry && (
               <Button
                 type="button"
-                onClick={() => void downloadFile(previewEntry)}
+                onClick={() => downloadFile(previewEntry)}
                 prefix={<Download />}
               >
                 Download
