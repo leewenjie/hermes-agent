@@ -298,7 +298,13 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
   }
 
   return (
-    <Box borderColor={t.color.border} borderStyle="round" marginBottom={1} paddingX={2} paddingY={1}>
+    <Box
+      borderColor={t.color.border}
+      borderStyle={isHostedOxaide ? undefined : "round"}
+      marginBottom={1}
+      paddingX={isHostedOxaide ? 0 : 2}
+      paddingY={isHostedOxaide ? 0 : 1}
+    >
       {wide && (
         <Box flexDirection="column" marginRight={2} width={leftW}>
           <ArtLines lines={heroLines} />
