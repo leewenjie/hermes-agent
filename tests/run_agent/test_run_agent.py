@@ -1005,6 +1005,30 @@ class TestInit:
 
         assert a.max_tokens == 8192
 
+    def test_hard_output_cap_clamps_config_and_ephemeral_retry(self):
+        with (
+            patch("run_agent.get_tool_definitions", return_value=[]),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch("hermes_cli.config.load_config", return_value={}),
+        ):
+            a = AIAgent(
+                api_key="test-k...7890",
+                provider="custom",
+                model="custom-model",
+                base_url="http://proxy.example/v1",
+                max_tokens=32000,
+                hard_max_output_tokens=8192,
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            a._ephemeral_max_output_tokens = 64000
+            kwargs = a._build_api_kwargs([{"role": "user", "content": "Hi"}])
+
+        assert a.hard_max_output_tokens == 8192
+        assert kwargs["max_tokens"] == 8192
+
     def test_prompt_caching_cache_ttl_invalid_falls_back(self):
         """Non-Anthropic TTL values keep default 5m without raising."""
         with (

@@ -351,6 +351,15 @@ def _normalize_role(r: Optional[str]) -> str:
     return "leaf"
 
 
+def _is_oxaide_tenant_runtime() -> bool:
+    return os.environ.get("HERMES_OXAIDE_MANAGED_POLICY", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _get_max_concurrent_children() -> int:
     """Read delegation.max_concurrent_children from config, falling back to
     DELEGATION_MAX_CONCURRENT_CHILDREN env var, then the default (3).
@@ -374,7 +383,7 @@ def _get_max_concurrent_children() -> int:
                         "independently. High values multiply cost linearly.",
                         result,
                     )
-            return result
+            return min(result, 2) if _is_oxaide_tenant_runtime() else result
         except (TypeError, ValueError):
             logger.warning(
                 "delegation.max_concurrent_children=%r is not a valid integer; "
@@ -382,14 +391,15 @@ def _get_max_concurrent_children() -> int:
                 val,
                 _DEFAULT_MAX_CONCURRENT_CHILDREN,
             )
-            return _DEFAULT_MAX_CONCURRENT_CHILDREN
+            return 2 if _is_oxaide_tenant_runtime() else _DEFAULT_MAX_CONCURRENT_CHILDREN
     env_val = os.getenv("DELEGATION_MAX_CONCURRENT_CHILDREN")
     if env_val:
         try:
-            return max(1, int(env_val))
+            result = max(1, int(env_val))
+            return min(result, 2) if _is_oxaide_tenant_runtime() else result
         except (TypeError, ValueError):
-            return _DEFAULT_MAX_CONCURRENT_CHILDREN
-    return _DEFAULT_MAX_CONCURRENT_CHILDREN
+            return 2 if _is_oxaide_tenant_runtime() else _DEFAULT_MAX_CONCURRENT_CHILDREN
+    return 2 if _is_oxaide_tenant_runtime() else _DEFAULT_MAX_CONCURRENT_CHILDREN
 
 
 _LEGACY_MAX_ASYNC_WARNED = False
@@ -440,6 +450,8 @@ def _get_child_timeout() -> Optional[float]:
     Set ``delegation.child_timeout_seconds`` to a positive number to opt back
     in to a hard cap (floor 30 s); ``0`` or a negative value means disabled.
     """
+    if _is_oxaide_tenant_runtime():
+        return 240.0
     cfg = _load_config()
     val = cfg.get("child_timeout_seconds")
     if val is not None:
@@ -479,6 +491,8 @@ def _get_max_spawn_depth() -> int:
     Like max_concurrent_children, there is no upper ceiling — but each
     extra level multiplies API cost, so raise it deliberately.
     """
+    if _is_oxaide_tenant_runtime():
+        return 1
     cfg = _load_config()
     val = cfg.get("max_spawn_depth")
     if val is None:
@@ -510,6 +524,8 @@ def _get_orchestrator_enabled() -> bool:
     _build_child_agent and the delegation toolset is stripped as before.
     Lets an operator disable the feature without a code revert.
     """
+    if _is_oxaide_tenant_runtime():
+        return False
     cfg = _load_config()
     val = cfg.get("orchestrator_enabled", True)
     if isinstance(val, bool):
@@ -1098,6 +1114,17 @@ def _build_child_agent(
     tui_depth = max(0, child_depth - 1)  # 0 = first-level child for the UI
 
     delegation_cfg = _load_config()
+    if _is_oxaide_tenant_runtime():
+        max_iterations = min(max(1, int(max_iterations)), 16)
+        model = getattr(parent_agent, "model", None)
+        override_provider = None
+        override_base_url = None
+        override_api_key = None
+        override_api_mode = None
+        override_request_overrides = None
+        override_max_tokens = None
+        override_acp_command = None
+        override_acp_args = None
 
     # When no explicit toolsets given, inherit from parent's enabled toolsets
     # so disabled tools (e.g. web) don't leak to subagents.
@@ -1326,10 +1353,11 @@ def _build_child_agent(
         acp_command=effective_acp_command,
         acp_args=effective_acp_args,
         max_iterations=max_iterations,
+        hard_max_output_tokens=getattr(parent_agent, "hard_max_output_tokens", None),
 
         reasoning_config=child_reasoning,
         prefill_messages=getattr(parent_agent, "prefill_messages", None),
-        fallback_model=parent_fallback,
+        fallback_model=[] if _is_oxaide_tenant_runtime() else parent_fallback,
         enabled_toolsets=child_toolsets,
         quiet_mode=True,
         ephemeral_system_prompt=child_prompt,
@@ -2166,6 +2194,24 @@ def _run_single_child(
                 )
                 else 0.0
             ),
+            "_child_usage": {
+                field: (
+                    int(value)
+                    if isinstance((value := getattr(child, field, 0)), (int, float))
+                    else 0
+                )
+                for field in (
+                    "session_api_calls",
+                    "session_prompt_tokens",
+                    "session_completion_tokens",
+                    "session_total_tokens",
+                    "session_input_tokens",
+                    "session_output_tokens",
+                    "session_cache_read_tokens",
+                    "session_cache_write_tokens",
+                    "session_reasoning_tokens",
+                )
+            },
         }
         if status == "failed":
             entry["error"] = result.get("error", "Subagent did not produce a response.")
@@ -2410,6 +2456,8 @@ def delegate_task(
     # the completion queue on its own, carrying its own handle. There's no
     # combined "wait for all" — fan-out is exactly N background subagents.
     background = is_truthy_value(background, default=False) if background is not None else False
+    if _is_oxaide_tenant_runtime():
+        background = False
 
     # Depth limit — configurable via delegation.max_spawn_depth,
     # default 2 for parity with the original MAX_DEPTH constant.
@@ -2442,7 +2490,11 @@ def delegate_task(
             "using delegation.max_iterations=%s from config",
             max_iterations, default_max_iter,
         )
-    effective_max_iter = default_max_iter
+    effective_max_iter = (
+        min(max(1, int(default_max_iter)), 16)
+        if _is_oxaide_tenant_runtime()
+        else default_max_iter
+    )
 
     # Resolve delegation credentials (provider:model pair).
     # When delegation.provider is configured, this resolves the full credential
@@ -2726,9 +2778,28 @@ def delegate_task(
         # closed; we fold them into the parent in one pass alongside the
         # subagent_stop hook loop so we don't walk `results` twice.
         _children_cost_total = 0.0
+        _usage_fields = (
+            "session_api_calls",
+            "session_prompt_tokens",
+            "session_completion_tokens",
+            "session_total_tokens",
+            "session_input_tokens",
+            "session_output_tokens",
+            "session_cache_read_tokens",
+            "session_cache_write_tokens",
+            "session_reasoning_tokens",
+        )
+        _children_usage_totals = {field: 0 for field in _usage_fields}
         for entry in results:
             child_role = entry.pop("_child_role", None)
             child_cost = entry.pop("_child_cost_usd", 0.0)
+            child_usage = entry.pop("_child_usage", {})
+            if isinstance(child_usage, dict):
+                for field in _usage_fields:
+                    try:
+                        _children_usage_totals[field] += int(child_usage.get(field, 0) or 0)
+                    except (TypeError, ValueError):
+                        pass
             try:
                 if child_cost:
                     _children_cost_total += float(child_cost)
@@ -2777,6 +2848,15 @@ def delegate_task(
                     parent_agent.session_cost_status = "estimated"
             except Exception:
                 logger.debug("Subagent cost rollup failed", exc_info=True)
+
+        if parent_agent is not None:
+            try:
+                for field, amount in _children_usage_totals.items():
+                    if amount:
+                        current = int(getattr(parent_agent, field, 0) or 0)
+                        setattr(parent_agent, field, current + amount)
+            except Exception:
+                logger.debug("Subagent usage rollup failed", exc_info=True)
 
         total_duration = round(time.monotonic() - overall_start, 2)
 

@@ -1055,6 +1055,75 @@ class TestSubagentCostRollup(unittest.TestCase):
         self.assertEqual(parent.session_estimated_cost_usd, 0.10)
         self.assertEqual(len(result["results"]), 1)
 
+    def test_child_usage_counters_fold_into_parent_and_stay_private(self):
+        parent = self._make_parent_with_cost_counters()
+        for field in (
+            "session_api_calls",
+            "session_prompt_tokens",
+            "session_completion_tokens",
+            "session_total_tokens",
+            "session_input_tokens",
+            "session_output_tokens",
+            "session_cache_read_tokens",
+            "session_cache_write_tokens",
+            "session_reasoning_tokens",
+        ):
+            setattr(parent, field, 0)
+
+        child_usage = {
+            "session_api_calls": 3,
+            "session_prompt_tokens": 100,
+            "session_completion_tokens": 40,
+            "session_total_tokens": 140,
+            "session_input_tokens": 90,
+            "session_output_tokens": 40,
+            "session_cache_read_tokens": 10,
+            "session_cache_write_tokens": 2,
+            "session_reasoning_tokens": 8,
+        }
+        with patch("tools.delegate_tool._run_single_child") as mock_run:
+            mock_run.return_value = {
+                "task_index": 0,
+                "status": "completed",
+                "summary": "done",
+                "api_calls": 3,
+                "duration_seconds": 0.5,
+                "_child_role": "leaf",
+                "_child_cost_usd": 0.0,
+                "_child_usage": child_usage,
+            }
+            result = json.loads(delegate_task(goal="metered child", parent_agent=parent))
+
+        for field, expected in child_usage.items():
+            self.assertEqual(getattr(parent, field), expected)
+        self.assertNotIn("_child_usage", result["results"][0])
+
+    def test_hosted_delegation_limits_are_immutable(self):
+        from tools.delegate_tool import (
+            _get_child_timeout,
+            _get_max_spawn_depth,
+            _get_orchestrator_enabled,
+        )
+
+        hosted_env = {
+            "HERMES_OXAIDE_WORKSPACE_ID": "workspace-1",
+            "HERMES_OXAIDE_RUNTIME_KEY": "x" * 48,
+            "HERMES_OXAIDE_MANAGED_POLICY": "true",
+        }
+        with patch.dict(os.environ, hosted_env, clear=False), patch(
+            "tools.delegate_tool._load_config",
+            return_value={
+                "max_concurrent_children": 99,
+                "child_timeout_seconds": 9999,
+                "max_spawn_depth": 9,
+                "orchestrator_enabled": True,
+            },
+        ):
+            self.assertEqual(_get_max_concurrent_children(), 2)
+            self.assertEqual(_get_child_timeout(), 240.0)
+            self.assertEqual(_get_max_spawn_depth(), 1)
+            self.assertFalse(_get_orchestrator_enabled())
+
 
 class TestBlockedTools(unittest.TestCase):
     def test_blocked_tools_constant(self):
