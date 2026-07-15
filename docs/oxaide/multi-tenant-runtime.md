@@ -40,6 +40,10 @@ Provision each runtime with:
 
 The launch token must use audience `oxaide-hermes-runtime`, match both runtime pins, have a bounded lifetime, and be single-use at the browser handoff. A trusted Oxaide session cannot choose another Hermes profile or arbitrary startup CWD.
 
+All Oxaide secrets must be at least 32 characters and must not use checked-in placeholder forms such as `replace-with-*` or `__REPLACE_WITH_*`. A validated native Oxaide launch-auth configuration can satisfy the non-loopback dashboard gate without inventing an unrelated interactive auth provider. Incomplete, weak, or placeholder native auth still fails closed.
+
+The public `/api/status` response includes the opaque runtime key already present in the hostname and a launch-secret-keyed HMAC-SHA256 workspace fingerprint. It never returns the workspace ID or a shared secret. Provisioners must compare both values during local and routed readiness checks so a healthy runtime for the wrong tenant cannot satisfy provisioning.
+
 ## Routing sequence
 
 1. Oxaide authenticates the user and verifies workspace membership.
@@ -118,6 +122,8 @@ Before accepting customer traffic:
 - launch with missing workspace pin and confirm startup/auth fails closed
 - present a token for a different workspace and confirm HTTP 401
 - present a token for a different runtime key and confirm HTTP 401
+- route a hostname to a different healthy tenant and confirm readiness fails on identity mismatch
+- use a placeholder or short launch/control/usage secret and confirm startup or authorization fails closed
 - present a wrong audience or overlong token and confirm HTTP 401
 - attempt to select a sibling profile and confirm the root profile remains active
 - create files and sessions in two workspace containers and confirm volumes are disjoint

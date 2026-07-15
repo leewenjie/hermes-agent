@@ -50,7 +50,21 @@ class _FakeSessionDB:
 
     def get_session(self, session_id):
         # No compression chains in this fixture — every session is its own root.
-        return {"id": session_id, "parent_session_id": None}
+        return {
+            "id": session_id,
+            "parent_session_id": None,
+            "source": "cli" if session_id.startswith("20260603") else "desktop",
+            "model": "claude" if session_id.startswith("20260603") else "gpt",
+            "title": "Exact ID session" if session_id.startswith("20260603") else "Content session",
+            "started_at": 100 if session_id.startswith("20260603") else 200,
+            "ended_at": 300,
+            "last_active": 300,
+            "message_count": 4,
+            "tool_call_count": 2,
+            "input_tokens": 120,
+            "output_tokens": 80,
+            "preview": "Stored preview",
+        }
 
     def get_compression_tip(self, session_id):
         return session_id
@@ -76,6 +90,22 @@ def test_desktop_session_search_merges_id_matches_before_content_matches(monkeyp
                 "source": "cli",
                 "model": "claude",
                 "session_started": 100,
+                "session": {
+                    "id": "20260603_090200_exact",
+                    "source": "cli",
+                    "model": "claude",
+                    "title": "Exact ID session",
+                    "started_at": 100,
+                    "ended_at": 300,
+                    "last_active": 300,
+                    "is_active": False,
+                    "message_count": 4,
+                    "tool_call_count": 2,
+                    "input_tokens": 120,
+                    "output_tokens": 80,
+                    "preview": "Stored preview",
+                    "parent_session_id": None,
+                },
             },
             {
                 "session_id": "content_session",
@@ -85,6 +115,22 @@ def test_desktop_session_search_merges_id_matches_before_content_matches(monkeyp
                 "source": "desktop",
                 "model": "gpt",
                 "session_started": 200,
+                "session": {
+                    "id": "content_session",
+                    "source": "desktop",
+                    "model": "gpt",
+                    "title": "Content session",
+                    "started_at": 200,
+                    "ended_at": 300,
+                    "last_active": 300,
+                    "is_active": False,
+                    "message_count": 4,
+                    "tool_call_count": 2,
+                    "input_tokens": 120,
+                    "output_tokens": 80,
+                    "preview": "Stored preview",
+                    "parent_session_id": None,
+                },
             },
         ]
     }

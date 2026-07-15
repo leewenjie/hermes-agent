@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { isSessionBusyError, markSubmitting, submitPrompt, type SubmitPromptDeps } from '../app/submissionCore.js'
+import {
+  isSessionBusyError,
+  markSubmitting,
+  oxaideTurnDeniedMessage,
+  submitPrompt,
+  type SubmitPromptDeps
+} from '../app/submissionCore.js'
 import { getUiState, patchUiState, resetUiState } from '../app/uiStore.js'
 import type { GatewayClient } from '../gatewayClient.js'
 
@@ -126,5 +132,44 @@ describe('submissionCore.isSessionBusyError', () => {
     expect(isSessionBusyError(new Error('waiting for model response'))).toBe(true)
     expect(isSessionBusyError(new Error('some other failure'))).toBe(false)
     expect(isSessionBusyError('not an error')).toBe(false)
+  })
+})
+
+describe('submissionCore Oxaide entitlement guidance', () => {
+  beforeEach(() => {
+    resetUiState()
+    patchUiState({ sid: 'sess-1' })
+  })
+
+  it('maps known denial codes to a customer account action', () => {
+    expect(oxaideTurnDeniedMessage(new Error('Oxaide turn denied: trial_turn_limit_reached'))).toBe(
+      'Your Oxaide trial has used all included research turns. Review your plan at https://oxaide.com/console/billing'
+    )
+    expect(oxaideTurnDeniedMessage(new Error('ordinary provider error'))).toBeNull()
+  })
+
+  it('shows billing guidance and does not label an exhausted workspace ready', async () => {
+    const sys = vi.fn()
+
+    const gw = {
+      request: vi.fn((method: string) => {
+        if (method === 'input.detect_drop') {
+          return Promise.resolve({ matched: false })
+        }
+
+        return Promise.reject(new Error('Oxaide turn denied: included_turn_limit_reached'))
+      })
+    } as unknown as GatewayClient
+
+    submitPrompt('continue research', makeDeps(gw, { sys }))
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(sys).toHaveBeenCalledWith(
+      'This workspace has reached its included monthly research limit. Review usage or billing at https://oxaide.com/console/billing'
+    )
+    expect(getUiState().busy).toBe(false)
+    expect(getUiState().status).toBe('account action needed')
   })
 })

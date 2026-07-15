@@ -48,6 +48,59 @@ def test_oxaide_skill_policy_requires_fixed_research_bundle(monkeypatch, oxaide_
         server._parse_tui_skills_env()
 
 
+def test_session_info_reports_successfully_preloaded_skills(monkeypatch):
+    class Agent:
+        model = "test-model"
+        provider = "test-provider"
+        reasoning_config = None
+        service_tier = None
+        tools = []
+
+    monkeypatch.setattr(server, "_display_session_cwd", lambda _session: "/tmp")
+    monkeypatch.setattr(server, "_git_branch_for_cwd", lambda _cwd: "")
+    monkeypatch.setattr(server, "_get_usage", lambda _agent: {})
+    monkeypatch.setattr(server, "_probe_credentials", lambda _agent: "")
+
+    loaded = ["investment-research", "market-return-analysis", "stocks"]
+    info = server._session_info(
+        Agent(),
+        {"session_key": "session-1", "preloaded_skills": loaded},
+    )
+
+    assert info["preloaded_skills"] == loaded
+
+
+def test_pre_agent_preview_reports_managed_tools_and_skills(monkeypatch, oxaide_runtime):
+    monkeypatch.setenv(
+        "HERMES_TUI_TOOLSETS",
+        ",".join(sorted(server._OXAIDE_APPROVED_TOOLSETS)),
+    )
+    monkeypatch.setenv(
+        "HERMES_TUI_SKILLS",
+        ",".join(sorted(server._OXAIDE_REQUIRED_SKILLS)),
+    )
+
+    preview = server._pre_agent_capability_preview()
+
+    assert preview["capability_preview"] is True
+    assert preview["preloaded_skills"] == sorted(server._OXAIDE_REQUIRED_SKILLS)
+    assert preview["tools"]
+    assert "web_search" in preview["tools"]["web"]
+    assert "terminal" in preview["tools"]["terminal"]
+    assert "read_file" in preview["tools"]["file"]
+
+
+def test_pre_agent_preview_is_empty_for_unmanaged_sessions(monkeypatch):
+    monkeypatch.delenv("HERMES_OXAIDE_WORKSPACE_ID", raising=False)
+    monkeypatch.delenv("HERMES_OXAIDE_RUNTIME_KEY", raising=False)
+
+    assert server._pre_agent_capability_preview() == {
+        "tools": {},
+        "skills": {},
+        "preloaded_skills": [],
+    }
+
+
 def test_non_oxaide_runtime_keeps_normal_flexible_skill_behavior(monkeypatch):
     monkeypatch.delenv("HERMES_OXAIDE_WORKSPACE_ID", raising=False)
     monkeypatch.delenv("HERMES_OXAIDE_RUNTIME_KEY", raising=False)
@@ -55,9 +108,10 @@ def test_non_oxaide_runtime_keeps_normal_flexible_skill_behavior(monkeypatch):
     assert server._parse_tui_skills_env() == ["custom-skill", "stocks"]
 
 
-def test_placeholder_runtime_pins_do_not_activate_managed_policy(monkeypatch):
-    monkeypatch.setenv("HERMES_OXAIDE_WORKSPACE_ID", "replace-with-workspace-id")
-    monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", "replace-with-runtime-key")
+@pytest.mark.parametrize("prefix", ["replace-with-", "__RePlAcE_WiTh_"])
+def test_placeholder_runtime_pins_do_not_activate_managed_policy(monkeypatch, prefix):
+    monkeypatch.setenv("HERMES_OXAIDE_WORKSPACE_ID", f"{prefix}workspace-id")
+    monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", f"{prefix}runtime-key")
     monkeypatch.setenv("HERMES_TUI_TOOLSETS", "web,terminal")
     monkeypatch.setenv("HERMES_TUI_SKILLS", "custom-skill,stocks")
 

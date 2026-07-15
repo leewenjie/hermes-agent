@@ -12,20 +12,20 @@
  * Best-effort, like ChatSidebar: a failed fetch surfaces a small inline
  * error with a retry affordance and the terminal pane keeps working.
  *
- * This is a navigation surface, NOT a session-management one — delete,
- * rename, export, and bulk actions live on the Sessions page. Keeping this
- * panel read-only (plus select / new) avoids duplicating that machinery and
- * keeps the chat context focused on switching conversations quickly.
+ * This stays a focused navigation surface. The only row action is Oxaide's
+ * reviewed read-only share flow; full rename, export, delete, and bulk
+ * management remain on the Sessions page.
  */
 
 import { Button } from "@nous-research/ui/ui/components/button";
 import { ListItem } from "@nous-research/ui/ui/components/list-item";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
-import { AlertCircle, MessageSquarePlus, RefreshCw } from "lucide-react";
+import { AlertCircle, MessageSquarePlus, RefreshCw, Share2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { useI18n } from "@/i18n";
+import { ResearchShareDialog } from "@/components/ResearchShareDialog";
 import { api, type SessionInfo } from "@/lib/api";
 import { cn, timeAgo } from "@/lib/utils";
 
@@ -67,6 +67,8 @@ export function ChatSessionList({
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sharingEnabled, setSharingEnabled] = useState(false);
+  const [shareSession, setShareSession] = useState<SessionInfo | null>(null);
   // Bumped to force a refetch (after switching, on Refresh, on mount).
   const [reloadNonce, setReloadNonce] = useState(0);
 
@@ -107,6 +109,21 @@ export function ChatSessionList({
     load();
     // `reloadNonce` is a manual refetch trigger (Refresh button / row pick).
   }, [load, reloadNonce]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .getStatus()
+      .then((status) => {
+        if (!cancelled) setSharingEnabled(Boolean(status.oxaide_runtime_key));
+      })
+      .catch(() => {
+        if (!cancelled) setSharingEnabled(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const reload = useCallback(() => setReloadNonce((n) => n + 1), []);
 
@@ -182,42 +199,64 @@ export function ChatSessionList({
         {sessions.map((s) => {
           const isActive = s.id === activeSessionId;
           return (
-            <ListItem
-              key={s.id}
-              onClick={() => pick(s.id)}
-              aria-current={isActive ? "true" : undefined}
-              className={cn(
-                "flex-col items-start gap-0.5 rounded px-2 py-1.5",
-                "normal-case tracking-normal",
-                isActive
-                  ? "bg-primary/10 text-foreground border-l-2 border-primary"
-                  : "text-text-secondary hover:bg-midground/5 hover:text-foreground",
+            <div key={s.id} className="group flex min-w-0 items-center gap-0.5">
+              <ListItem
+                onClick={() => pick(s.id)}
+                aria-current={isActive ? "true" : undefined}
+                className={cn(
+                  "min-w-0 flex-1 flex-col items-start gap-0.5 rounded px-2 py-1.5",
+                  "normal-case tracking-normal",
+                  isActive
+                    ? "bg-primary/10 text-foreground border-l-2 border-primary"
+                    : "text-text-secondary hover:bg-midground/5 hover:text-foreground",
+                )}
+              >
+                <span className="w-full truncate text-sm font-medium">
+                  {rowLabel(s, t.sessions.untitledSession)}
+                </span>
+                <span className="flex w-full items-center gap-1.5 text-[0.6875rem] text-text-tertiary">
+                  <span>{timeAgo(s.last_active)}</span>
+                  {s.message_count > 0 && (
+                    <>
+                      <span aria-hidden>·</span>
+                      <span>{s.message_count} msgs</span>
+                    </>
+                  )}
+                  {s.source && s.source !== "cli" && (
+                    <>
+                      <span aria-hidden>·</span>
+                      <span className="truncate">{s.source}</span>
+                    </>
+                  )}
+                </span>
+              </ListItem>
+              {sharingEnabled && s.message_count > 0 && (
+                <Button
+                  ghost
+                  size="icon"
+                  onClick={() => setShareSession(s)}
+                  aria-label={`Share ${rowLabel(s, t.sessions.untitledSession)}`}
+                  title="Share read-only snapshot"
+                  className="h-8 w-8 shrink-0 text-text-tertiary opacity-70 hover:text-success group-hover:opacity-100"
+                >
+                  <Share2 className="size-3.5" />
+                </Button>
               )}
-            >
-              <span className="w-full truncate text-sm font-medium">
-                {rowLabel(s, t.sessions.untitledSession)}
-              </span>
-              <span className="flex w-full items-center gap-1.5 text-[0.6875rem] text-text-tertiary">
-                <span>{timeAgo(s.last_active)}</span>
-                {s.message_count > 0 && (
-                  <>
-                    <span aria-hidden>·</span>
-                    <span>{s.message_count} msgs</span>
-                  </>
-                )}
-                {s.source && s.source !== "cli" && (
-                  <>
-                    <span aria-hidden>·</span>
-                    <span className="truncate">{s.source}</span>
-                  </>
-                )}
-              </span>
-            </ListItem>
+            </div>
           );
         })}
       </div>
     );
-  }, [activeSessionId, error, loading, pick, reload, sessions, t]);
+  }, [
+    activeSessionId,
+    error,
+    loading,
+    pick,
+    reload,
+    sessions,
+    sharingEnabled,
+    t,
+  ]);
 
   return (
     <aside
@@ -255,6 +294,12 @@ export function ChatSessionList({
       <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-1 pb-1">
         {content}
       </div>
+      {shareSession && (
+        <ResearchShareDialog
+          session={shareSession}
+          onClose={() => setShareSession(null)}
+        />
+      )}
     </aside>
   );
 }

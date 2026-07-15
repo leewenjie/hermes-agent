@@ -263,6 +263,16 @@ from hermes_cli.memory_oauth import router as _memory_oauth_router  # noqa: E402
 
 app.include_router(_memory_oauth_router)
 
+
+@app.get("/robots.txt", include_in_schema=False)
+async def robots_txt():
+    """Keep the private dashboard out of search indexes without auth redirects."""
+    return Response(
+        content="User-agent: *\nDisallow: /\n",
+        media_type="text/plain",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
 # ---------------------------------------------------------------------------
 # Session token for protecting sensitive endpoints (reveal).
 # The desktop shell mints the token and injects it via
@@ -613,6 +623,7 @@ async def security_headers_middleware(request: Request, call_next):
     """Attach conservative browser security headers to every HTTP response."""
     response = await call_next(request)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Robots-Tag", "noindex, nofollow, noarchive")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault(
@@ -979,7 +990,15 @@ _hosted_runtime_lock = threading.Lock()
 
 
 def _hosted_runtime_shared_secret() -> str:
-    return str(os.getenv("HERMES_HOSTED_RUNTIME_SHARED_SECRET", "") or "").strip()
+    value = str(os.getenv("HERMES_HOSTED_RUNTIME_SHARED_SECRET", "") or "").strip()
+    lowered = value.lower()
+    if (
+        len(value) < 32
+        or lowered.startswith("replace-with-")
+        or lowered.startswith("__replace_with_")
+    ):
+        return ""
+    return value
 
 
 def _hosted_runtime_authorized(request: Request) -> bool:
@@ -2069,8 +2088,8 @@ async def read_managed_file(request: Request, path: str):
         size = target.stat().st_size
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Could not stat file: {exc}")
-    if size > _MANAGED_FILE_MAX_BYTES:
-        raise HTTPException(status_code=413, detail="File is too large")
+    if size > _FS_DATA_URL_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="File is too large to preview")
 
     mime_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
     try:
@@ -2873,6 +2892,25 @@ async def get_status(profile: Optional[str] = None):
             "auth_providers": auth_providers,
             "nous_session_valid": nous_session_valid,
         }
+
+        # A managed Oxaide runtime exposes only the opaque runtime key already
+        # present in its public hostname plus a one-way workspace fingerprint.
+        # Provisioners can detect wrong-tenant routing without disclosing the
+        # workspace identifier or introducing another shared credential.
+        try:
+            from hermes_cli.dashboard_auth.routes import is_oxaide_native_auth_configured
+            if is_oxaide_native_auth_configured():
+                workspace_id = str(os.environ["HERMES_OXAIDE_WORKSPACE_ID"]).strip()
+                status["oxaide_runtime_key"] = str(
+                    os.environ["HERMES_OXAIDE_RUNTIME_KEY"]
+                ).strip()
+                status["oxaide_workspace_fingerprint"] = hmac.new(
+                    str(os.environ["HERMES_OXAIDE_DEMO_AUTH_SECRET"]).strip().encode("utf-8"),
+                    b"oxaide-workspace-fingerprint:v1:" + workspace_id.encode("utf-8"),
+                    hashlib.sha256,
+                ).hexdigest()
+        except Exception:
+            pass
 
         # Profile + gateway topology: which profiles exist, whether one
         # multiplexed gateway or several per-profile gateways serve them, and
@@ -4600,8 +4638,34 @@ async def search_sessions(q: str = "", limit: int = 20, profile: Optional[str] =
                 if root in seen or len(seen) >= safe_limit:
                     return
                 payload = dict(payload)
-                payload["session_id"] = lineage_tip(root)
+                tip = lineage_tip(root)
+                payload["session_id"] = tip
                 payload["lineage_root"] = root
+                try:
+                    row = db.get_session(tip) or {}
+                except Exception:
+                    row = {}
+                started_at = row.get("started_at") or payload.get("session_started") or 0
+                last_active = row.get("last_active") or started_at
+                ended_at = row.get("ended_at")
+                payload["session"] = {
+                    "id": tip,
+                    "source": row.get("source") or payload.get("source"),
+                    "model": row.get("model") or payload.get("model"),
+                    "title": row.get("title"),
+                    "started_at": started_at,
+                    "ended_at": ended_at,
+                    "last_active": last_active,
+                    "is_active": bool(
+                        ended_at is None and time.time() - last_active < 300
+                    ),
+                    "message_count": int(row.get("message_count") or 0),
+                    "tool_call_count": int(row.get("tool_call_count") or 0),
+                    "input_tokens": int(row.get("input_tokens") or 0),
+                    "output_tokens": int(row.get("output_tokens") or 0),
+                    "preview": row.get("preview") or payload.get("snippet"),
+                    "parent_session_id": row.get("parent_session_id"),
+                }
                 seen[root] = payload
 
             # Direct ID matches first: users often paste a session id from CLI,
@@ -10134,6 +10198,154 @@ async def get_session_messages(
         db.close()
 
 
+class ResearchShareRequest(BaseModel):
+    action: str = "publish"
+    session_id: Optional[str] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+    expires_in_days: int = 30
+    share_id: Optional[str] = None
+    snapshot_sha256: Optional[str] = None
+
+
+def _oxaide_share_identity(request: Request) -> tuple[str, str, str]:
+    session = getattr(request.state, "session", None)
+    if session is None or getattr(session, "provider", "") != "oxaide-demo":
+        raise HTTPException(status_code=403, detail="Research sharing requires an Oxaide workspace session")
+    workspace_id = str(getattr(session, "org_id", "") or "").strip()
+    user_id = str(getattr(session, "user_id", "") or "").strip()
+    runtime_key = str(os.environ.get("HERMES_OXAIDE_RUNTIME_KEY") or "").strip()
+    if not workspace_id or not user_id or not runtime_key:
+        raise HTTPException(status_code=403, detail="Oxaide workspace identity is incomplete")
+    return workspace_id, user_id, runtime_key
+
+
+def _research_share_preview(session_id: str, user_id: str) -> tuple[str, dict[str, Any]]:
+    from hermes_cli.oxaide_research_share import build_research_snapshot, snapshot_digest
+
+    db = _open_session_db_for_profile(None)
+    try:
+        sid = db.resolve_session_id(session_id)
+        if not sid:
+            raise HTTPException(status_code=404, detail="Session not found")
+        sid = db.resolve_resume_session_id(sid)
+        session = db.get_session(sid)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        session_user_id = str(session.get("user_id") or "").strip()
+        if not session_user_id or session_user_id != user_id:
+            raise HTTPException(status_code=403, detail="Session does not belong to this user")
+        messages = db.get_messages(sid)
+        preview = build_research_snapshot(session, messages)
+        preview["snapshot_sha256"] = snapshot_digest(preview)
+        return sid, preview
+    finally:
+        db.close()
+
+
+@app.post("/api/research-shares/preview")
+async def preview_research_share(request: Request, body: ResearchShareRequest):
+    _workspace_id, user_id, _runtime_key = _oxaide_share_identity(request)
+    if not body.session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    try:
+        _sid, preview = await asyncio.to_thread(_research_share_preview, body.session_id, user_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        from hermes_cli.oxaide_research_share import ResearchShareError
+        if isinstance(exc, ResearchShareError):
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise
+    if body.title is not None:
+        title = body.title.strip()
+        if not title or len(title) > 200:
+            raise HTTPException(status_code=400, detail="title must be 1-200 characters")
+        preview["title"] = title
+    if body.description is not None:
+        description = body.description.strip()
+        if len(description) > 500:
+            raise HTTPException(status_code=400, detail="description must be at most 500 characters")
+        preview["description"] = description
+    return {"ok": True, **preview}
+
+
+@app.get("/api/research-shares")
+async def list_research_shares(request: Request, session_id: str):
+    _workspace_id, user_id, _runtime_key = _oxaide_share_identity(request)
+    sid, _preview = await asyncio.to_thread(_research_share_preview, session_id, user_id)
+    from hermes_cli.oxaide_research_share import list_recorded_shares
+    return {"ok": True, "shares": await asyncio.to_thread(list_recorded_shares, sid)}
+
+
+@app.post("/api/research-shares")
+async def manage_research_share(request: Request, body: ResearchShareRequest):
+    from hermes_cli.oxaide_research_share import (
+        publish_research_share,
+        record_share,
+        remove_recorded_share,
+        ResearchShareError,
+        revoke_research_share,
+    )
+
+    workspace_id, user_id, runtime_key = _oxaide_share_identity(request)
+    if body.action == "revoke":
+        if not body.share_id:
+            raise HTTPException(status_code=400, detail="share_id is required")
+        try:
+            result = await asyncio.to_thread(
+                revoke_research_share,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                share_id=body.share_id,
+            )
+            await asyncio.to_thread(remove_recorded_share, body.share_id)
+            return result
+        except ResearchShareError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if body.action != "publish":
+        raise HTTPException(status_code=400, detail="action must be publish or revoke")
+    if not body.session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    if body.expires_in_days not in {7, 30, 90}:
+        raise HTTPException(status_code=400, detail="expires_in_days must be 7, 30, or 90")
+
+    try:
+        sid, preview = await asyncio.to_thread(_research_share_preview, body.session_id, user_id)
+        if not body.snapshot_sha256 or not hmac.compare_digest(
+            str(body.snapshot_sha256), str(preview.get("snapshot_sha256") or "")
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="The session changed after preview. Review the updated snapshot before publishing.",
+            )
+        if body.title is not None:
+            title = body.title.strip()
+            if not title or len(title) > 200:
+                raise HTTPException(status_code=400, detail="title must be 1-200 characters")
+            preview["title"] = title
+        if body.description is not None:
+            description = body.description.strip()
+            if len(description) > 500:
+                raise HTTPException(status_code=400, detail="description must be at most 500 characters")
+            preview["description"] = description
+        result = await asyncio.to_thread(
+            publish_research_share,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            runtime_key=runtime_key,
+            session_id=sid,
+            preview=preview,
+            expires_in_days=body.expires_in_days,
+        )
+        await asyncio.to_thread(record_share, sid, result)
+        return result
+    except HTTPException:
+        raise
+    except ResearchShareError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @app.delete("/api/sessions/{session_id}")
 async def delete_session_endpoint(session_id: str, profile: Optional[str] = None):
     # ``profile`` deletes a session belonging to another (local) profile by
@@ -14902,16 +15114,43 @@ def _ws_auth_ok(ws: "WebSocket") -> bool:
 
 def _dashboard_branding_settings() -> dict[str, str]:
     config = load_config() or {}
+    raw_config = read_raw_config() or {}
     dashboard = config.get("dashboard") if isinstance(config.get("dashboard"), dict) else {}
     configured = dashboard.get("branding") if isinstance(dashboard.get("branding"), dict) else {}
-    oxaide_runtime = bool(
-        str(os.environ.get("HERMES_OXAIDE_DEMO_AUTH_SECRET") or "").strip()
-        and str(os.environ.get("HERMES_OXAIDE_WORKSPACE_ID") or "").strip()
-        and str(os.environ.get("HERMES_OXAIDE_RUNTIME_KEY") or "").strip()
+    raw_dashboard = raw_config.get("dashboard") if isinstance(raw_config.get("dashboard"), dict) else {}
+    raw_configured = (
+        raw_dashboard.get("branding")
+        if isinstance(raw_dashboard.get("branding"), dict)
+        else {}
     )
-    product = str(configured.get("product") or "").strip().lower()
+    def configured_pin(name: str) -> bool:
+        value = str(os.environ.get(name) or "").strip()
+        lowered = value.lower()
+        return bool(
+            value
+            and not lowered.startswith("replace-with-")
+            and not lowered.startswith("__replace_with_")
+        )
+
+    oxaide_runtime = bool(
+        len(str(os.environ.get("HERMES_OXAIDE_DEMO_AUTH_SECRET") or "").strip()) >= 32
+        and configured_pin("HERMES_OXAIDE_WORKSPACE_ID")
+        and configured_pin("HERMES_OXAIDE_RUNTIME_KEY")
+    )
+    product = str(raw_configured.get("product") or configured.get("product") or "").strip().lower()
     is_oxaide = oxaide_runtime or product == "oxaide"
-    configured_values = configured if not oxaide_runtime or product == "oxaide" else {}
+    # load_config() deep-merges the generic Hermes branding defaults. Once a
+    # dashboard explicitly selects the Oxaide product, those inherited names
+    # must not leak into its shell ("Hermes Agent" / "Nous Research"). Honor
+    # only fields the operator explicitly wrote in raw config and let the
+    # Oxaide defaults below fill the rest.
+    configured_values = (
+        {}
+        if oxaide_runtime and product != "oxaide"
+        else raw_configured
+        if is_oxaide
+        else configured
+    )
     defaults = {
         "product": "oxaide" if is_oxaide else "hermes",
         "name": "Oxaide Research" if is_oxaide else "Hermes Agent",
@@ -17455,10 +17694,13 @@ def start_server(
 
     if app.state.auth_required:
         # The gate engages on every non-loopback bind. Require at least one
-        # provider to be registered, else fail closed — there is no longer an
-        # escape hatch that serves the dashboard without authentication.
+        # registered provider or one validated native authentication mechanism.
+        # Native Oxaide launch auth is verified directly by middleware/routes,
+        # so representing it as an interactive provider would be misleading.
         from hermes_cli.dashboard_auth import list_providers
-        if not list_providers():
+        from hermes_cli.dashboard_auth.routes import is_oxaide_native_auth_configured
+        native_oxaide_auth = is_oxaide_native_auth_configured()
+        if not list_providers() and not native_oxaide_auth:
             # Surface the *specific* reason any bundled provider declined
             # to register (e.g. missing HERMES_DASHBOARD_OAUTH_CLIENT_ID).
             # Each provider plugin that ships with Hermes Agent exposes a
@@ -17506,7 +17748,7 @@ def start_server(
         _log.info(
             "Dashboard binding to %s with auth gate enabled. Providers: %s",
             host,
-            ", ".join(p.name for p in list_providers()),
+            ", ".join(p.name for p in list_providers()) or "native-oxaide",
         )
 
     # Record the bound host so host_header_middleware can validate incoming

@@ -259,6 +259,68 @@ def test_start_server_gate_without_provider_fails_closed(monkeypatch):
         )
 
 
+def test_start_server_gate_accepts_valid_native_oxaide_auth(monkeypatch):
+    """A fully pinned Oxaide runtime has native signed-launch authentication."""
+    from hermes_cli.dashboard_auth import clear_providers
+
+    clear_providers()
+    monkeypatch.setenv(
+        "HERMES_OXAIDE_DEMO_AUTH_SECRET",
+        "test-oxaide-native-auth-secret-at-least-32-bytes",
+    )
+    monkeypatch.setenv("HERMES_OXAIDE_WORKSPACE_ID", "workspace-123")
+    monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", "runtimekey1234567890abcd")
+    captured = _stub_uvicorn_run(monkeypatch)
+
+    web_server.start_server(
+        host="0.0.0.0", port=9119,
+        open_browser=False, allow_public=False,
+    )
+
+    assert web_server.app.state.auth_required is True
+    assert captured["kwargs"].get("proxy_headers") is True
+
+
+def test_start_server_gate_rejects_placeholder_native_oxaide_auth(monkeypatch):
+    from hermes_cli.dashboard_auth import clear_providers
+
+    clear_providers()
+    monkeypatch.setenv(
+        "HERMES_OXAIDE_DEMO_AUTH_SECRET",
+        "replace-with-a-long-random-secret-value",
+    )
+    monkeypatch.setenv("HERMES_OXAIDE_WORKSPACE_ID", "workspace-123")
+    monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", "runtimekey1234567890abcd")
+    _stub_uvicorn_run(monkeypatch)
+
+    with pytest.raises(SystemExit, match=r"no auth providers"):
+        web_server.start_server(
+            host="0.0.0.0", port=9119,
+            open_browser=False, allow_public=False,
+        )
+
+
+@pytest.mark.parametrize("secret", [
+    "short-secret",
+    "__replace_with_a_long_launch_secret_value__",
+    "__RePlAcE_WiTh_A_LONG_LAUNCH_SECRET_VALUE__",
+])
+def test_start_server_gate_rejects_invalid_native_oxaide_secret(monkeypatch, secret):
+    from hermes_cli.dashboard_auth import clear_providers
+
+    clear_providers()
+    monkeypatch.setenv("HERMES_OXAIDE_DEMO_AUTH_SECRET", secret)
+    monkeypatch.setenv("HERMES_OXAIDE_WORKSPACE_ID", "workspace-123")
+    monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", "runtimekey1234567890abcd")
+    _stub_uvicorn_run(monkeypatch)
+
+    with pytest.raises(SystemExit, match=r"no auth providers"):
+        web_server.start_server(
+            host="0.0.0.0", port=9119,
+            open_browser=False, allow_public=False,
+        )
+
+
 def test_start_server_surfaces_nous_skip_reason_when_unconfigured(monkeypatch):
     """When the bundled Nous plugin loaded but skipped registration (no
     env vars set), the gate's fail-closed message should surface the

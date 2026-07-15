@@ -218,7 +218,7 @@ def test_authorization_denial_never_runs_agent_or_consumes_images(monkeypatch):
 
 
 def test_same_event_id_authorizes_and_completes_once_without_content(monkeypatch):
-    monkeypatch.setenv("HERMES_OXAIDE_USAGE_SIGNING_SECRET", "test-secret")
+    monkeypatch.setenv("HERMES_OXAIDE_USAGE_SIGNING_SECRET", "test-usage-signing-secret-at-least-32-bytes")
     monkeypatch.setenv(
         "OXAIDE_TURN_ENDPOINT",
         "https://oxaide.test/api/agents/billing/usage/record",
@@ -271,7 +271,7 @@ def test_same_event_id_authorizes_and_completes_once_without_content(monkeypatch
 
 
 def test_established_runtime_session_outlives_launch_token(monkeypatch):
-    monkeypatch.setenv("HERMES_OXAIDE_USAGE_SIGNING_SECRET", "test-secret")
+    monkeypatch.setenv("HERMES_OXAIDE_USAGE_SIGNING_SECRET", "test-usage-signing-secret-at-least-32-bytes")
     monkeypatch.setenv(
         "OXAIDE_TURN_ENDPOINT",
         "https://oxaide.test/api/agents/billing/usage/record",
@@ -398,9 +398,21 @@ def test_usage_signing_does_not_fall_back_to_launch_secret(monkeypatch):
         OxaideTurnClient(dict(_CONTEXT_A))
 
 
+@pytest.mark.parametrize("secret", [
+    "short-secret",
+    "__replace_with_a_long_usage_signing_secret__",
+    "__RePlAcE_WiTh_A_LONG_USAGE_SIGNING_SECRET__",
+])
+def test_usage_signing_rejects_short_and_placeholder_secrets(monkeypatch, secret):
+    monkeypatch.setenv("HERMES_OXAIDE_USAGE_SIGNING_SECRET", secret)
+
+    with pytest.raises(RuntimeError, match="turn authorization is not configured"):
+        OxaideTurnClient(dict(_CONTEXT_A))
+
+
 def test_completion_delivery_failure_is_durable_and_non_raising(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    monkeypatch.setenv("HERMES_OXAIDE_USAGE_SIGNING_SECRET", "test-secret")
+    monkeypatch.setenv("HERMES_OXAIDE_USAGE_SIGNING_SECRET", "test-usage-signing-secret-at-least-32-bytes")
     monkeypatch.setenv(
         "OXAIDE_TURN_ENDPOINT",
         "https://oxaide.test/api/agents/billing/usage/record",

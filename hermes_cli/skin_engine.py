@@ -241,9 +241,9 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             "help_header": "Oxaide Research commands",
         },
         "tool_prefix": "│",
-        "banner_logo": """[bold #5FD0B8]╭────────────────────────╮[/]
-[bold #2A8B78]│[/] [bold #E8F5F1]OXAIDE RESEARCH[/]        [bold #2A8B78]│[/]
-[bold #5FD0B8]╰────────────────────────╯[/]""",
+        "banner_logo": """[bold #5FD0B8]╭─◆──────────────────────╮[/]
+    [bold #2A8B78]│[/] [bold #E8F5F1]OXAIDE RESEARCH CENTER[/] [bold #2A8B78]│[/]
+    [bold #5FD0B8]╰────────────────────────╯[/]""",
         "banner_hero": """[#2A8B78]      ╭────────╮[/]
 [#5FD0B8]   ╭──╯   ◇    ╰──╮[/]
 [#8ADBCB]   ╰──╮        ╭──╯[/]

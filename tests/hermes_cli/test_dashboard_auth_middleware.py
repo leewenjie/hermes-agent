@@ -152,6 +152,15 @@ def test_gated_login_html_is_public_and_lists_providers(gated_app):
     assert 'href="/auth/login?provider=stub"' in r.text
 
 
+def test_gated_robots_is_public_and_disallows_crawling(gated_app):
+    response = gated_app.get("/robots.txt", follow_redirects=False)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert response.headers["x-robots-tag"] == "noindex, nofollow, noarchive"
+    assert response.text == "User-agent: *\nDisallow: /\n"
+
+
 def test_login_branding_is_environment_driven(gated_app, monkeypatch):
     monkeypatch.setenv("HERMES_DASHBOARD_PRODUCT_NAME", "Oxaide Research Desk")
     monkeypatch.setenv("HERMES_DASHBOARD_BRAND_NAME", "OXAIDE")
@@ -177,6 +186,7 @@ def test_login_response_has_browser_security_headers(gated_app):
 
     assert response.headers["strict-transport-security"].startswith("max-age=31536000")
     assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-robots-tag"] == "noindex, nofollow, noarchive"
     assert response.headers["x-frame-options"] == "DENY"
     assert response.headers["referrer-policy"] == "no-referrer"
     assert "frame-ancestors 'none'" in response.headers["content-security-policy"]

@@ -32,23 +32,51 @@ import { ModelReloadConfirm } from "@/components/ModelReloadConfirm";
 import { ReasoningPicker } from "@/components/ReasoningPicker";
 import { GatewayClient, type ConnectionState } from "@/lib/gatewayClient";
 import { api, buildWsUrl } from "@/lib/api";
+import {
+  capabilityInfoFromSessionCreate,
+  emptyResearchTrace,
+  generatedImageFromToolResult,
+  isBrowserImageSource,
+  reduceResearchTrace,
+  researchMethodLabel,
+  summarizeResearchTools,
+  type ChatSessionCapabilityInfo,
+  type ResearchTraceState,
+} from "@/lib/chat-sidebar-events";
 import { titleFromSessionInfoPayload } from "@/lib/chat-title";
+import {
+  isOxaideManagedDashboard,
+  OXAIDE_RESEARCH_ENGINE_LABEL,
+} from "@/lib/managed-dashboard";
 
 import { cn } from "@/lib/utils";
-import { AlertCircle, ChevronDown, RefreshCw } from "lucide-react";
+import {
+  AlertCircle,
+  CheckCircle2,
+  ChevronDown,
+  ExternalLink,
+  ImageIcon,
+  LockKeyhole,
+  LoaderCircle,
+  RefreshCw,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-interface SessionInfo {
-  cwd?: string;
-  model?: string;
-  provider?: string;
-  credential_warning?: string;
-  title?: string;
-}
+type SessionInfo = ChatSessionCapabilityInfo;
 
 interface RpcEnvelope {
   method?: string;
   params?: { type?: string; payload?: unknown };
+}
+
+interface ToolCompletePayload {
+  name?: unknown;
+  result?: unknown;
+}
+
+interface GeneratedImage {
+  src: string;
+  source: string;
 }
 
 const STATE_LABEL: Record<ConnectionState, string> = {
@@ -96,6 +124,11 @@ export function ChatSidebar({
 
   const [state, setState] = useState<ConnectionState>("idle");
   const [info, setInfo] = useState<SessionInfo>({});
+  const [generatedImage, setGeneratedImage] = useState<GeneratedImage | null>(null);
+  const [researchTrace, setResearchTrace] = useState<ResearchTraceState>(
+    emptyResearchTrace,
+  );
+  const mediaRequestRef = useRef(0);
   const [modelOpen, setModelOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The badge shows config.yaml's main model (`model.default`) via
@@ -123,6 +156,7 @@ export function ChatSidebar({
   const [pendingReloadModel, setPendingReloadModel] = useState<string | null>(
     null,
   );
+  const managedOxaide = isOxaideManagedDashboard();
 
   const refreshEffectiveModel = useCallback(() => {
     void api
@@ -152,6 +186,9 @@ export function ChatSidebar({
     if (prevScopeKey.current === scopeKey) return;
     prevScopeKey.current = scopeKey;
     setError(null);
+    setGeneratedImage(null);
+    setResearchTrace(emptyResearchTrace());
+    mediaRequestRef.current += 1;
     setVersion((v) => v + 1);
   }, [scopeKey]);
 
@@ -189,10 +226,14 @@ export function ChatSidebar({
         }
         // close_on_disconnect: the gateway reaps this sidecar session (and its
         // slash_worker subprocess) when the WS drops, instead of leaking it.
-        return gw.request<{ session_id: string }>("session.create", {
+        return gw.request<{ session_id: string; info?: unknown }>("session.create", {
           close_on_disconnect: true,
           source: "tool",
           ...(profile ? { profile } : {}),
+        }).then((result) => {
+          if (cancelled) return;
+          const preview = capabilityInfoFromSessionCreate(result);
+          if (preview) setInfo((prev) => ({ ...prev, ...preview }));
         });
       })
       .catch((e: Error) => {
@@ -270,10 +311,45 @@ export function ChatSidebar({
         const { type, payload } = frame.params;
 
         if (type === "session.info") {
+          if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+            setInfo((prev) => ({ ...prev, ...(payload as SessionInfo) }));
+          }
           const title = titleFromSessionInfoPayload(payload);
           if (title !== undefined) {
             onSessionTitleChange?.(title);
           }
+        } else if (
+          type === "message.start" ||
+          type === "message.complete" ||
+          type === "tool.start" ||
+          type === "tool.complete"
+        ) {
+          setResearchTrace((prev) => reduceResearchTrace(prev, type, payload));
+          if (type !== "tool.complete") return;
+          const tool = payload as ToolCompletePayload | null;
+          if (tool?.name !== "image_generate") return;
+          const source = generatedImageFromToolResult(tool.result);
+          if (!source) return;
+
+          if (isBrowserImageSource(source)) {
+            mediaRequestRef.current += 1;
+            setGeneratedImage({ src: source, source });
+            return;
+          }
+
+          const requestedSource = source;
+          const mediaRequest = ++mediaRequestRef.current;
+          void api
+            .getMedia(source)
+            .then(({ data_url }) => {
+              if (!unmounting && mediaRequestRef.current === mediaRequest) {
+                setGeneratedImage({ src: data_url, source: requestedSource });
+              }
+            })
+            .catch(() => {
+              // The media endpoint intentionally rejects paths outside the
+              // Hermes image/cache roots. Keep chat working and omit the card.
+            });
         } else if (type === "dashboard.new_session_requested") {
           onDashboardNewSessionRequest?.();
         }
@@ -304,6 +380,14 @@ export function ChatSidebar({
   const modelName = effectiveModel || info.model || "—";
   const modelLabel = modelName.split("/").slice(-1)[0] ?? "—";
   const banner = error ?? info.credential_warning ?? null;
+  const preloadedSkills = info.preloaded_skills ?? [];
+  const capabilityKnown = info.preloaded_skills !== undefined;
+  const capabilityPreview = Boolean(info.capability_preview);
+  const toolCount = Object.values(info.tools ?? {}).reduce(
+    (total, names) => total + names.length,
+    0,
+  );
+  const usedTools = summarizeResearchTools(researchTrace.tools);
 
   return (
     <aside
@@ -318,23 +402,38 @@ export function ChatSidebar({
             model
           </div>
 
-          <Button
-            ghost
-            size="sm"
-            onClick={() => setModelOpen(true)}
-            className={cn(
-              "max-w-full min-w-0 px-0 py-0",
-              "self-start normal-case tracking-normal text-sm font-medium",
-              "hover:underline disabled:no-underline",
-            )}
-            title={modelName === "—" ? "switch model" : modelName}
-          >
-            <span className="flex min-w-0 max-w-full items-center gap-1">
-              <span className="truncate">{modelLabel}</span>
+          {managedOxaide ? (
+            <div
+              className="min-w-0 max-w-full"
+              title="Managed research runtime. Provider details are available in the Trust Center."
+            >
+              <div className="flex min-w-0 items-center gap-1.5 text-sm font-medium">
+                <span className="truncate">{OXAIDE_RESEARCH_ENGINE_LABEL}</span>
+                <LockKeyhole className="size-3.5 shrink-0 text-text-tertiary" />
+              </div>
+              <div className="mt-0.5 line-clamp-2 text-[0.6875rem] leading-snug text-text-tertiary">
+                Source-linked analysis with saved research context
+              </div>
+            </div>
+          ) : (
+            <Button
+              ghost
+              size="sm"
+              onClick={() => setModelOpen(true)}
+              className={cn(
+                "max-w-full min-w-0 px-0 py-0",
+                "self-start normal-case tracking-normal text-sm font-medium",
+                "hover:underline disabled:no-underline",
+              )}
+              title={modelName === "—" ? "switch model" : modelName}
+            >
+              <span className="flex min-w-0 max-w-full items-center gap-1">
+                <span className="truncate">{modelLabel}</span>
 
-              <ChevronDown className="size-3.5 shrink-0 text-text-secondary" />
-            </span>
-          </Button>
+                <ChevronDown className="size-3.5 shrink-0 text-text-secondary" />
+              </span>
+            </Button>
+          )}
         </div>
 
         <Badge tone={STATE_TONE[state]} className="shrink-0">
@@ -342,7 +441,142 @@ export function ChatSidebar({
         </Badge>
       </Card>
 
-      {supportsReasoning && (
+      {managedOxaide && (
+        <Card className="px-3 py-3">
+          <div className="text-display text-xs tracking-wider text-text-tertiary">
+            research setup
+          </div>
+          <div className="mt-1 text-sm font-medium">
+            {preloadedSkills.length > 0
+              ? `${preloadedSkills.length} methods ${capabilityPreview ? "configured" : "loaded for every answer"}`
+              : capabilityKnown
+                ? "No research methods configured"
+                : "Loading research methods…"}
+          </div>
+          {preloadedSkills.length > 0 && (
+            <div className="mt-2 flex max-h-24 flex-wrap gap-1 overflow-y-auto">
+              {preloadedSkills.map((skill) => (
+                <Badge
+                  key={skill}
+                  tone="secondary"
+                  className="max-w-full px-1.5 py-0.5 text-[0.6875rem] font-normal leading-tight normal-case tracking-normal"
+                  title={researchMethodLabel(skill)}
+                >
+                  <span className="truncate">{researchMethodLabel(skill)}</span>
+                </Badge>
+              ))}
+            </div>
+          )}
+          {toolCount > 0 && (
+            <div className="mt-2 text-xs text-text-secondary">
+              {toolCount} {capabilityPreview ? "configured" : "available"} tools across{" "}
+              {Object.keys(info.tools ?? {}).length} toolsets
+            </div>
+          )}
+        </Card>
+      )}
+
+      {managedOxaide && researchTrace.phase !== "idle" && (
+        <Card className="px-3 py-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-display text-xs tracking-wider text-text-tertiary">
+              used in this answer
+            </div>
+            <Badge
+              tone={researchTrace.phase === "running" ? "warning" : "success"}
+              className="shrink-0"
+            >
+              {researchTrace.phase === "running" ? "researching" : "complete"}
+            </Badge>
+          </div>
+
+          {usedTools.length > 0 ? (
+            <div className="mt-2 flex flex-col gap-2">
+              {usedTools.map((tool) => (
+                <div key={tool.name} className="min-w-0">
+                  <div className="flex min-w-0 items-center gap-1.5 text-xs font-medium">
+                    {tool.running ? (
+                      <LoaderCircle className="size-3.5 shrink-0 animate-spin text-warning" />
+                    ) : (
+                      <CheckCircle2 className="size-3.5 shrink-0 text-success" />
+                    )}
+                    <span className="truncate">{tool.label}</span>
+                    {tool.count > 1 && (
+                      <span className="shrink-0 text-text-tertiary">×{tool.count}</span>
+                    )}
+                  </div>
+                  {tool.detail && (
+                    <div className="mt-0.5 line-clamp-2 pl-5 text-[0.6875rem] leading-snug text-text-secondary">
+                      {tool.detail}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="mt-2 text-xs text-text-secondary">
+              {researchTrace.phase === "running"
+                ? "Reviewing the question before selecting data tools."
+                : "No data tools were needed for this answer."}
+            </div>
+          )}
+
+          {researchTrace.openedSkills.length > 0 && (
+            <div className="mt-2 border-t border-border pt-2">
+              <div className="text-[0.6875rem] text-text-tertiary">
+                Opened this answer
+              </div>
+              <div className="mt-1 flex flex-wrap gap-1">
+                {researchTrace.openedSkills.map((skill) => (
+                  <Badge key={skill} tone="secondary" className="normal-case tracking-normal">
+                    {researchMethodLabel(skill)}
+                  </Badge>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="mt-2 border-t border-border pt-2 text-[0.6875rem] leading-snug text-text-tertiary">
+            Loaded methods guide the session. This trace lists observed calls only.
+          </div>
+        </Card>
+      )}
+
+      {generatedImage && (
+        <Card className="overflow-hidden p-0">
+          <div className="flex items-center justify-between gap-2 px-3 py-2">
+            <div className="flex min-w-0 items-center gap-1.5 text-xs font-medium">
+              <ImageIcon className="size-3.5 shrink-0 text-success" />
+              <span className="truncate">Latest generated image</span>
+            </div>
+            <a
+              href={generatedImage.src}
+              target="_blank"
+              rel="noreferrer"
+              className="shrink-0 text-text-secondary hover:text-foreground"
+              aria-label="Open generated image"
+              title="Open generated image"
+            >
+              <ExternalLink className="size-3.5" />
+            </a>
+          </div>
+          <a
+            href={generatedImage.src}
+            target="_blank"
+            rel="noreferrer"
+            title={generatedImage.source}
+            className="block border-t border-border bg-black/20 p-2"
+          >
+            <img
+              src={generatedImage.src}
+              alt="Latest image generated in this chat"
+              className="mx-auto max-h-52 w-full rounded object-contain"
+            />
+          </a>
+        </Card>
+      )}
+
+      {supportsReasoning && !managedOxaide && (
         <Card className="py-0">
           <ReasoningPicker
             currentModel={modelName}
@@ -389,7 +623,7 @@ export function ChatSidebar({
         </Card>
       )}
 
-      {modelOpen && (
+      {modelOpen && !managedOxaide && (
         <ModelPickerDialog
           // Same path the Models page uses (REST /api/model/set), not the
           // sidecar config.set RPC, which didn't reliably land in the
@@ -424,16 +658,18 @@ export function ChatSidebar({
         />
       )}
 
-      <ModelReloadConfirm
-        model={pendingReloadModel}
-        onCancel={() => {
-          const m = pendingReloadModel;
-          setPendingReloadModel(null);
-          setModelNotice(
-            `Model set to ${m}. Run /new or refresh the page to apply it to this chat.`,
-          );
-        }}
-      />
+      {!managedOxaide && (
+        <ModelReloadConfirm
+          model={pendingReloadModel}
+          onCancel={() => {
+            const m = pendingReloadModel;
+            setPendingReloadModel(null);
+            setModelNotice(
+              `Model set to ${m}. Run /new or refresh the page to apply it to this chat.`,
+            );
+          }}
+        />
+      )}
     </aside>
   );
 }

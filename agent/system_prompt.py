@@ -118,7 +118,6 @@ _TUI_EMBEDDED_PANE_CLARIFIER = (
     "Cmd/Ctrl+L to send it to the chat composer."
 )
 
-
 def _tui_embedded_pane_clarifier(hint: str) -> str:
     """Append the desktop-embedded-terminal-pane clarifier to a tui hint.
 

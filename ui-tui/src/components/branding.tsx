@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import unicodeSpinners from 'unicode-animations'
 
 import { artWidth, caduceus, CADUCEUS_WIDTH, logo, LOGO_WIDTH } from '../banner.js'
+import type { ArtLine } from '../banner.js'
 import { flat } from '../lib/text.js'
 import type { Theme } from '../theme.js'
 import type { PanelSection, SessionInfo } from '../types.js'
@@ -27,12 +28,16 @@ function InlineLoader({ label, t }: { label: string; t: Theme }) {
   )
 }
 
-export function ArtLines({ lines }: { lines: [string, string][] }) {
+export function ArtLines({ lines }: { lines: ArtLine[] }) {
   return (
     <Box flexDirection="column" height={lines.length} opaque width={artWidth(lines)}>
-      {lines.map(([c, text], i) => (
-        <Text color={c} key={i} wrap="truncate-end">
-          {text}
+      {lines.map((runs, i) => (
+        <Text key={i} wrap="truncate-end">
+          {runs.map(([color, text], j) => (
+            <Text color={color || undefined} key={j}>
+              {text}
+            </Text>
+          ))}
         </Text>
       ))}
     </Box>
@@ -155,19 +160,28 @@ function CollapseToggle({
 const SKILLS_MAX = 8
 const TOOLSETS_MAX = 8
 
+const OXAIDE_METHOD_LABELS: Record<string, string> = {
+  'investment-research': 'Thesis and evidence review',
+  'market-return-analysis': 'Return and risk analysis',
+  stocks: 'Market data and quote provenance'
+}
+
+const oxaideMethodLabel = (skill: string) => OXAIDE_METHOD_LABELS[skill] ?? skill.replaceAll('-', ' ')
+
 export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
   const term = useStdout().stdout?.columns ?? 100
   const cols = Math.max(20, Math.min(term, maxWidth ?? term))
+  const isHostedOxaide = t.brand.org === 'Oxaide'
   const heroLines = caduceus(t.color, t.bannerHero || undefined)
   const leftW = Math.min((artWidth(heroLines) || CADUCEUS_WIDTH) + 4, Math.floor(cols * 0.4))
-  const wide = cols >= 90 && leftW + 40 < cols
+  const wide = !isHostedOxaide && cols >= 90 && leftW + 40 < cols
   const w = Math.max(20, wide ? cols - leftW - 14 : cols - 12)
   const lineBudget = Math.max(12, w - 2)
   const strip = (s: string) => (s.endsWith('_tools') ? s.slice(0, -6) : s)
 
   // ── Local collapse state for each section ──
-  const [toolsOpen, setToolsOpen] = useState(true)
-  const [skillsOpen, setSkillsOpen] = useState(false)
+  const [toolsOpen, setToolsOpen] = useState(!isHostedOxaide)
+  const [skillsOpen, setSkillsOpen] = useState(isHostedOxaide)
   const [systemOpen, setSystemOpen] = useState(false)
   const [mcpOpen, setMcpOpen] = useState(false)
 
@@ -193,6 +207,8 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
   const skillEntries = Object.entries(info.skills).sort()
   const skillsTotal = flat(info.skills).length
   const skillsCatCount = skillEntries.length
+  const preloadedSkills = info.preloaded_skills ?? []
+  const capabilityPreview = Boolean(info.capability_preview)
 
   const skillsBody = () => {
     if (info.lazy && skillEntries.length === 0) {
@@ -224,8 +240,8 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
   // hermes_cli/banner.py) and the "connected" label on the collapse toggle.
   const mcpServers = info.mcp_servers ?? []
   const mcpConnected = mcpServers.filter(s => s.connected).length
-  const isHostedOxaide = t.brand.org === 'Oxaide'
   const showRuntimeDetails = !isHostedOxaide
+  const runtimeLabel = isHostedOxaide ? 'Oxaide Research Engine' : info.model.split('/').pop()
 
   const toolsBody = () => {
     const shown = toolEntries.slice(0, TOOLSETS_MAX)
@@ -289,7 +305,7 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
           <Text />
 
           <Text color={t.color.accent}>
-            {info.model.split('/').pop()}
+            {runtimeLabel}
             <Text color={t.color.muted}> · {t.brand.org}</Text>
           </Text>
 
@@ -322,7 +338,7 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
           // here so they aren't lost.
           <Box flexDirection="column" marginBottom={1}>
             <Text color={t.color.accent} wrap="truncate-end">
-              {info.model.split('/').pop()}
+              {runtimeLabel}
               <Text color={t.color.muted}> · {t.brand.org}</Text>
             </Text>
             {showRuntimeDetails ? (
@@ -341,23 +357,45 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
 
         {/* ── Tools (expanded by default) ── */}
         <Box flexDirection="column" marginTop={1}>
-          <CollapseToggle onToggle={() => setToolsOpen(v => !v)} open={toolsOpen} t={t} title="Available Tools" />
+          <CollapseToggle
+            onToggle={() => setToolsOpen(v => !v)}
+            open={toolsOpen}
+            t={t}
+            title={capabilityPreview ? 'Configured Tools' : 'Available Tools'}
+          />
           {toolsOpen && toolsBody()}
         </Box>
 
         {/* ── Skills (collapsed by default) ── */}
         <Box flexDirection="column" marginTop={1}>
           <CollapseToggle
-            count={skillsTotal}
+            count={isHostedOxaide ? preloadedSkills.length : skillsTotal}
             onToggle={() => setSkillsOpen(v => !v)}
             open={skillsOpen}
             suffix={
-              skillsCatCount > 0 ? `in ${skillsCatCount} categor${skillsCatCount === 1 ? 'y' : 'ies'}` : undefined
+              !isHostedOxaide && skillsCatCount > 0
+                ? `in ${skillsCatCount} categor${skillsCatCount === 1 ? 'y' : 'ies'}`
+                : undefined
             }
             t={t}
-            title="Available Skills"
+            title={
+              isHostedOxaide
+                ? capabilityPreview
+                  ? 'Configured Research Skills'
+                  : 'Loaded Research Skills'
+                : 'Available Skills'
+            }
           />
-          {skillsOpen && skillsBody()}
+          {skillsOpen &&
+            (isHostedOxaide ? (
+              <Text color={t.color.text} wrap="truncate">
+                {preloadedSkills.length > 0
+                  ? preloadedSkills.map(oxaideMethodLabel).join(' · ')
+                  : 'No research methods loaded.'}
+              </Text>
+            ) : (
+              skillsBody()
+            ))}
         </Box>
 
         {/* ── System Prompt (collapsed by default) ── */}
@@ -392,8 +430,11 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
         <Text />
 
         <Text color={t.color.text}>
-          {toolsTotal} tools{' · '}
-          {skillsTotal} skills
+          {isHostedOxaide && capabilityPreview ? `${toolsTotal} configured tools` : `${toolsTotal} tools`}
+          {' · '}
+          {isHostedOxaide && capabilityPreview
+            ? `${preloadedSkills.length} research skills`
+            : `${isHostedOxaide ? preloadedSkills.length : skillsTotal} skills`}
           {mcpConnected ? ` · ${mcpConnected} MCP` : ''}
           {' · '}
           <Text color={t.color.muted}>/help for commands</Text>
