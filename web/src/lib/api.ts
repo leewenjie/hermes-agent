@@ -266,6 +266,18 @@ export async function authedFetch(
   });
 }
 
+export function managedFileDownloadUrl(
+  path: string,
+  token = typeof window !== "undefined" ? window.__HERMES_SESSION_TOKEN__ : undefined,
+): string {
+  const query = new URLSearchParams({ path });
+  // Browser navigation cannot set the loopback session header. The backend
+  // accepts this query token only on /api/files/download; gated hosted mode
+  // uses its secure session cookie and therefore does not need one.
+  if (token) query.set("token", token);
+  return `${BASE}/api/files/download?${query.toString()}`;
+}
+
 /**
  * Build an absolute ``ws(s)://`` URL for a dashboard WebSocket endpoint,
  * with the correct auth query param appended for the active mode (fresh
@@ -488,6 +500,7 @@ export const api = {
     fetchJSON<ManagedFileReadResponse>(
       `/api/files/read?path=${encodeURIComponent(path)}`,
     ),
+  downloadFileUrl: (path: string) => managedFileDownloadUrl(path),
   uploadFile: (path: string, file: File, overwrite = true) => {
     // Stream the raw bytes as multipart/form-data. Do NOT set Content-Type —
     // the browser adds the multipart boundary automatically. Sending the file

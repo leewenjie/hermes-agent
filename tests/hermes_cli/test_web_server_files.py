@@ -171,6 +171,48 @@ def test_forced_root_paths_stay_under_root(forced_files_client, tmp_path):
     assert escaped.status_code == 403
 
 
+def test_legacy_upload_rejects_dangling_symlink_escape(forced_files_client, tmp_path):
+    client, root = forced_files_client
+    root.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside" / "created.txt"
+    link = root / "upload-link"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("filesystem does not allow file symlinks")
+
+    response = client.post(
+        "/api/files/upload",
+        json={
+            "path": str(link),
+            "data_url": "data:text/plain;base64,c2VjcmV0",
+        },
+    )
+
+    assert response.status_code == 403
+    assert not outside.exists()
+    assert link.is_symlink()
+
+
+def test_listing_omits_escaping_symlink_and_keeps_safe_files(forced_files_client, tmp_path):
+    client, root = forced_files_client
+    root.mkdir(parents=True, exist_ok=True)
+    safe = root / "safe.txt"
+    safe.write_text("safe")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("private")
+    link = root / "escape.txt"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("filesystem does not allow file symlinks")
+
+    response = client.get("/api/files", params={"path": str(root)})
+
+    assert response.status_code == 200
+    assert [entry["name"] for entry in response.json()["entries"]] == ["safe.txt"]
+
+
 def test_local_mode_defaults_to_home_and_can_jump_to_absolute_path(local_files_client, tmp_path):
     client, home = local_files_client
     (home / "home.txt").write_text("home")
@@ -274,6 +316,22 @@ def test_download_returns_file_as_attachment(forced_files_client):
     disposition = resp.headers["content-disposition"]
     assert "attachment" in disposition
     assert "hello.txt" in disposition
+
+
+def test_large_file_uses_download_endpoint_beyond_preview_cap(forced_files_client, monkeypatch):
+    client, root = forced_files_client
+    root.mkdir(parents=True, exist_ok=True)
+    file_path = root / "large-report.bin"
+    file_path.write_bytes(b"123456")
+    monkeypatch.setattr(web_server, "_FS_DATA_URL_MAX_BYTES", 4)
+    monkeypatch.setattr(web_server, "_MANAGED_FILE_MAX_BYTES", 10)
+
+    preview = client.get("/api/files/read", params={"path": str(file_path)})
+    download = client.get("/api/files/download", params={"path": str(file_path)})
+
+    assert preview.status_code == 413
+    assert download.status_code == 200
+    assert download.content == b"123456"
 
 
 def test_download_authenticates_via_query_token(forced_files_client):

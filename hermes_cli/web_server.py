@@ -1894,6 +1894,12 @@ def _resolve_managed_path(
     if ".." in candidate.parts:
         raise HTTPException(status_code=400, detail="Path cannot contain '..'")
 
+    if for_write and candidate.is_symlink():
+        # Path.exists() is false for dangling symlinks. Without this explicit
+        # guard the legacy write endpoint could treat one as a new file and
+        # follow it outside the locked workspace root.
+        raise HTTPException(status_code=403, detail="File writes through symlinks are not allowed")
+
     if for_write and not candidate.exists():
         parent = _canonical_path(candidate.parent)
         resolved = parent / candidate.name
@@ -2051,11 +2057,17 @@ async def list_managed_files(request: Request, path: Optional[str] = None):
         raise HTTPException(status_code=400, detail="Path is not a directory")
 
     try:
-        entries = [
-            _managed_file_entry(policy, child)
-            for child in target.iterdir()
-            if not _is_sensitive_path(child)
-        ]
+        entries = []
+        for child in target.iterdir():
+            if _is_sensitive_path(child):
+                continue
+            try:
+                entries.append(_managed_file_entry(policy, child))
+            except HTTPException:
+                # One broken, unreadable, or escaping symlink must not make
+                # the whole workspace directory unusable. Omit the unsafe
+                # entry and preserve the rest of the listing.
+                continue
     except PermissionError:
         raise HTTPException(status_code=403, detail="Directory is not readable")
     except OSError as exc:
@@ -2154,13 +2166,26 @@ async def upload_managed_file(payload: ManagedFileUpload, request: Request):
         raise HTTPException(status_code=409, detail="File already exists")
 
     data, _mime_type = _decode_data_url(payload.data_url)
+    tmp_path: Path | None = None
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{target.name}.", suffix=".upload", dir=str(target.parent)
+        )
+        tmp_path = Path(tmp_name)
+        with os.fdopen(tmp_fd, "wb") as out:
+            out.write(data)
+        # Atomic replacement never follows a final-component symlink, even if
+        # another same-user process creates one after path validation.
+        os.replace(tmp_path, target)
+        tmp_path = None
     except PermissionError:
         raise HTTPException(status_code=403, detail="File is not writable")
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Could not write file: {exc}")
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
 
     return {
         "ok": True,

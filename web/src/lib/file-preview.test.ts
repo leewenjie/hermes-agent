@@ -4,6 +4,7 @@ import {
   managedFilePreviewKind,
   managedFilePreviewPath,
 } from "./file-preview";
+import { managedFileDownloadUrl } from "./api";
 
 describe("managedFilePreviewPath", () => {
   it("reads an encoded absolute file path", () => {
@@ -32,5 +33,18 @@ describe("managedFilePreviewKind", () => {
     ["application/octet-stream", "model.bin", "unsupported"],
   ] as const)("classifies %s %s as %s", (mime, name, expected) => {
     expect(managedFilePreviewKind(mime, name)).toBe(expected);
+  });
+});
+
+describe("managedFileDownloadUrl", () => {
+  it("builds the dedicated attachment URL with a loopback token", () => {
+    const url = managedFileDownloadUrl(
+      "/opt/data/workspace/reports/market memo.pdf",
+      "session-token",
+    );
+
+    expect(url).toBe(
+      "/api/files/download?path=%2Fopt%2Fdata%2Fworkspace%2Freports%2Fmarket+memo.pdf&token=session-token",
+    );
   });
 });
