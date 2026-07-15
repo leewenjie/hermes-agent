@@ -15,6 +15,7 @@ import {
   Database,
   MessageSquare,
   Search,
+  Share2,
   Trash2,
   Clock,
   Terminal,
@@ -71,6 +72,11 @@ import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { PluginSlot } from "@/plugins";
 import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
+import { ResearchShareDialog } from "@/components/ResearchShareDialog";
+import {
+  customerRuntimeLabel,
+  isOxaideManagedDashboard,
+} from "@/lib/managed-dashboard";
 
 const SOURCE_CONFIG: Record<string, { icon: typeof Terminal; color: string }> =
   {
@@ -389,6 +395,8 @@ function SessionRow({
   onDelete,
   onRename,
   onExport,
+  onShare,
+  sharingEnabled,
   resumeInChatEnabled,
 }: SessionRowProps) {
   const [messages, setMessages] = useState<SessionMessage[] | null>(null);
@@ -397,6 +405,7 @@ function SessionRow({
   const [renameValue, setRenameValue] = useState(session.title ?? "");
   const [renameSaving, setRenameSaving] = useState(false);
   const { t } = useI18n();
+  const managedOxaide = isOxaideManagedDashboard();
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -490,6 +499,22 @@ function SessionRow({
       >
         <Download />
       </Button>
+
+      {sharingEnabled && (
+        <Button
+          ghost
+          size="icon"
+          className="text-muted-foreground hover:text-success"
+          aria-label="Share read-only research"
+          title="Share read-only research"
+          onClick={(e) => {
+            e.stopPropagation();
+            onShare();
+          }}
+        >
+          <Share2 />
+        </Button>
+      )}
 
       <Button
         ghost
@@ -615,7 +640,11 @@ function SessionRow({
               </div>
               <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-muted-foreground">
                 <span className="max-w-[min(100%,12rem)] truncate sm:max-w-[180px]">
-                  {(session.model ?? t.common.unknown).split("/").pop()}
+                  {customerRuntimeLabel(
+                    session.model,
+                    managedOxaide,
+                    t.common.unknown,
+                  )}
                 </span>
                 <span className="text-border">&#183;</span>
                 <span className="shrink-0">
@@ -723,6 +752,7 @@ function SessionsPagination({
 }
 
 export default function SessionsPage() {
+  const managedOxaide = isOxaideManagedDashboard();
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
@@ -768,6 +798,7 @@ export default function SessionsPage() {
   const [pruneDays, setPruneDays] = useState("90");
   const [pruning, setPruning] = useState(false);
   const [importingSessions, setImportingSessions] = useState(false);
+  const [shareSession, setShareSession] = useState<SessionInfo | null>(null);
   const { toast, showToast } = useToast();
   const { t } = useI18n();
   const { setAfterTitle, setEnd } = usePageHeader();
@@ -999,6 +1030,9 @@ export default function SessionsPage() {
         try {
           await api.deleteSession(id);
           setSessions((prev) => prev.filter((s) => s.id !== id));
+          setSearchResults((prev) =>
+            prev?.filter((result) => result.session_id !== id) ?? null,
+          );
           setTotal((prev) => prev - 1);
           if (expandedId === id) setExpandedId(null);
           // Drop the deleted ID from any active bulk-select set — it
@@ -1175,6 +1209,13 @@ export default function SessionsPage() {
         setOverviewSessions((prev) =>
           prev.map((s) => (s.id === id ? { ...s, title } : s)),
         );
+        setSearchResults((prev) =>
+          prev?.map((result) =>
+            result.session_id === id
+              ? { ...result, session: { ...result.session, title } }
+              : result,
+          ) ?? null,
+        );
         showToast("Session renamed", "success");
         loadStats();
       } catch {
@@ -1246,10 +1287,11 @@ export default function SessionsPage() {
     }
   }
 
-  // When searching, filter sessions to those with FTS matches;
-  // when not searching, show all sessions
+  // Search is global across the session store, so render the complete session
+  // rows returned beside each FTS hit rather than intersecting with the current
+  // 20-row page. Otherwise a valid match from an older page disappears.
   const filtered = searchResults
-    ? sessions.filter((s) => snippetMap.has(s.id))
+    ? searchResults.map((result) => result.session)
     : sessions;
 
   const platformEntries = status
@@ -1714,6 +1756,8 @@ export default function SessionsPage() {
                   onDelete={() => sessionDelete.requestDelete(s.id)}
                   onRename={handleRename}
                   onExport={handleExport}
+                  onShare={() => setShareSession(s)}
+                  sharingEnabled={Boolean(status?.oxaide_runtime_key)}
                   resumeInChatEnabled={resumeInChatEnabled}
                 />
               ))}
@@ -1758,7 +1802,11 @@ export default function SessionsPage() {
 
                       <span className="min-w-0 break-words text-xs text-muted-foreground">
                         <span className="font-mono-ui">
-                          {(s.model ?? t.common.unknown).split("/").pop()}
+                          {customerRuntimeLabel(
+                            s.model,
+                            managedOxaide,
+                            t.common.unknown,
+                          )}
                         </span>{" "}
                         · {s.message_count} {t.common.msgs} ·{" "}
                         {timeAgo(s.last_active)}
@@ -1787,6 +1835,12 @@ export default function SessionsPage() {
       )}
 
       <PluginSlot name="sessions:bottom" />
+      {shareSession && (
+        <ResearchShareDialog
+          session={shareSession}
+          onClose={() => setShareSession(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1796,6 +1850,8 @@ interface SessionRowProps {
   isSelected: boolean;
   onDelete: () => void;
   onExport: (id: string) => void;
+  onShare: () => void;
+  sharingEnabled: boolean;
   onRename: (id: string, title: string) => Promise<void>;
   onSelectClick: (event: React.MouseEvent) => void;
   onToggle: () => void;

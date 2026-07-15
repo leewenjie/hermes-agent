@@ -13,7 +13,11 @@ from fastapi.testclient import TestClient
 from hermes_cli import web_server
 from hermes_cli.dashboard_auth import clear_providers
 from hermes_cli.dashboard_auth.ws_tickets import _reset_for_tests, consume_ticket
-from hermes_cli.dashboard_auth.routes import _reset_oxaide_launch_tokens_for_tests
+from hermes_cli.dashboard_auth.routes import (
+    _OXAIDE_SESSION_TTL_SECONDS,
+    _decode_oxaide_session_token,
+    _reset_oxaide_launch_tokens_for_tests,
+)
 
 
 def _launch_token(secret: str, *, expires_at: int | None = None) -> str:
@@ -68,7 +72,7 @@ def gated_app(monkeypatch):
     monkeypatch.setenv("HERMES_OXAIDE_DEMO_AUTH_SECRET", secret)
     monkeypatch.setenv("HERMES_OXAIDE_WORKSPACE_ID", "workspace-1")
     monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", "runtimekey1234567890abcd")
-    monkeypatch.setenv("HERMES_HOSTED_RUNTIME_SHARED_SECRET", "test-hosted-runtime-secret")
+    monkeypatch.setenv("HERMES_HOSTED_RUNTIME_SHARED_SECRET", "test-hosted-runtime-secret-at-least-32-bytes")
     clear_providers()
     _reset_for_tests()
     _reset_oxaide_launch_tokens_for_tests()
@@ -109,20 +113,52 @@ def test_signed_launch_creates_verified_dashboard_session(gated_app):
         "display_name": "Oxaide User",
         "org_id": "workspace-1",
         "provider": "oxaide-demo",
-        "expires_at": pytest.approx(int(time.time()) + 600, abs=3),
+        "expires_at": pytest.approx(
+            int(time.time()) + _OXAIDE_SESSION_TTL_SECONDS, abs=3
+        ),
     }
 
     ticket = client.post("/api/auth/ws-ticket")
     assert ticket.status_code == 200
     ticket_info = consume_ticket(ticket.json()["ticket"])
-    assert ticket_info["trusted_context"] == {
+    trusted_context = ticket_info["trusted_context"]
+    session_jti = trusted_context.pop("jti")
+    assert session_jti != "test-launch-jti"
+    assert len(session_jti) == 32
+    assert trusted_context == {
         "workspace_id": "workspace-1",
         "runtime_session_id": "rt_workspace_1",
         "runtime_key": "runtimekey1234567890abcd",
         "user_id": "oxaide-user-1",
-        "jti": "test-launch-jti",
-        "expires_at": pytest.approx(int(time.time()) + 600, abs=3),
+        "expires_at": pytest.approx(
+            int(time.time()) + _OXAIDE_SESSION_TTL_SECONDS, abs=3
+        ),
     }
+
+    access_cookie = client.cookies.get("__Host-hermes_session_at")
+    assert access_cookie is not None
+    exchanged = _decode_oxaide_session_token(access_cookie)
+    assert exchanged["aud"] == "oxaide-hermes-session"
+    assert exchanged["workspace_id"] == "workspace-1"
+    assert exchanged["runtime_key"] == "runtimekey1234567890abcd"
+    assert exchanged["jti"] == session_jti
+    assert exchanged["exp"] - exchanged["iat"] == _OXAIDE_SESSION_TTL_SECONDS
+
+
+def test_public_status_exposes_only_nonsecret_tenant_identity(gated_app):
+    client, _secret = gated_app
+
+    response = client.get("/api/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["oxaide_runtime_key"] == "runtimekey1234567890abcd"
+    assert payload["oxaide_workspace_fingerprint"] == hmac.new(
+        _secret.encode(),
+        b"oxaide-workspace-fingerprint:v1:workspace-1",
+        hashlib.sha256,
+    ).hexdigest()
+    assert "workspace-1" not in json.dumps(payload)
 
 
 def test_oxaide_tenant_login_redirects_to_single_customer_login(gated_app):
@@ -317,7 +353,7 @@ def test_tenant_container_rejects_workspace_mismatch(gated_app, monkeypatch):
 def test_tenant_container_rejects_runtime_mismatch(gated_app, monkeypatch):
     client, secret = gated_app
     monkeypatch.setenv("HERMES_OXAIDE_WORKSPACE_ID", "workspace-1")
-    monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", "different-runtime-key")
+    monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", "differentruntimekey1234567890")
 
     response = client.get(
         f"/auth/oxaide-launch?token={_launch_token(secret)}",
@@ -374,7 +410,7 @@ def test_hosted_runtime_uses_its_own_shared_secret_on_gated_dashboard(gated_app)
 
     response = client.get(
         "/api/hosted/runtime/health",
-        headers={"X-Hermes-Hosted-Secret": "test-hosted-runtime-secret"},
+        headers={"X-Hermes-Hosted-Secret": "test-hosted-runtime-secret-at-least-32-bytes"},
     )
 
     assert response.status_code == 200
@@ -387,3 +423,21 @@ def test_hosted_runtime_rejects_missing_shared_secret(gated_app):
     response = client.get("/api/hosted/runtime/health")
 
     assert response.status_code == 401
+
+
+def test_placeholder_runtime_credentials_are_rejected(gated_app, monkeypatch):
+    client, _secret = gated_app
+    monkeypatch.setenv("HERMES_OXAIDE_DEMO_AUTH_SECRET", "replace-with-a-long-random-secret-value")
+    monkeypatch.setenv("HERMES_HOSTED_RUNTIME_SHARED_SECRET", "__replace_with_a_separate_long_random_secret__")
+
+    launch = client.get(
+        f"/auth/oxaide-launch?token={_launch_token('replace-with-a-long-random-secret-value')}",
+        follow_redirects=False,
+    )
+    hosted = client.get(
+        "/api/hosted/runtime/health",
+        headers={"X-Hermes-Hosted-Secret": "__replace_with_a_separate_long_random_secret__"},
+    )
+
+    assert launch.status_code == 503
+    assert hosted.status_code == 401

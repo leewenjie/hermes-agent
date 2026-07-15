@@ -739,6 +739,10 @@ PLATFORM_HINTS = {
     ),
     "tui": (
         "You are running in the Hermes terminal UI (TUI). "
+        "You can deliver files as clickable links — include a standalone "
+        "MEDIA:/absolute/path/to/file line in your response for each "
+        "user-facing file you create. Never expose credentials, configuration, "
+        "session state, or other internal files. "
         "Cron jobs scheduled from this session are LOCAL-ONLY: their output is "
         "saved (viewable via cronjob action='list') but is NOT delivered back "
         "into this TUI session — there is no live-delivery channel here. If the "

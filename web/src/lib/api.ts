@@ -307,6 +307,10 @@ function appendProfileParam(url: string, profile?: string): string {
 export const api = {
   buildWsUrl,
   getStatus: () => fetchJSON<StatusResponse>("/api/status"),
+  getMedia: (path: string) =>
+    fetchJSON<{ data_url: string }>(
+      `/api/media?path=${encodeURIComponent(path)}`,
+    ),
   /**
    * Identity probe for the dashboard auth gate (Phase 7).
    *
@@ -419,6 +423,44 @@ export const api = {
     fetchJSON<SessionStoreStats>(appendProfileParam("/api/sessions/stats", profile)),
   exportSessionUrl: (id: string, profile = getManagementProfile()) =>
     appendProfileParam(`/api/sessions/${encodeURIComponent(id)}/export`, profile),
+  previewResearchShare: (sessionId: string, title?: string, description?: string) =>
+    fetchJSON<ResearchSharePreview>("/api/research-shares/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sessionId, title, description }),
+    }),
+  listResearchShares: (sessionId: string) =>
+    fetchJSON<{ ok: true; shares: ResearchSharePublished[] }>(
+      `/api/research-shares?session_id=${encodeURIComponent(sessionId)}`,
+    ),
+  publishResearchShare: (params: {
+    sessionId: string;
+    title: string;
+    description?: string;
+    expiresInDays: 7 | 30 | 90;
+    snapshotSha256: string;
+  }) =>
+    fetchJSON<ResearchSharePublished>("/api/research-shares", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "publish",
+        session_id: params.sessionId,
+        title: params.title,
+        description: params.description,
+        expires_in_days: params.expiresInDays,
+        snapshot_sha256: params.snapshotSha256,
+      }),
+    }),
+  revokeResearchShare: (shareId: string) =>
+    fetchJSON<{ ok: true; action: "revoke"; share_id: string }>(
+      "/api/research-shares",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "revoke", share_id: shareId }),
+      },
+    ),
   importSessions: (
     sessions: Array<Record<string, unknown>>,
     profile = getManagementProfile(),
@@ -1789,6 +1831,7 @@ export interface PlatformStatus {
 }
 
 export interface StatusResponse {
+  oxaide_runtime_key?: string;
   active_sessions: number;
   /** Phase 7: ``true`` when the dashboard's OAuth gate is engaged
    * (public bind, no ``--insecure``). Read alongside ``auth_providers``
@@ -1938,6 +1981,40 @@ export interface SessionMessage {
 export interface SessionMessagesResponse {
   session_id: string;
   messages: SessionMessage[];
+}
+
+export interface ResearchShareArtifact {
+  name: string;
+  mime_type: "image/png" | "image/jpeg" | "image/webp" | "image/svg+xml";
+  data_base64: string;
+  sha256: string;
+}
+
+export interface ResearchSharePreview {
+  ok: true;
+  title: string;
+  description: string;
+  snapshot: {
+    schema_version: "research-share.v1";
+    messages: Array<{
+      role: "user" | "assistant";
+      content: string;
+      timestamp?: number;
+      artifacts?: string[];
+    }>;
+    artifacts: ResearchShareArtifact[];
+  };
+  warnings: string[];
+  snapshot_sha256: string;
+}
+
+export interface ResearchSharePublished {
+  ok: true;
+  action: "publish";
+  share_id: string;
+  public_url: string;
+  expires_at: string;
+  session_id?: string;
 }
 
 export interface LogsResponse {
@@ -2258,6 +2335,7 @@ export interface SessionSearchResult {
   source: string | null;
   model: string | null;
   session_started: number | null;
+  session: SessionInfo;
 }
 
 export interface SessionSearchResponse {

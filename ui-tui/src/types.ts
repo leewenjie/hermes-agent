@@ -150,12 +150,14 @@ export interface McpServerStatus {
 }
 
 export interface SessionInfo {
+  capability_preview?: boolean
   cwd?: string
   fast?: boolean
   install_warning?: string
   lazy?: boolean
   mcp_servers?: McpServerStatus[]
   model: string
+  preloaded_skills?: string[]
   profile_name?: string
   reasoning_effort?: string
   release_date?: string

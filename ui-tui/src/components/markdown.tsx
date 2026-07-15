@@ -1,6 +1,7 @@
 import { Box, Link, stringWidth, Text } from '@hermes/ink'
 import { Fragment, memo, type ReactNode, useMemo } from 'react'
 
+import { DASHBOARD_TUI_MODE } from '../config/env.js'
 import { ensureEmojiPresentation } from '../lib/emoji.js'
 import { normalizeExternalUrl, urlSlugTitleLabel, useLinkTitle } from '../lib/externalLink.js'
 import { BOX_CLOSE, BOX_OPEN, texToUnicode } from '../lib/mathUnicode.js'
@@ -88,6 +89,45 @@ const MATH_BLOCK_CLOSE_BRACKET_RE = /^(.*?)\\\]\s*$/
 
 export const MEDIA_LINE_RE = /^\s*[`"']?MEDIA:\s*(\S+?)[`"']?\s*$/
 export const AUDIO_DIRECTIVE_RE = /^\s*\[\[audio_as_voice\]\]\s*$/
+
+const DASHBOARD_PREVIEWABLE_EXTENSIONS = new Set([
+  'bmp',
+  'csv',
+  'gif',
+  'htm',
+  'html',
+  'jpeg',
+  'jpg',
+  'json',
+  'jsonl',
+  'log',
+  'markdown',
+  'md',
+  'pdf',
+  'png',
+  'svg',
+  'toml',
+  'txt',
+  'webp',
+  'xml',
+  'yaml',
+  'yml'
+])
+
+export const dashboardManagedFilePath = (line: string): string | null => {
+  const path = line.trim().match(/^[`"']?(\/opt\/data\/[^\s`"']+)[`"']?$/)?.[1]
+  const extension = path?.split('.').pop()?.toLowerCase()
+
+  return path && extension && DASHBOARD_PREVIEWABLE_EXTENSIONS.has(extension) ? path : null
+}
+
+export const mediaLinkTarget = (media: string, dashboardMode = DASHBOARD_TUI_MODE): string => {
+  if (dashboardMode && media.startsWith('/opt/data/')) {
+    return `/files?preview=${encodeURIComponent(media)}`
+  }
+
+  return /^(?:\/|[a-z]:[\\/])/i.test(media) ? `file://${media}` : media
+}
 
 // Inline markdown tokens, in priority order. The outer regex picks the
 // leftmost match at each position, preferring earlier alternatives on tie —
@@ -742,7 +782,7 @@ function MdImpl({ cols, compact, t, text }: MdProps) {
         continue
       }
 
-      const media = line.match(MEDIA_LINE_RE)?.[1]
+      const media = line.match(MEDIA_LINE_RE)?.[1] ?? (DASHBOARD_TUI_MODE ? dashboardManagedFilePath(line) : null)
 
       if (media) {
         start('paragraph')
@@ -750,7 +790,7 @@ function MdImpl({ cols, compact, t, text }: MdProps) {
           <Text color={t.color.muted} key={key} wrap="wrap-trim">
             {'▸ '}
 
-            <Link url={/^(?:\/|[a-z]:[\\/])/i.test(media) ? `file://${media}` : media}>
+            <Link url={mediaLinkTarget(media)}>
               <Text color={t.color.accent} underline>
                 {media}
               </Text>

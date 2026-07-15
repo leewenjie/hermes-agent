@@ -111,7 +111,7 @@ describe('branding MCP headline count', () => {
 })
 
 describe('Oxaide hosted banner privacy', () => {
-  it('hides upstream identity and runtime metadata', async () => {
+  it('hides upstream identity and shows the loaded research skills', async () => {
     const oxaideTheme = fromSkin(
       {},
       {
@@ -124,18 +124,25 @@ describe('Oxaide hosted banner privacy', () => {
     const frame = await renderFooter(
       {
         ...baseInfo([]),
+        capability_preview: true,
         cwd: '/opt/hermes',
+        preloaded_skills: ['investment-research', 'market-return-analysis', 'stocks'],
         release_date: '2026.7.2',
         version: '0.18.2'
       },
       oxaideTheme
     )
 
-    expect(frame).toContain('Oxaide Research')
+    expect(frame).toContain('Oxaide Research Engine · Oxaide')
+    expect(frame).not.toContain('test-model')
     expect(frame).not.toContain('Hermes')
     expect(frame).not.toContain('Nous Research')
     expect(frame).not.toContain('/opt/hermes')
     expect(frame).not.toContain('Session:')
     expect(frame).not.toContain('0.18.2')
+    expect(frame).toContain('Configured Research Skills (3)')
+    expect(frame).toContain('Thesis and evidence review · Return and risk analysis · Market data and quote provenance')
+    expect(frame).not.toContain('investment-research')
+    expect(frame).toContain('2 configured tools · 3 research skills')
   })
 })

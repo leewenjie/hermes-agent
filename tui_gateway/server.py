@@ -2660,10 +2660,11 @@ _OXAIDE_REQUIRED_SKILLS = frozenset(
 def _is_oxaide_tenant_runtime() -> bool:
     def configured(name: str) -> bool:
         value = os.environ.get(name, "").strip()
+        lowered = value.lower()
         return bool(
             value
-            and not value.lower().startswith("replace-with-")
-            and not value.startswith("__REPLACE_WITH_")
+            and not lowered.startswith("replace-with-")
+            and not lowered.startswith("__replace_with_")
         )
 
     return configured("HERMES_OXAIDE_WORKSPACE_ID") and configured(
@@ -3483,6 +3484,7 @@ def _session_info(agent, session: dict | None = None) -> dict:
         "approval_mode": approval_mode,
         "tools": {},
         "skills": {},
+        "preloaded_skills": list((session or {}).get("preloaded_skills") or []),
         "cwd": cwd,
         "branch": _git_branch_for_cwd(cwd),
         "personality": str(personality or ""),
@@ -3553,6 +3555,37 @@ def _session_info(agent, session: dict | None = None) -> dict:
     if warn:
         info["credential_warning"] = warn
     return info
+
+
+def _pre_agent_capability_preview() -> dict:
+    """Return read-only capability metadata for an unbuilt managed session.
+
+    Oxaide cannot construct the real agent until the first metered user turn is
+    authorized. Resolve the deployment-pinned tool schemas and skill identifiers
+    without loading skill bodies or mutating the eventual prompt. The full
+    ``session.info`` emitted after agent construction remains authoritative.
+    """
+    preview = {"tools": {}, "skills": {}, "preloaded_skills": []}
+    if not _is_oxaide_tenant_runtime():
+        return preview
+
+    try:
+        from toolsets import resolve_toolset
+
+        for toolset in _load_enabled_toolsets() or []:
+            configured = resolve_toolset(toolset, include_registry=False)
+            if configured:
+                preview["tools"][toolset] = configured
+    except Exception as exc:
+        logger.warning("Could not preview managed Oxaide tools: %s", exc)
+
+    try:
+        preview["preloaded_skills"] = _parse_tui_skills_env()
+    except Exception as exc:
+        logger.warning("Could not preview managed Oxaide skills: %s", exc)
+
+    preview["capability_preview"] = True
+    return preview
 
 
 def _tool_ctx(name: str, args: dict) -> str:
@@ -4654,8 +4687,16 @@ def _make_agent(
             startup_skills,
             task_id=session_id or key,
         )
+        with _sessions_lock:
+            live_session = _sessions.get(sid)
+            if live_session is not None:
+                live_session["preloaded_skills"] = list(loaded_skills)
         if missing_skills:
             missing_display = ", ".join(missing_skills)
+            if _is_oxaide_tenant_runtime():
+                raise RuntimeError(
+                    "Oxaide tenant research skills failed to load: " + missing_display
+                )
             # Degrade gracefully when some skills loaded; only hard-fail when
             # every requested skill is missing. Mirrors cli.py — a typo'd skill
             # name should not crash the worker and auto-block the Kanban task.
@@ -5558,6 +5599,7 @@ def _(rid, params: dict) -> dict:
     if not trusted_context:
         _schedule_agent_build(sid)
     _schedule_session_cap_enforcement()  # trim detached idle sessions over the cap
+    capability_preview = _pre_agent_capability_preview()
 
     return _ok(
         rid,
@@ -5581,8 +5623,7 @@ def _(rid, params: dict) -> dict:
                     if session_model_override and session_model_override.get("provider")
                     else {}
                 ),
-                "tools": {},
-                "skills": {},
+                **capability_preview,
                 "cwd": _sessions[sid]["cwd"],
                 "branch": _git_branch_for_cwd(_sessions[sid]["cwd"]),
                 "lazy": True,
@@ -5729,11 +5770,10 @@ def _lazy_resume_info(cwd: str, *, model: str = "", provider: str = "") -> dict:
     """session.info for a not-yet-built session (the shape session.create
     returns). tools/skills land later when the deferred build emits session.info."""
     info = {
+        **_pre_agent_capability_preview(),
         "cwd": cwd,
         "branch": _git_branch_for_cwd(cwd),
         "model": model or _resolve_model(),
-        "tools": {},
-        "skills": {},
         "lazy": True,
         "desktop_contract": DESKTOP_BACKEND_CONTRACT,
         "profile_name": _current_profile_name(),

@@ -7,7 +7,9 @@ import {
 } from "react";
 import {
   ArrowUp,
+  ClipboardCopy,
   Download,
+  Eye,
   FileIcon,
   Folder,
   FolderOpen,
@@ -34,8 +36,17 @@ import { useToast } from "@nous-research/ui/hooks/use-toast";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { api } from "@/lib/api";
-import type { ManagedFileEntry, ManagedFilesResponse } from "@/lib/api";
+import type {
+  ManagedFileEntry,
+  ManagedFileReadResponse,
+  ManagedFilesResponse,
+} from "@/lib/api";
+import {
+  managedFilePreviewKind,
+  managedFilePreviewPath,
+} from "@/lib/file-preview";
 import { PluginSlot } from "@/plugins";
+import { Markdown } from "@/components/Markdown";
 
 const DATE_FORMAT = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
@@ -75,12 +86,23 @@ function transferHasFiles(event: ReactDragEvent<HTMLElement>): boolean {
   return Array.from(event.dataTransfer.types).includes("Files");
 }
 
+function parentPath(path: string): string | undefined {
+  const separator = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return separator > 0 ? path.slice(0, separator) : undefined;
+}
+
 export default function FilesPage() {
   const { toast, showToast } = useToast();
   const { setAfterTitle, setEnd } = usePageHeader();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const dragDepthRef = useRef(0);
-  const [currentPath, setCurrentPath] = useState<string | undefined>(undefined);
+  const deepLinkPreviewOpenedRef = useRef(false);
+  const previewRequestRef = useRef(0);
+  const [currentPath, setCurrentPath] = useState<string | undefined>(() => {
+    if (typeof window === "undefined") return undefined;
+    const previewPath = managedFilePreviewPath(window.location.search);
+    return previewPath ? parentPath(previewPath) : undefined;
+  });
   const [pathInput, setPathInput] = useState("");
   const [listing, setListing] = useState<ManagedFilesResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -92,6 +114,11 @@ export default function FilesPage() {
   const [folderName, setFolderName] = useState("");
   const [pendingDelete, setPendingDelete] = useState<ManagedFileEntry | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [previewEntry, setPreviewEntry] = useState<ManagedFileEntry | null>(null);
+  const [previewFile, setPreviewFile] = useState<ManagedFileReadResponse | null>(null);
+  const [previewText, setPreviewText] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   const activePath = listing?.path ?? currentPath ?? "";
   const canChangePath = listing?.can_change_path ?? false;
@@ -245,6 +272,80 @@ export default function FilesPage() {
     }
   };
 
+  const openPreview = async (entry: ManagedFileEntry) => {
+    if (entry.is_directory) return;
+    const requestId = ++previewRequestRef.current;
+    setPreviewEntry(entry);
+    setPreviewFile(null);
+    setPreviewText(null);
+    setPreviewError(null);
+    setPreviewLoading(true);
+    if (managedFilePreviewKind(entry.mime_type, entry.name) === "unsupported") {
+      setPreviewLoading(false);
+      return;
+    }
+    try {
+      const file = await api.readFile(entry.path);
+      if (requestId !== previewRequestRef.current) return;
+      setPreviewFile(file);
+      const kind = managedFilePreviewKind(file.mime_type, file.name);
+      if (kind === "text" || kind === "markdown") {
+        const response = await fetch(file.data_url);
+        const text = await response.text();
+        if (requestId !== previewRequestRef.current) return;
+        setPreviewText(text);
+      }
+    } catch (e) {
+      if (requestId !== previewRequestRef.current) return;
+      setPreviewError(String(e));
+    } finally {
+      if (requestId === previewRequestRef.current) setPreviewLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (deepLinkPreviewOpenedRef.current) return;
+    const path = managedFilePreviewPath(window.location.search);
+    if (!path) return;
+
+    deepLinkPreviewOpenedRef.current = true;
+    const name = path.split(/[\\/]/).pop() || path;
+    const timeout = window.setTimeout(() => {
+      void openPreview({
+        name,
+        path,
+        is_directory: false,
+        size: null,
+        mtime: 0,
+        mime_type: null,
+      });
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, []);
+
+  const closePreview = () => {
+    previewRequestRef.current += 1;
+    setPreviewEntry(null);
+    setPreviewFile(null);
+    setPreviewText(null);
+    setPreviewError(null);
+
+    const url = new URL(window.location.href);
+    if (url.searchParams.has("preview")) {
+      url.searchParams.delete("preview");
+      window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+    }
+  };
+
+  const copyPathForChat = async (entry: ManagedFileEntry) => {
+    try {
+      await navigator.clipboard.writeText(entry.path);
+      showToast("File path copied. Paste it into Chat to use this file.", "success");
+    } catch {
+      showToast(`Copy this path into Chat: ${entry.path}`, "error");
+    }
+  };
+
   const confirmDelete = async () => {
     if (!pendingDelete) return;
     setDeleting(true);
@@ -364,7 +465,7 @@ export default function FilesPage() {
             </div>
           )}
 
-          <div className="grid min-w-[42rem] grid-cols-[minmax(12rem,1fr)_7rem_10rem_5.5rem] items-center gap-3 border-b border-border px-4 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-text-tertiary">
+          <div className="grid min-w-[48rem] grid-cols-[minmax(12rem,1fr)_7rem_10rem_10rem] items-center gap-3 border-b border-border px-4 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-text-tertiary">
             <span>Name</span>
             <span>Size</span>
             <span>Modified</span>
@@ -375,7 +476,7 @@ export default function FilesPage() {
             <button
               type="button"
               onClick={() => setCurrentPath(listing.parent ?? undefined)}
-              className="grid w-full min-w-[42rem] grid-cols-[minmax(12rem,1fr)_7rem_10rem_5.5rem] items-center gap-3 border-b border-border/60 px-4 py-2 text-left text-sm transition hover:bg-background/40"
+              className="grid w-full min-w-[48rem] grid-cols-[minmax(12rem,1fr)_7rem_10rem_10rem] items-center gap-3 border-b border-border/60 px-4 py-2 text-left text-sm transition hover:bg-background/40"
             >
               <span className="flex min-w-0 items-center gap-2 font-mono text-text-secondary">
                 <ArrowUp className="h-4 w-4 shrink-0 text-text-tertiary" />
@@ -398,11 +499,11 @@ export default function FilesPage() {
             listing?.entries.map((entry) => (
               <div
                 key={entry.path}
-                className="grid min-w-[42rem] grid-cols-[minmax(12rem,1fr)_7rem_10rem_5.5rem] items-center gap-3 border-b border-border/60 px-4 py-2 text-sm last:border-b-0 hover:bg-background/35"
+                className="grid min-w-[48rem] grid-cols-[minmax(12rem,1fr)_7rem_10rem_10rem] items-center gap-3 border-b border-border/60 px-4 py-2 text-sm last:border-b-0 hover:bg-background/35"
               >
                 <button
                   type="button"
-                  onClick={() => (entry.is_directory ? openDirectory(entry) : void downloadFile(entry))}
+                  onClick={() => (entry.is_directory ? openDirectory(entry) : void openPreview(entry))}
                   className="flex min-w-0 items-center gap-2 text-left font-mono text-foreground"
                 >
                   {entry.is_directory ? (
@@ -428,15 +529,36 @@ export default function FilesPage() {
                       <FolderOpen />
                     </Button>
                   ) : (
-                    <Button
-                      ghost
-                      size="icon"
-                      type="button"
-                      onClick={() => void downloadFile(entry)}
-                      aria-label={`Download ${entry.name}`}
-                    >
-                      <Download />
-                    </Button>
+                    <>
+                      <Button
+                        ghost
+                        size="icon"
+                        type="button"
+                        onClick={() => void openPreview(entry)}
+                        aria-label={`Preview ${entry.name}`}
+                      >
+                        <Eye />
+                      </Button>
+                      <Button
+                        ghost
+                        size="icon"
+                        type="button"
+                        onClick={() => void copyPathForChat(entry)}
+                        aria-label={`Copy path for ${entry.name}`}
+                        title="Copy path for Chat"
+                      >
+                        <ClipboardCopy />
+                      </Button>
+                      <Button
+                        ghost
+                        size="icon"
+                        type="button"
+                        onClick={() => void downloadFile(entry)}
+                        aria-label={`Download ${entry.name}`}
+                      >
+                        <Download />
+                      </Button>
+                    </>
                   )}
                   <Button
                     ghost
@@ -520,6 +642,123 @@ export default function FilesPage() {
             : "This removes the file."
         }
       />
+
+      <Dialog
+        open={Boolean(previewEntry)}
+        onOpenChange={(open) => {
+          if (open) return;
+          closePreview();
+        }}
+      >
+        <DialogContent className="max-h-[88vh] max-w-5xl overflow-hidden">
+          <DialogHeader>
+            <DialogTitle>{previewEntry?.name || "File preview"}</DialogTitle>
+            <DialogDescription className="break-all font-mono text-xs">
+              {previewEntry?.path}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="min-h-64 overflow-auto border-y border-border bg-background/40 p-4">
+            {previewLoading ? (
+              <div className="flex min-h-64 items-center justify-center gap-2 text-sm text-muted-foreground">
+                <Spinner /> Loading preview...
+              </div>
+            ) : previewError ? (
+              <div className="flex min-h-64 items-center justify-center text-sm text-destructive">
+                Preview failed: {previewError}
+              </div>
+            ) : previewFile ? (
+              <ManagedFilePreview file={previewFile} text={previewText} />
+            ) : (
+              <div className="flex min-h-64 items-center justify-center text-center text-sm text-muted-foreground">
+                No safe inline preview is available for this file type. Download the file
+                or copy its path into Chat.
+              </div>
+            )}
+          </div>
+
+          <DialogFooter>
+            {previewEntry && (
+              <Button
+                type="button"
+                outlined
+                onClick={() => void copyPathForChat(previewEntry)}
+                prefix={<ClipboardCopy />}
+              >
+                Copy path for Chat
+              </Button>
+            )}
+            {previewEntry && (
+              <Button
+                type="button"
+                onClick={() => void downloadFile(previewEntry)}
+                prefix={<Download />}
+              >
+                Download
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+function ManagedFilePreview({
+  file,
+  text,
+}: {
+  file: ManagedFileReadResponse;
+  text: string | null;
+}) {
+  const kind = managedFilePreviewKind(file.mime_type, file.name);
+
+  if (kind === "image") {
+    return (
+      <img
+        src={file.data_url}
+        alt={file.name}
+        className="mx-auto max-h-[62vh] max-w-full object-contain"
+      />
+    );
+  }
+  if (kind === "pdf") {
+    return (
+      <object
+        data={file.data_url}
+        type="application/pdf"
+        className="h-[62vh] w-full"
+      >
+        <p className="text-sm text-muted-foreground">
+          PDF preview is unavailable in this browser. Download the file instead.
+        </p>
+      </object>
+    );
+  }
+  if (kind === "html") {
+    return (
+      <iframe
+        src={file.data_url}
+        title={`Preview of ${file.name}`}
+        sandbox=""
+        className="h-[62vh] w-full bg-white"
+      />
+    );
+  }
+  if (kind === "markdown" && text !== null) {
+    return <Markdown content={text} />;
+  }
+  if (kind === "text" && text !== null) {
+    return (
+      <pre className="overflow-auto whitespace-pre-wrap break-words font-mono text-xs leading-5 text-foreground">
+        {text}
+      </pre>
+    );
+  }
+  return (
+    <div className="flex min-h-64 items-center justify-center text-center text-sm text-muted-foreground">
+      No safe inline preview is available for this file type. Download the file
+      or copy its path into Chat.
     </div>
   );
 }

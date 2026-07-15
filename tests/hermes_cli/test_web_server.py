@@ -3219,6 +3219,32 @@ class TestWebServerEndpoints:
         assert '"name":"Oxaide Research"' in response.text
         assert '"billing_url":"https://oxaide.com/console/billing"' in response.text
 
+    def test_oxaide_product_ignores_deep_merged_hermes_branding_defaults(self, monkeypatch):
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(ws, "load_config", lambda: {
+            "dashboard": {
+                "branding": {
+                    "product": "oxaide",
+                    "name": "Hermes Agent",
+                    "short_name": "HA",
+                    "org_name": "Nous Research",
+                    "org_url": "https://nousresearch.com",
+                }
+            }
+        })
+        monkeypatch.setattr(ws, "read_raw_config", lambda: {
+            "dashboard": {"branding": {"product": "oxaide"}}
+        })
+
+        branding = ws._dashboard_branding_settings()
+
+        assert branding["product"] == "oxaide"
+        assert branding["name"] == "Oxaide Research"
+        assert branding["short_name"] == "Oxaide"
+        assert branding["org_name"] == "Oxaide"
+        assert branding["org_url"] == "https://oxaide.com"
+
     def test_spa_uses_oxaide_defaults_for_pinned_tenant_runtime(self, monkeypatch, tmp_path):
         from fastapi import FastAPI
         from starlette.testclient import TestClient
@@ -3237,9 +3263,12 @@ class TestWebServerEndpoints:
                 }
             }
         })
-        monkeypatch.setenv("HERMES_OXAIDE_DEMO_AUTH_SECRET", "secret")
+        monkeypatch.setenv(
+            "HERMES_OXAIDE_DEMO_AUTH_SECRET",
+            "test-oxaide-branding-secret-at-least-32-bytes",
+        )
         monkeypatch.setenv("HERMES_OXAIDE_WORKSPACE_ID", "workspace-1")
-        monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", "runtime-1")
+        monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", "runtimekey1234567890abcd")
 
         app_ = FastAPI()
         ws.mount_spa(app_)

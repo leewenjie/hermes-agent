@@ -102,13 +102,23 @@ import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
 import { api } from "@/lib/api";
 import type { StatusResponse, UpdateCheckResponse } from "@/lib/api";
 import { brandingLines, getDashboardBranding } from "@/lib/branding";
+import {
+  filterOxaideManagedRoutes,
+  OXAIDE_MANAGED_PATHS,
+} from "@/lib/managed-dashboard";
 
 function RootRedirect() {
   return <Navigate to="/sessions" replace />;
 }
 
-function UnknownRouteFallback({ pluginsLoading }: { pluginsLoading: boolean }) {
-  if (pluginsLoading) {
+function UnknownRouteFallback({
+  managed,
+  pluginsLoading,
+}: {
+  managed: boolean;
+  pluginsLoading: boolean;
+}) {
+  if (pluginsLoading && !managed) {
     // Render nothing during the plugin-load window — a spinner here would just flash.
     return null;
   }
@@ -121,8 +131,6 @@ const CHAT_NAV_ITEM: NavItem = {
   label: "Chat",
   icon: Terminal,
 };
-
-const OXAIDE_NAV_PATHS = new Set(["/chat", "/sessions", "/files", "/skills", "/docs"]);
 
 /**
  * Built-in routes except /chat.  Chat is rendered persistently (outside
@@ -447,6 +455,14 @@ export default function App() {
     }),
     [embeddedChat],
   );
+  const managedBuiltinRoutes = useMemo(
+    () =>
+      filterOxaideManagedRoutes(
+        builtinRoutes,
+        branding.product === "oxaide",
+      ),
+    [branding.product, builtinRoutes],
+  );
 
   const builtinNav = useMemo(() => {
     const base = embeddedChat
@@ -456,7 +472,7 @@ export default function App() {
       ? base
       : base.filter((n) => n.path !== "/analytics");
     return branding.product === "oxaide"
-      ? analyticsFiltered.filter((item) => OXAIDE_NAV_PATHS.has(item.path))
+      ? analyticsFiltered.filter((item) => OXAIDE_MANAGED_PATHS.has(item.path))
       : analyticsFiltered;
   }, [branding.product, embeddedChat, showTokenAnalytics]);
 
@@ -465,8 +481,12 @@ export default function App() {
     [branding.product, builtinNav, manifests],
   );
   const routes = useMemo(
-    () => buildRoutes(builtinRoutes, manifests),
-    [builtinRoutes, manifests],
+    () =>
+      buildRoutes(
+        managedBuiltinRoutes,
+        branding.product === "oxaide" ? [] : manifests,
+      ),
+    [branding.product, managedBuiltinRoutes, manifests],
   );
   const pluginTabMeta = useMemo(
     () =>
@@ -775,7 +795,10 @@ export default function App() {
                     <Route
                       path="*"
                       element={
-                        <UnknownRouteFallback pluginsLoading={pluginsLoading} />
+                        <UnknownRouteFallback
+                          managed={branding.product === "oxaide"}
+                          pluginsLoading={pluginsLoading}
+                        />
                       }
                     />
                   </Routes>
@@ -942,11 +965,13 @@ function SidebarSystemActions({
 
   useEffect(() => {
     if (!updateConfirmOpen) {
-      setUpdateConfirmInfo(null);
+      queueMicrotask(() => setUpdateConfirmInfo(null));
       return;
     }
     let cancelled = false;
-    setUpdateConfirmChecking(true);
+    queueMicrotask(() => {
+      if (!cancelled) setUpdateConfirmChecking(true);
+    });
     api
       .checkHermesUpdate(false)
       .then((info) => {

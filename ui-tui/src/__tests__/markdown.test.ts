@@ -4,7 +4,15 @@ import { Box, renderSync } from '@hermes/ink'
 import React from 'react'
 import { describe, expect, it } from 'vitest'
 
-import { AUDIO_DIRECTIVE_RE, INLINE_RE, Md, MEDIA_LINE_RE, stripInlineMarkup } from '../components/markdown.js'
+import {
+  AUDIO_DIRECTIVE_RE,
+  dashboardManagedFilePath,
+  INLINE_RE,
+  Md,
+  MEDIA_LINE_RE,
+  mediaLinkTarget,
+  stripInlineMarkup
+} from '../components/markdown.js'
 import { stripAnsi } from '../lib/text.js'
 import { DEFAULT_THEME } from '../theme.js'
 
@@ -192,6 +200,21 @@ describe('protocol sentinels', () => {
     expect(AUDIO_DIRECTIVE_RE.test('[[audio_as_voice]]')).toBe(true)
     expect(AUDIO_DIRECTIVE_RE.test('  [[audio_as_voice]]  ')).toBe(true)
     expect(AUDIO_DIRECTIVE_RE.test('audio_as_voice')).toBe(false)
+  })
+
+  it('links managed dashboard media to an authenticated preview route', () => {
+    expect(mediaLinkTarget('/opt/data/random_chart.svg', true)).toBe(
+      '/files?preview=%2Fopt%2Fdata%2Frandom_chart.svg'
+    )
+    expect(mediaLinkTarget('/tmp/random_chart.svg', false)).toBe('file:///tmp/random_chart.svg')
+  })
+
+  it('recognizes only standalone previewable managed-file paths', () => {
+    expect(dashboardManagedFilePath('/opt/data/random_chart.svg')).toBe('/opt/data/random_chart.svg')
+    expect(dashboardManagedFilePath('  `/opt/data/report.pdf`  ')).toBe('/opt/data/report.pdf')
+    expect(dashboardManagedFilePath('saved at /opt/data/random_chart.svg')).toBeNull()
+    expect(dashboardManagedFilePath('/opt/data/.env')).toBeNull()
+    expect(dashboardManagedFilePath('/tmp/random_chart.svg')).toBeNull()
   })
 })
 

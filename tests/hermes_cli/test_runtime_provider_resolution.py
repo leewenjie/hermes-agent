@@ -2338,6 +2338,21 @@ class TestAzureFoundryResolution:
         assert resolved["api_mode"] == "codex_responses"
         assert resolved["base_url"] == "https://synopsisse.openai.azure.com/openai/v1"
 
+    def test_gpt56_luna_uses_responses(self, monkeypatch):
+        monkeypatch.setenv("AZURE_FOUNDRY_API_KEY", "az-key")
+        monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "azure-foundry")
+        monkeypatch.setattr(
+            rp,
+            "_get_model_config",
+            lambda: self._make_cfg_with_model("gpt-5.6-luna", "chat_completions"),
+        )
+        monkeypatch.setattr(rp, "load_pool", lambda provider: None)
+
+        resolved = rp.resolve_runtime_provider(requested="azure-foundry")
+
+        assert resolved["api_mode"] == "codex_responses"
+        assert resolved["base_url"] == "https://synopsisse.openai.azure.com/openai/v1"
+
     def test_gpt4o_stays_on_chat_completions(self, monkeypatch):
         """gpt-4o-pure worked on Bob's endpoint — must not get upgraded."""
         monkeypatch.setenv("AZURE_FOUNDRY_API_KEY", "az-key")

@@ -92,7 +92,13 @@ class OxaideTurnClient:
         self.secret = str(
             os.environ.get("HERMES_OXAIDE_USAGE_SIGNING_SECRET") or ""
         ).strip()
-        if not self.endpoint or not self.secret:
+        lowered_secret = self.secret.lower()
+        if (
+            not self.endpoint
+            or len(self.secret) < 32
+            or lowered_secret.startswith("replace-with-")
+            or lowered_secret.startswith("__replace_with_")
+        ):
             raise OxaideTurnError("Oxaide turn authorization is not configured")
 
     def authorize(self) -> OxaideTurn:

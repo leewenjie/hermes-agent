@@ -244,3 +244,6 @@ class TestContradictionGone:
         tui_hint = PLATFORM_HINTS["tui"]
         assert "desktop GUI app" not in tui_hint
         assert "Runtime surface:" not in tui_hint
+
+    def test_tui_hint_advertises_clickable_file_delivery(self):
+        assert "MEDIA:/absolute/path/to/file" in PLATFORM_HINTS["tui"]

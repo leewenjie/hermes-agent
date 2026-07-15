@@ -7,8 +7,30 @@ import { turnController } from './turnController.js'
 import { getUiState, patchUiState } from './uiStore.js'
 
 const SESSION_BUSY_RE = /session busy|waiting for model response/i
+const OXAIDE_TURN_DENIED_RE = /Oxaide turn denied:\s*([a-z0-9_]+)/i
+const OXAIDE_ACCOUNT_URL = 'https://oxaide.com/console/billing'
+
+const OXAIDE_DENIAL_MESSAGES: Record<string, string> = {
+  trial_expired: `Your Oxaide trial has ended. Review your plan at ${OXAIDE_ACCOUNT_URL}`,
+  trial_turn_limit_reached: `Your Oxaide trial has used all included research turns. Review your plan at ${OXAIDE_ACCOUNT_URL}`,
+  included_turn_limit_reached: `This workspace has reached its included monthly research limit. Review usage or billing at ${OXAIDE_ACCOUNT_URL}`,
+  overage_turn_cap_reached: `This workspace has reached its protected additional-turn cap. Review the cap at ${OXAIDE_ACCOUNT_URL}`,
+  workspace_entitlement_inactive: `Research access is not active for this workspace. Review your account at ${OXAIDE_ACCOUNT_URL}`,
+  workspace_entitlement_missing: `This workspace is not connected to an Oxaide research plan. Review your account at ${OXAIDE_ACCOUNT_URL}`,
+  runtime_session_not_authorized: `This research session is no longer authorized. Return to ${OXAIDE_ACCOUNT_URL} and reopen the workspace.`,
+}
 
 export const isSessionBusyError = (e: unknown) => e instanceof Error && SESSION_BUSY_RE.test(e.message)
+
+export function oxaideTurnDeniedMessage(error: unknown): string | null {
+  if (!(error instanceof Error)) {
+    return null
+  }
+
+  const code = error.message.match(OXAIDE_TURN_DENIED_RE)?.[1]?.toLowerCase()
+
+  return code ? OXAIDE_DENIAL_MESSAGES[code] ?? null : null
+}
 
 export interface SubmitPromptDeps {
   appendMessage: (msg: Msg) => void
@@ -82,8 +104,9 @@ export function submitPrompt(text: string, deps: SubmitPromptDeps, showUserMessa
         return deps.sys(`queued: "${submitText.slice(0, 50)}${submitText.length > 50 ? '…' : ''}"`)
       }
 
-      deps.sys(`error: ${e.message}`)
-      patchUiState({ busy: false, status: 'ready' })
+      const denial = oxaideTurnDeniedMessage(e)
+      deps.sys(denial ?? `error: ${e.message}`)
+      patchUiState({ busy: false, status: denial ? 'account action needed' : 'ready' })
     })
   }
 

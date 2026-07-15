@@ -396,6 +396,35 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
         source_url="https://openai.com/api/pricing/",
         pricing_version="openai-pricing-2026-03-16",
     ),
+    # Azure OpenAI Global Standard. Azure Foundry uses the deployment name as
+    # the model id, so keep this provider-specific rather than aliasing it to
+    # direct OpenAI pricing. Azure does not publish a separate cache-write rate.
+    (
+        "azure-foundry",
+        "gpt-5.4-mini",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("0.75"),
+        output_cost_per_million=Decimal("4.50"),
+        cache_read_cost_per_million=Decimal("0.08"),
+        source="official_docs_snapshot",
+        source_url="https://azure.microsoft.com/en-us/pricing/details/cognitive-services/openai-service/",
+        pricing_version="azure-openai-pricing-2026-07-15",
+    ),
+    # GPT-5.6 Luna is available through Azure Foundry's OpenAI-compatible
+    # Responses endpoint. Azure's public retail catalog did not expose a
+    # Luna-specific meter when this route was validated, so use the published
+    # Luna rates as a planning snapshot until the Azure invoice is reconciled.
+    (
+        "azure-foundry",
+        "gpt-5.6-luna",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("1.00"),
+        output_cost_per_million=Decimal("6.00"),
+        cache_read_cost_per_million=Decimal("0.10"),
+        source="official_docs_snapshot",
+        source_url="https://openai.com/index/previewing-gpt-5-6-sol/",
+        pricing_version="azure-foundry-gpt-5.6-planning-2026-07-15",
+    ),
     # ── Anthropic older models (pre-4.5 generation) ────────────────────────
     (
         "anthropic",
@@ -665,6 +694,8 @@ def resolve_billing_route(
     # openai-api provider path.
     if provider_name in {"openai", "openai-api"}:
         return BillingRoute(provider="openai", model=model.split("/")[-1], base_url=base_url or "", billing_mode="official_docs_snapshot")
+    if provider_name == "azure-foundry":
+        return BillingRoute(provider="azure-foundry", model=model.split("/")[-1], base_url=base_url or "", billing_mode="official_docs_snapshot")
     if provider_name in {"minimax", "minimax-cn"}:
         return BillingRoute(provider=provider_name, model=model.split("/")[-1], base_url=base_url or "", billing_mode="official_docs_snapshot")
     # Vertex AI hosts the same Gemini models as Google AI Studio; price them

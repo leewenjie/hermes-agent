@@ -25,6 +25,7 @@ import sqlite3
 import threading
 import time
 import uuid
+import re
 from collections import defaultdict, deque
 from typing import Any, Deque, Dict, Tuple
 from urllib.parse import urlencode, urlsplit
@@ -64,22 +65,44 @@ router = APIRouter()
 _consumed_oxaide_launch_tokens_lock = threading.Lock()
 _OXAIDE_LAUNCH_AUDIENCE = "oxaide-hermes-runtime"
 _OXAIDE_LAUNCH_MAX_TTL_SECONDS = 15 * 60
+_OXAIDE_SESSION_AUDIENCE = "oxaide-hermes-session"
+_OXAIDE_SESSION_TTL_SECONDS = 12 * 60 * 60
 _OXAIDE_LOGOUT_AUDIENCE = "oxaide-runtime-logout"
 _OXAIDE_LOGOUT_TTL_SECONDS = 2 * 60
 _OXAIDE_CUSTOMER_LOGIN_URL = "https://oxaide.com/agents"
+_OXAIDE_WORKSPACE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{3,128}$")
+_OXAIDE_RUNTIME_PATTERN = re.compile(r"^[a-z0-9]{20,64}$")
+
+
+def _valid_oxaide_value(value: object, *, minimum_length: int = 1) -> bool:
+    normalized = str(value or "").strip()
+    lowered = normalized.lower()
+    return bool(
+        len(normalized) >= minimum_length
+        and not lowered.startswith("replace-with-")
+        and not lowered.startswith("__replace_with_")
+    )
 
 
 def _oxaide_launch_secret() -> str:
-    return str(os.environ.get("HERMES_OXAIDE_DEMO_AUTH_SECRET", "") or "").strip()
+    value = str(os.environ.get("HERMES_OXAIDE_DEMO_AUTH_SECRET", "") or "").strip()
+    return value if _valid_oxaide_value(value, minimum_length=32) else ""
+
+
+def is_oxaide_native_auth_configured() -> bool:
+    """Return true when native launch auth can safely gate a public runtime."""
+    workspace_id = str(os.environ.get("HERMES_OXAIDE_WORKSPACE_ID", "") or "").strip()
+    runtime_key = str(os.environ.get("HERMES_OXAIDE_RUNTIME_KEY", "") or "").strip()
+    return bool(
+        _oxaide_launch_secret()
+        and _OXAIDE_WORKSPACE_PATTERN.fullmatch(workspace_id)
+        and _OXAIDE_RUNTIME_PATTERN.fullmatch(runtime_key)
+    )
 
 
 def _is_oxaide_tenant_runtime() -> bool:
     """Return true only when the runtime is fully pinned to one Oxaide tenant."""
-    return bool(
-        _oxaide_launch_secret()
-        and str(os.environ.get("HERMES_OXAIDE_WORKSPACE_ID", "") or "").strip()
-        and str(os.environ.get("HERMES_OXAIDE_RUNTIME_KEY", "") or "").strip()
-    )
+    return is_oxaide_native_auth_configured()
 
 
 def _required_oxaide_runtime_identity() -> tuple[str, str]:
@@ -89,7 +112,10 @@ def _required_oxaide_runtime_identity() -> tuple[str, str]:
     runtime_key = str(
         os.environ.get("HERMES_OXAIDE_RUNTIME_KEY", "") or ""
     ).strip()
-    if not workspace_id or not runtime_key:
+    if (
+        not _OXAIDE_WORKSPACE_PATTERN.fullmatch(workspace_id)
+        or not _OXAIDE_RUNTIME_PATTERN.fullmatch(runtime_key)
+    ):
         raise HTTPException(
             status_code=503,
             detail="Oxaide workspace runtime identity is not configured",
@@ -145,6 +171,79 @@ def _decode_oxaide_launch_token(token: str) -> dict:
     return payload
 
 
+def _encode_oxaide_session_token(launch_payload: dict) -> str:
+    """Mint a bounded dashboard session after the launch URL is consumed."""
+    secret = _oxaide_launch_secret()
+    if not secret:
+        raise HTTPException(
+            status_code=503,
+            detail="Oxaide demo auth secret is not configured",
+        )
+    now = int(time.time())
+    payload = dict(launch_payload)
+    payload.update(
+        {
+            "aud": _OXAIDE_SESSION_AUDIENCE,
+            "jti": uuid.uuid4().hex,
+            "iat": now,
+            "exp": now + _OXAIDE_SESSION_TTL_SECONDS,
+        }
+    )
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    signature = hmac.new(
+        secret.encode("utf-8"), encoded.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    return f"{encoded}.{signature}"
+
+
+def _decode_oxaide_session_token(token: str) -> dict:
+    """Verify the post-exchange dashboard session and tenant binding."""
+    secret = _oxaide_launch_secret()
+    if not secret:
+        raise HTTPException(
+            status_code=503,
+            detail="Oxaide demo auth secret is not configured",
+        )
+    try:
+        encoded, signature = token.split(".", 1)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Malformed Oxaide session token")
+    expected = hmac.new(
+        secret.encode("utf-8"), encoded.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        raise HTTPException(status_code=401, detail="Invalid Oxaide session signature")
+    try:
+        payload_raw = base64.urlsafe_b64decode(
+            encoded + "=" * ((4 - len(encoded) % 4) % 4)
+        )
+        payload = json.loads(payload_raw.decode("utf-8"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid Oxaide session payload")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid Oxaide session payload")
+    try:
+        exp = int(payload.get("exp") or 0)
+        iat = int(payload.get("iat") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid Oxaide session timestamps")
+    now = int(time.time())
+    if iat <= 0 or iat > now + 60:
+        raise HTTPException(status_code=401, detail="Invalid Oxaide session issue time")
+    if exp <= now or exp - iat > _OXAIDE_SESSION_TTL_SECONDS:
+        raise HTTPException(status_code=401, detail="Oxaide dashboard session expired")
+    if str(payload.get("aud") or "").strip() != _OXAIDE_SESSION_AUDIENCE:
+        raise HTTPException(status_code=401, detail="Invalid Oxaide session audience")
+    expected_workspace, expected_runtime_key = _required_oxaide_runtime_identity()
+    if str(payload.get("workspace_id") or "").strip() != expected_workspace:
+        raise HTTPException(status_code=401, detail="Oxaide session workspace mismatch")
+    if str(payload.get("runtime_key") or "").strip() != expected_runtime_key:
+        raise HTTPException(status_code=401, detail="Oxaide session runtime mismatch")
+    return payload
+
+
 def _consume_oxaide_launch_token(token: str, expires_at: int) -> None:
     """Reject launch-URL replay while preserving cookie-session verification."""
     digest = hashlib.sha256(token.encode('utf-8')).hexdigest()
@@ -175,8 +274,8 @@ def _reset_oxaide_launch_tokens_for_tests() -> None:
 
 
 def _oxaide_session_from_token(token: str) -> Session:
-    """Verify an Oxaide launch token and return its dashboard session."""
-    payload = _decode_oxaide_launch_token(token)
+    """Verify an exchanged Oxaide dashboard token and return its session."""
+    payload = _decode_oxaide_session_token(token)
     expires_at = int(payload.get('exp') or 0)
     user_id = str(payload.get('sub') or payload.get('user_id') or '').strip() or 'oxaide-user'
     email = str(payload.get('email') or '').strip()
@@ -243,7 +342,7 @@ def _oxaide_logout_url(payload: dict) -> str:
 
 
 def _oxaide_logout_continuation(launch_token: str) -> tuple[str, str]:
-    launch = _decode_oxaide_launch_token(launch_token)
+    launch = _decode_oxaide_session_token(launch_token)
     logout_url = _oxaide_logout_url(launch)
     now = int(time.time())
     payload = {
@@ -330,8 +429,11 @@ async def auth_oxaide_launch(request: Request, token: str = '', next: str = ''):
     if not token:
         raise HTTPException(status_code=400, detail='Missing launch token')
 
-    session = _oxaide_session_from_token(token)
-    _consume_oxaide_launch_token(token, session.expires_at)
+    launch_payload = _decode_oxaide_launch_token(token)
+    _consume_oxaide_launch_token(token, int(launch_payload.get("exp") or 0))
+    session = _oxaide_session_from_token(
+        _encode_oxaide_session_token(launch_payload)
+    )
 
     audit_log(
         AuditEvent.LOGIN_SUCCESS,
@@ -1005,7 +1107,7 @@ async def api_auth_ws_ticket(request: Request):
     trusted_context = None
     if sess.provider == "oxaide-demo":
         trusted_context = _trusted_oxaide_context(
-            _decode_oxaide_launch_token(sess.access_token)
+            _decode_oxaide_session_token(sess.access_token)
         )
     ticket = mint_ticket(
         user_id=sess.user_id,

@@ -145,6 +145,54 @@ def test_estimate_usage_cost_marks_subscription_routes_included():
     assert float(result.amount_usd) == 0.0
 
 
+def test_azure_foundry_gpt_54_mini_uses_official_global_pricing(monkeypatch):
+    monkeypatch.setattr(
+        "agent.usage_pricing.fetch_endpoint_model_metadata",
+        lambda base_url, api_key=None: {},
+    )
+
+    result = estimate_usage_cost(
+        "gpt-5.4-mini",
+        CanonicalUsage(
+            input_tokens=15_551,
+            output_tokens=28,
+            cache_read_tokens=1_000,
+        ),
+        provider="azure-foundry",
+        base_url="https://example.cognitiveservices.azure.com/openai/v1",
+    )
+
+    assert result.status == "estimated"
+    assert result.source == "official_docs_snapshot"
+    assert result.pricing_version == "azure-openai-pricing-2026-07-15"
+    assert result.amount_usd is not None
+    assert float(result.amount_usd) == 0.01186925
+
+
+def test_azure_foundry_gpt_56_luna_uses_planning_pricing(monkeypatch):
+    monkeypatch.setattr(
+        "agent.usage_pricing.fetch_endpoint_model_metadata",
+        lambda base_url, api_key=None: {},
+    )
+
+    result = estimate_usage_cost(
+        "gpt-5.6-luna",
+        CanonicalUsage(
+            input_tokens=15_551,
+            output_tokens=28,
+            cache_read_tokens=1_000,
+        ),
+        provider="azure-foundry",
+        base_url="https://example.cognitiveservices.azure.com/openai/v1",
+    )
+
+    assert result.status == "estimated"
+    assert result.source == "official_docs_snapshot"
+    assert result.pricing_version == "azure-foundry-gpt-5.6-planning-2026-07-15"
+    assert result.amount_usd is not None
+    assert float(result.amount_usd) == 0.015819
+
+
 def test_estimate_usage_cost_refuses_cache_pricing_without_official_cache_rate(monkeypatch):
     monkeypatch.setattr(
         "agent.usage_pricing.fetch_model_metadata",

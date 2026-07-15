@@ -243,6 +243,40 @@ describe('StatusRule session count click target', () => {
   })
 })
 
+describe('StatusRule managed Oxaide identity', () => {
+  it('shows the branded research engine without exposing model tiers', () => {
+    const oxaideTheme = {
+      ...DEFAULT_THEME,
+      brand: { ...DEFAULT_THEME.brand, org: 'Oxaide' }
+    }
+
+    const element = StatusRule({
+      ...baseProps,
+      model: 'azure-foundry/gpt-5.6-luna',
+      modelFast: true,
+      modelReasoningEffort: 'high',
+      t: oxaideTheme
+    })
+
+    const rendered = textContent(element)
+
+    expect(rendered).toContain('research engine')
+    expect(rendered).not.toContain('gpt')
+    expect(rendered).not.toContain('luna')
+    expect(rendered).not.toContain('high')
+    expect(rendered).not.toContain('fast')
+  })
+
+  it('keeps exact model identity in generic operator mode', () => {
+    const rendered = textContent(StatusRule({
+      ...baseProps,
+      model: 'azure-foundry/gpt-5.6-luna'
+    }))
+
+    expect(rendered).toContain('gpt 5.6 luna')
+  })
+})
+
 describe('StatusRule credits notice render priority', () => {
   it('replaces the idle status with the notice text and keeps model + context', () => {
     const element = StatusRule({
