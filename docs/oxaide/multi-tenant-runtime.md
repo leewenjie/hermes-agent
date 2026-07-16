@@ -2,9 +2,9 @@
 
 ## Decision
 
-Run one long-lived Hermes container and one persistent volume for each Oxaide workspace trust domain.
+Run one long-lived Hermes container and one persistent volume for each Oxaide workspace seat.
 
-For the current one-seat Researcher plan, a workspace normally maps to one user. The Oxaide control plane owns authentication, workspace membership, entitlement, billing, runtime allocation, and routing. Hermes owns the workspace runtime, conversations, tools, files, memories, skills, and completed-turn usage emission.
+The Oxaide control plane owns authentication, workspace membership, entitlement, billing, per-seat runtime allocation, and routing. Workspace usage can remain pooled for billing, but every authenticated user receives a distinct runtime key and storage boundary. Hermes owns that seat runtime's conversations, tools, files, memories, skills, and completed-turn usage emission.
 
 Do not serve unrelated customer workspaces from one Hermes process or one `/opt/data` volume. Do not treat Hermes profiles as a SaaS security boundary.
 
@@ -12,7 +12,7 @@ Do not serve unrelated customer workspaces from one Hermes process or one `/opt/
 
 Hermes profiles isolate normal application paths, but profile processes still run as the same Unix user and can see sibling profile directories through terminal access. A shared process also has process-global session, terminal, background-process, and plugin registries. Profiles are useful for trusted operator organization, not hostile tenant isolation.
 
-A workspace-dedicated container gives the simplest meaningful boundary:
+A seat-dedicated container gives the simplest meaningful boundary:
 
 - one `HERMES_HOME`
 - one session database
@@ -20,6 +20,7 @@ A workspace-dedicated container gives the simplest meaningful boundary:
 - one terminal/filesystem trust domain
 - one completed-turn outbox
 - one workspace/runtime identity pin
+- one authenticated user bound to the runtime allocation
 - independent CPU, memory, PID, restart, and deletion controls
 
 ## Runtime contract
@@ -48,8 +49,8 @@ The public `/api/status` response includes the opaque runtime key already presen
 
 1. Oxaide authenticates the user and verifies workspace membership.
 2. Oxaide authorizes the requested completed turn before runtime work starts.
-3. The runtime router finds or starts the container pinned to that workspace.
-4. Oxaide signs a short-lived, single-use launch token for that workspace/runtime pair.
+3. The runtime router finds or starts the container pinned to that workspace and user.
+4. Oxaide signs a short-lived, single-use launch token for that workspace/user/runtime tuple.
 5. Hermes verifies audience, signature, timestamps, workspace, and runtime key.
 6. Hermes creates or resumes a conversation inside the workspace container.
 7. Hermes emits `complete` only after a usable assistant answer; failures emit `release`.
@@ -67,14 +68,11 @@ Logout is coordinated across both origins:
 
 The logout token cannot launch an agent, authorize a turn, or select another workspace. Redirect and return URLs are fixed to Oxaide HTTPS auth paths.
 
-## Conversation privacy
+## Conversation and file privacy
 
-The one-seat plan makes the workspace the user boundary. If multi-seat private conversations are introduced later, choose one of these before launch:
+The Oxaide control plane uses one container and persistent volume per workspace user. Two members of the same billed workspace therefore have separate `HERMES_HOME`, `state.db`, managed files, terminal process, memories, skills, caches, and runtime secrets.
 
-1. one container per user, or
-2. add persistent session ownership and enforce it across list, resume, search, delete, branch, export, attachments, and live-session reuse.
-
-Do not infer private-session safety from the current workspace container boundary.
+Do not collapse seat bindings back to one workspace container. Dashboard-level session or file filters are defense in depth, not a replacement for the runtime and OS boundary when terminal tools are enabled.
 
 ## Skills
 
@@ -111,7 +109,7 @@ Delegation is capped to two leaf workers, one spawn level, sixteen iterations, a
 
 ## Deployment
 
-Use `docker-compose.oxaide-workspace.yml` as the local production-shape template. Give every workspace a unique project name so Compose creates a distinct `workspace-data` volume. The control plane should retain the project/container/volume mapping and delete it only through an explicit workspace-retention workflow.
+Use `docker-compose.oxaide-workspace.yml` as the local production-shape template. Give every seat runtime a unique project name so Compose creates a distinct `workspace-data` volume. The control plane should retain the workspace/user/runtime/container/volume mapping and delete it only through an explicit retention workflow.
 
 The template binds the runtime to host loopback. Put the runtime router or authenticated reverse proxy on the same host, or replace the host port with a private orchestrator network. Never publish the container directly to the public internet.
 
@@ -126,7 +124,7 @@ Before accepting customer traffic:
 - use a placeholder or short launch/control/usage secret and confirm startup or authorization fails closed
 - present a wrong audience or overlong token and confirm HTTP 401
 - attempt to select a sibling profile and confirm the root profile remains active
-- create files and sessions in two workspace containers and confirm volumes are disjoint
+- create files and sessions in two seat containers for the same workspace and confirm volumes are disjoint
 - stop and restart one container and confirm only its own sessions return
 - confirm denied turns do not build an agent or consume model tokens
 - confirm completed turns use one immutable event ID across authorize and complete

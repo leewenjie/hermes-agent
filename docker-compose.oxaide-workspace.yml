@@ -1,4 +1,4 @@
-# Production template for ONE Oxaide workspace trust domain.
+# Production template for ONE Oxaide workspace seat trust domain.
 # Use a distinct Compose project name, runtime port, and persistent volume for
 # every workspace. Never add multiple customer workspaces to this service via
 # Hermes profiles; profiles are not a hostile-tenant security boundary.
