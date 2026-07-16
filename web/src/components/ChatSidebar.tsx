@@ -38,7 +38,9 @@ import {
   generatedImageFromToolResult,
   isBrowserImageSource,
   reduceResearchTrace,
+  researchMethodDescription,
   researchMethodLabel,
+  summarizeResearchCapabilities,
   summarizeResearchTools,
   type ChatSessionCapabilityInfo,
   type ResearchTraceState,
@@ -388,6 +390,7 @@ export function ChatSidebar({
     0,
   );
   const usedTools = summarizeResearchTools(researchTrace.tools);
+  const researchCapabilities = summarizeResearchCapabilities(info.tools ?? {});
 
   return (
     <aside
@@ -454,23 +457,40 @@ export function ChatSidebar({
                 : "Loading research methods…"}
           </div>
           {preloadedSkills.length > 0 && (
-            <div className="mt-2 flex max-h-24 flex-wrap gap-1 overflow-y-auto">
+            <div className="mt-2 flex flex-col gap-2">
               {preloadedSkills.map((skill) => (
-                <Badge
-                  key={skill}
-                  tone="secondary"
-                  className="max-w-full px-1.5 py-0.5 text-[0.6875rem] font-normal leading-tight normal-case tracking-normal"
-                  title={researchMethodLabel(skill)}
-                >
-                  <span className="truncate">{researchMethodLabel(skill)}</span>
-                </Badge>
+                <div key={skill} className="min-w-0 border-l-2 border-success/40 pl-2">
+                  <div className="text-xs font-medium leading-snug text-foreground">
+                    {researchMethodLabel(skill)}
+                  </div>
+                  <div className="mt-0.5 text-[0.6875rem] leading-snug text-text-secondary">
+                    {researchMethodDescription(skill)}
+                  </div>
+                </div>
               ))}
             </div>
           )}
-          {toolCount > 0 && (
-            <div className="mt-2 text-xs text-text-secondary">
-              {toolCount} {capabilityPreview ? "configured" : "available"} tools across{" "}
-              {Object.keys(info.tools ?? {}).length} toolsets
+          {researchCapabilities.length > 0 && (
+            <div className="mt-3 border-t border-border pt-2">
+              <div className="text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-text-tertiary">
+                Available capabilities
+              </div>
+              <div className="mt-2 flex flex-col gap-2">
+                {researchCapabilities.map((capability) => (
+                  <div key={capability.label} className="min-w-0">
+                    <div className="text-xs font-medium leading-snug text-foreground">
+                      {capability.label}
+                    </div>
+                    <div className="mt-0.5 text-[0.6875rem] leading-snug text-text-secondary">
+                      {capability.detail}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-2 text-[0.6875rem] text-text-tertiary">
+                {toolCount} {capabilityPreview ? "configured" : "available"} tools across{" "}
+                {Object.keys(info.tools ?? {}).length} toolsets
+              </div>
             </div>
           )}
         </Card>

@@ -36,6 +36,7 @@ import { usePageHeader } from "@/contexts/usePageHeader";
 import { useI18n } from "@/i18n";
 import { api } from "@/lib/api";
 import { normalizeSessionTitle } from "@/lib/chat-title";
+import { isOxaideManagedDashboard } from "@/lib/managed-dashboard";
 import {
   PTY_CONNECTING_TIMEOUT_MS,
   PTY_RECONNECT_INPUT_MESSAGE,
@@ -237,10 +238,14 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     title: string | null;
   }>({ scope: "", title: null });
   const { t } = useI18n();
+  const managedOxaide = isOxaideManagedDashboard();
   const closeMobilePanel = useCallback(() => setMobilePanelOpenRaw(false), []);
   const modelToolsLabel = useMemo(
-    () => `${t.app.modelToolsSheetTitle} ${t.app.modelToolsSheetSubtitle}`,
-    [t.app.modelToolsSheetSubtitle, t.app.modelToolsSheetTitle],
+    () =>
+      managedOxaide
+        ? "Research details"
+        : `${t.app.modelToolsSheetTitle} ${t.app.modelToolsSheetSubtitle}`,
+    [managedOxaide, t.app.modelToolsSheetSubtitle, t.app.modelToolsSheetTitle],
   );
   const [portalRoot] = useState<HTMLElement | null>(() =>
     typeof document !== "undefined" ? document.body : null,
@@ -1292,7 +1297,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
           role="complementary"
           aria-label={modelToolsLabel}
           className={cn(
-            "font-mondwest fixed top-0 right-0 z-[60] flex h-dvh max-h-dvh w-64 min-w-0 flex-col antialiased",
+            "font-mondwest fixed top-0 right-0 z-[60] flex h-dvh max-h-dvh w-[min(22rem,calc(100vw-0.5rem))] min-w-0 flex-col antialiased",
             "border-l border-current/20 text-midground",
             "bg-background-base/95",
             "transition-transform duration-200 ease-out",
@@ -1311,11 +1316,17 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
           >
             <Typography
               mondwest
-              className="text-display font-bold text-[1.125rem] leading-[0.95] tracking-[0.0525rem] text-midground"
+              className="text-display text-sm font-bold leading-tight tracking-[0.08em] text-midground"
             >
-              {t.app.modelToolsSheetTitle}
-              <br />
-              {t.app.modelToolsSheetSubtitle}
+              {managedOxaide ? (
+                "Research details"
+              ) : (
+                <>
+                  {t.app.modelToolsSheetTitle}
+                  <br />
+                  {t.app.modelToolsSheetSubtitle}
+                </>
+              )}
             </Typography>
 
             <Button
@@ -1338,6 +1349,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
             <div className="border-b border-current/10 px-1 py-2">
               <ChatSidebar
                 channel={channel}
+                className="h-auto overflow-visible pr-0"
                 profile={scopedProfile}
                 onDashboardNewSessionRequest={startFreshDashboardChat}
                 onSessionTitleChange={handleSessionTitleChange}
@@ -1345,6 +1357,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
             </div>
             <ChatSessionList
               activeSessionId={resumeParam}
+              className="min-h-64 border-t border-current/10 pt-2"
               profile={scopedProfile}
               onPicked={closeMobilePanel}
               onNewChat={startFreshDashboardChat}
@@ -1452,7 +1465,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
             id="chat-side-panel"
             role="complementary"
             aria-label={modelToolsLabel}
-            className="flex min-h-0 shrink-0 flex-col gap-3 overflow-hidden lg:h-full lg:w-60"
+            className="flex min-h-0 shrink-0 flex-col gap-3 overflow-hidden lg:h-full lg:w-72"
           >
             {/* Model picker — keeps the rail thin. */}
             <div className="shrink-0">
