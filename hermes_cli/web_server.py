@@ -1599,7 +1599,24 @@ _FS_MIME_TYPES = {
 }
 
 
-def _fs_path(raw_path: str) -> Path:
+def _hosted_fs_root() -> Path | None:
+    """Return the enforced filesystem root for a hosted dashboard.
+
+    The managed Files API already locks hosted deployments to
+    ``HERMES_DASHBOARD_FILES_ROOT`` (or ``/opt/data`` for the canonical
+    container layout).  The older coding-oriented ``/api/fs`` and ``/api/git``
+    routes must share that boundary; otherwise an authenticated hosted user can
+    bypass the Files API and read Hermes state or credentials directly.
+    """
+    raw_forced_root = os.environ.get(_MANAGED_FILES_ROOT_ENV, "").strip()
+    if raw_forced_root:
+        return _canonical_path(Path(raw_forced_root))
+    if _default_hermes_root_is_opt_data():
+        return _HOSTED_MANAGED_FILES_ROOT
+    return None
+
+
+def _fs_path(raw_path: str, *, for_write: bool = False) -> Path:
     raw = str(raw_path or "").strip()
     if not raw:
         raise HTTPException(status_code=400, detail="Path is required")
@@ -1614,7 +1631,25 @@ def _fs_path(raw_path: str) -> Path:
         candidate = Path(raw).expanduser()
         if not candidate.is_absolute():
             candidate = Path.cwd() / candidate
-        return candidate.resolve(strict=False)
+        if for_write and candidate.is_symlink():
+            raise HTTPException(
+                status_code=403,
+                detail="File writes through symlinks are not allowed",
+            )
+        if for_write and not candidate.exists():
+            parent = candidate.parent.resolve(strict=False)
+            resolved = parent / candidate.name
+        else:
+            resolved = candidate.resolve(strict=False)
+
+        root = _hosted_fs_root()
+        if root is not None and not _path_is_under(root, resolved):
+            raise HTTPException(status_code=403, detail="Path outside managed files root")
+        if root is not None and _is_sensitive_path(resolved):
+            raise HTTPException(status_code=403, detail="Access to sensitive files is not allowed")
+        return resolved
+    except HTTPException:
+        raise
     except (OSError, RuntimeError, ValueError):
         raise HTTPException(status_code=400, detail="Invalid path")
 
@@ -1676,10 +1711,14 @@ def _fs_default_cwd() -> str:
     if raw and raw not in {".", "auto", "cwd"}:
         try:
             candidate = Path(raw).expanduser().resolve(strict=False)
-            if candidate.is_dir():
+            root = _hosted_fs_root()
+            if candidate.is_dir() and (root is None or _path_is_under(root, candidate)):
                 return str(candidate)
         except (OSError, RuntimeError):
             pass
+    root = _hosted_fs_root()
+    if root is not None:
+        return str(root)
     return str(Path.cwd())
 
 
@@ -2382,7 +2421,7 @@ async def fs_write_text(payload: FsWriteText):
     original. Stale-on-disk detection is the client's job (re-read before save),
     so both transports behave identically.
     """
-    target = _fs_path(payload.path)
+    target = _fs_path(payload.path, for_write=True)
     text = payload.content or ""
     if len(text.encode("utf-8")) > _FS_TEXT_WRITE_MAX_BYTES:
         raise HTTPException(status_code=413, detail="Content too large")

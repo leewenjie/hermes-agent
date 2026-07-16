@@ -171,6 +171,46 @@ def test_forced_root_paths_stay_under_root(forced_files_client, tmp_path):
     assert escaped.status_code == 403
 
 
+def test_hosted_legacy_fs_and_git_paths_stay_under_root(forced_files_client, tmp_path):
+    client, root = forced_files_client
+    root.mkdir(parents=True, exist_ok=True)
+    safe = root / "notes.txt"
+    safe.write_text("safe")
+    outside = tmp_path / "state.db"
+    outside.write_text("private")
+
+    assert client.get("/api/fs/read-text", params={"path": str(safe)}).status_code == 200
+    assert client.get("/api/fs/read-text", params={"path": str(outside)}).status_code == 403
+    assert client.get("/api/fs/read-data-url", params={"path": str(outside)}).status_code == 403
+    assert client.get("/api/fs/list", params={"path": str(tmp_path)}).status_code == 403
+    assert client.get("/api/git/status", params={"path": str(tmp_path)}).status_code == 403
+
+
+def test_hosted_legacy_fs_blocks_sensitive_files(forced_files_client):
+    client, root = forced_files_client
+    root.mkdir(parents=True, exist_ok=True)
+    secret = root / ".env"
+    secret.write_text("SECRET=value")
+
+    assert client.get("/api/fs/read-text", params={"path": str(secret)}).status_code == 403
+    assert client.get("/api/fs/read-data-url", params={"path": str(secret)}).status_code == 403
+    assert client.post(
+        "/api/fs/write-text",
+        json={"path": str(secret), "content": "replacement"},
+    ).status_code == 403
+    assert secret.read_text() == "SECRET=value"
+
+
+def test_local_legacy_fs_keeps_absolute_path_access(local_files_client, tmp_path):
+    client, _home = local_files_client
+    outside = tmp_path / "outside.txt"
+    outside.write_text("local desktop file")
+
+    response = client.get("/api/fs/read-text", params={"path": str(outside)})
+    assert response.status_code == 200
+    assert response.json()["text"] == "local desktop file"
+
+
 def test_legacy_upload_rejects_dangling_symlink_escape(forced_files_client, tmp_path):
     client, root = forced_files_client
     root.mkdir(parents=True, exist_ok=True)
