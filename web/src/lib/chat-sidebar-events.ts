@@ -74,8 +74,65 @@ const RESEARCH_METHOD_LABELS: Record<string, string> = {
   stocks: "Market data and quote provenance",
 };
 
+const RESEARCH_METHOD_DESCRIPTIONS: Record<string, string> = {
+  "investment-research": "Structure claims, counter-evidence, risks, catalysts, and missing checks.",
+  "market-return-analysis": "Compare returns, volatility, drawdowns, and distributions with stated assumptions.",
+  stocks: "Fetch timestamped quotes and adjusted history with source metadata and limitations.",
+};
+
+export interface ResearchCapabilitySummary {
+  detail: string;
+  label: string;
+}
+
 export function researchMethodLabel(skill: string): string {
   return RESEARCH_METHOD_LABELS[skill] ?? skill.replaceAll("-", " ");
+}
+
+export function researchMethodDescription(skill: string): string {
+  return RESEARCH_METHOD_DESCRIPTIONS[skill] ?? "Loaded research guidance for this session.";
+}
+
+export function summarizeResearchCapabilities(
+  tools: Record<string, string[]>,
+): ResearchCapabilitySummary[] {
+  const available = new Set(Object.keys(tools));
+  const capabilities: Array<ResearchCapabilitySummary & { toolsets: string[] }> = [
+    {
+      label: "Evidence and sources",
+      detail: "Search and review source pages while keeping links attached.",
+      toolsets: ["web"],
+    },
+    {
+      label: "Calculations and scripts",
+      detail: "Run reproducible data checks and analysis in the workspace.",
+      toolsets: ["terminal"],
+    },
+    {
+      label: "Files and artifacts",
+      detail: "Read, create, and update memos, datasets, charts, and reports.",
+      toolsets: ["file"],
+    },
+    {
+      label: "Saved research context",
+      detail: "Reuse approved memory and search prior research sessions.",
+      toolsets: ["memory", "session_search"],
+    },
+    {
+      label: "Research coordination",
+      detail: "Ask focused questions, track work, and delegate bounded checks.",
+      toolsets: ["clarify", "todo", "delegation"],
+    },
+    {
+      label: "Chart and image review",
+      detail: "Inspect visual evidence when it is part of the research record.",
+      toolsets: ["vision"],
+    },
+  ];
+
+  return capabilities
+    .filter((capability) => capability.toolsets.some((toolset) => available.has(toolset)))
+    .map(({ label, detail }) => ({ label, detail }));
 }
 
 export function emptyResearchTrace(): ResearchTraceState {

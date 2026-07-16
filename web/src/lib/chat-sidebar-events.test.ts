@@ -6,7 +6,9 @@ import {
   generatedImageFromToolResult,
   isBrowserImageSource,
   reduceResearchTrace,
+  researchMethodDescription,
   researchMethodLabel,
+  summarizeResearchCapabilities,
   summarizeResearchTools,
 } from "./chat-sidebar-events";
 
@@ -66,6 +68,30 @@ describe("chat sidebar event helpers", () => {
     expect(researchMethodLabel("stocks")).toBe(
       "Market data and quote provenance",
     );
+    expect(researchMethodDescription("stocks")).toContain("timestamped quotes");
+  });
+
+  it("groups internal toolsets into useful customer capabilities", () => {
+    expect(
+      summarizeResearchCapabilities({
+        web: ["web_search"],
+        terminal: ["terminal"],
+        file: ["read_file"],
+        memory: ["memory"],
+        session_search: ["session_search"],
+        clarify: ["clarify"],
+        delegation: ["delegate_task"],
+        todo: ["todo"],
+        vision: ["vision_analyze"],
+      }).map((capability) => capability.label),
+    ).toEqual([
+      "Evidence and sources",
+      "Calculations and scripts",
+      "Files and artifacts",
+      "Saved research context",
+      "Research coordination",
+      "Chart and image review",
+    ]);
   });
 
   it("tracks only observed calls within the latest answer", () => {
