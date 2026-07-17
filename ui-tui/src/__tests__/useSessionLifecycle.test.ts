@@ -70,9 +70,11 @@ describe('resume scroll settle', () => {
 
   it('re-snaps while sticky and stops when the user scrolls away', () => {
     vi.useFakeTimers()
+
     let sticky = true
     let lastManualScrollAt = 0
     const scrollToBottom = vi.fn()
+
     const cancel = scheduleResumeScrollToBottom(
       {
         current: {
@@ -100,7 +102,9 @@ describe('resume scroll settle', () => {
 
   it('cancels pending resume snaps', () => {
     vi.useFakeTimers()
+
     const scrollToBottom = vi.fn()
+
     const cancel = scheduleResumeScrollToBottom(
       {
         current: {
@@ -120,8 +124,10 @@ describe('resume scroll settle', () => {
 
   it('keeps the immediate resume snap even before sticky state settles', () => {
     vi.useFakeTimers()
+
     let sticky = false
     const scrollToBottom = vi.fn()
+
     const cancel = scheduleResumeScrollToBottom(
       {
         current: {

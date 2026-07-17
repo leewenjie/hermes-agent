@@ -1089,9 +1089,7 @@ export default function ModelsPage() {
       });
   }, []);
 
-  const load = useCallback(() => {
-    setLoading(true);
-    setError(null);
+  const requestModels = useCallback(() => {
     Promise.all([
       api.getModelsAnalytics(days),
       api.getAuxiliaryModels().catch(() => null),
@@ -1103,6 +1101,12 @@ export default function ModelsPage() {
       .catch((err) => setError(String(err)))
       .finally(() => setLoading(false));
   }, [days]);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    requestModels();
+  }, [requestModels]);
 
   const refreshAux = useCallback(() => {
     api
@@ -1130,7 +1134,11 @@ export default function ModelsPage() {
             type="button"
             size="sm"
             outlined={days !== p.days}
-            onClick={() => setDays(p.days)}
+            onClick={() => {
+              setLoading(true);
+              setError(null);
+              setDays(p.days);
+            }}
             className="uppercase"
           >
             {p.label}
@@ -1157,8 +1165,8 @@ export default function ModelsPage() {
   }, [days, loading, load, setAfterTitle, setEnd, t.common.refresh]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    requestModels();
+  }, [requestModels]);
 
   // Model assignments can change outside this page (config editor, chat
   // /model --global, CLI), so refetch them when the page regains focus.

@@ -62,15 +62,13 @@ export default function LogsPage() {
   const [lineCount, setLineCount] = useState<(typeof LINE_COUNTS)[number]>(100);
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [lines, setLines] = useState<string[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const { t } = useI18n();
   const { setAfterTitle, setEnd } = usePageHeader();
 
-  const fetchLogs = useCallback(() => {
-    setLoading(true);
-    setError(null);
+  const requestLogs = useCallback(() => {
     api
       .getLogs({ file, lines: lineCount, level, component })
       .then((resp) => {
@@ -84,6 +82,12 @@ export default function LogsPage() {
       .catch((err) => setError(String(err)))
       .finally(() => setLoading(false));
   }, [file, lineCount, level, component]);
+
+  const fetchLogs = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    requestLogs();
+  }, [requestLogs]);
 
   useLayoutEffect(() => {
     setAfterTitle(
@@ -144,8 +148,8 @@ export default function LogsPage() {
   ]);
 
   useEffect(() => {
-    fetchLogs();
-  }, [fetchLogs]);
+    requestLogs();
+  }, [requestLogs]);
 
   useEffect(() => {
     if (!autoRefresh) return;
@@ -165,7 +169,11 @@ export default function LogsPage() {
           <Segmented
             className={segmentedClass}
             value={file}
-            onChange={setFile}
+            onChange={(value) => {
+              setLoading(true);
+              setError(null);
+              setFile(value);
+            }}
             options={toSegmentOptions(FILES)}
           />
         </FilterGroup>
@@ -174,7 +182,11 @@ export default function LogsPage() {
           <Segmented
             className={segmentedClass}
             value={level}
-            onChange={setLevel}
+            onChange={(value) => {
+              setLoading(true);
+              setError(null);
+              setLevel(value);
+            }}
             options={toSegmentOptions(LEVELS)}
           />
         </FilterGroup>
@@ -183,7 +195,11 @@ export default function LogsPage() {
           <Segmented
             className={segmentedClass}
             value={component}
-            onChange={setComponent}
+            onChange={(value) => {
+              setLoading(true);
+              setError(null);
+              setComponent(value);
+            }}
             options={toSegmentOptions(COMPONENTS)}
           />
         </FilterGroup>
@@ -192,9 +208,11 @@ export default function LogsPage() {
           <Segmented
             className={segmentedClass}
             value={String(lineCount)}
-            onChange={(v) =>
-              setLineCount(Number(v) as (typeof LINE_COUNTS)[number])
-            }
+            onChange={(value) => {
+              setLoading(true);
+              setError(null);
+              setLineCount(Number(value) as (typeof LINE_COUNTS)[number]);
+            }}
             options={LINE_COUNTS.map((n) => ({
               value: String(n),
               label: String(n),

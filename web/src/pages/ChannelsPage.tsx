@@ -604,6 +604,9 @@ function WhatsAppOnboardingPanel({
 
   useEffect(() => {
     if (!setup && phase === "idle" && configuredMode) {
+      // Reconcile saved server configuration only while no onboarding flow is
+      // active; deriving mode would overwrite the user's in-progress choice.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setMode(configuredMode);
     }
   }, [configuredMode, phase, setup]);

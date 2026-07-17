@@ -34,32 +34,22 @@ import { GatewayClient, type ConnectionState } from "@/lib/gatewayClient";
 import { api, buildWsUrl } from "@/lib/api";
 import {
   capabilityInfoFromSessionCreate,
-  emptyResearchTrace,
+  chatSessionIdentityFromInfo,
   generatedImageFromToolResult,
   isBrowserImageSource,
-  reduceResearchTrace,
-  researchMethodDescription,
-  researchMethodLabel,
-  summarizeResearchCapabilities,
-  summarizeResearchTools,
+  type ChatSessionIdentity,
   type ChatSessionCapabilityInfo,
-  type ResearchTraceState,
 } from "@/lib/chat-sidebar-events";
 import { titleFromSessionInfoPayload } from "@/lib/chat-title";
-import {
-  isOxaideManagedDashboard,
-  OXAIDE_RESEARCH_ENGINE_LABEL,
-} from "@/lib/managed-dashboard";
+import { isOxaideManagedDashboard } from "@/lib/managed-dashboard";
 
 import { cn } from "@/lib/utils";
 import {
   AlertCircle,
-  CheckCircle2,
   ChevronDown,
   ExternalLink,
   ImageIcon,
   LockKeyhole,
-  LoaderCircle,
   RefreshCw,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -68,7 +58,7 @@ type SessionInfo = ChatSessionCapabilityInfo;
 
 interface RpcEnvelope {
   method?: string;
-  params?: { type?: string; payload?: unknown };
+  params?: { type?: string; payload?: unknown; session_id?: string };
 }
 
 interface ToolCompletePayload {
@@ -106,6 +96,7 @@ interface ChatSidebarProps {
   profile?: string;
   className?: string;
   onDashboardNewSessionRequest?: () => void;
+  onSessionChange?: (session: ChatSessionIdentity) => void;
   onSessionTitleChange?: (title: string | null) => void;
 }
 
@@ -114,6 +105,7 @@ export function ChatSidebar({
   profile,
   className,
   onDashboardNewSessionRequest,
+  onSessionChange,
   onSessionTitleChange,
 }: ChatSidebarProps) {
   // `version` bumps on reconnect; gw is derived so we never call setState
@@ -127,9 +119,6 @@ export function ChatSidebar({
   const [state, setState] = useState<ConnectionState>("idle");
   const [info, setInfo] = useState<SessionInfo>({});
   const [generatedImage, setGeneratedImage] = useState<GeneratedImage | null>(null);
-  const [researchTrace, setResearchTrace] = useState<ResearchTraceState>(
-    emptyResearchTrace,
-  );
   const mediaRequestRef = useRef(0);
   const [modelOpen, setModelOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -189,7 +178,6 @@ export function ChatSidebar({
     prevScopeKey.current = scopeKey;
     setError(null);
     setGeneratedImage(null);
-    setResearchTrace(emptyResearchTrace());
     mediaRequestRef.current += 1;
     setVersion((v) => v + 1);
   }, [scopeKey]);
@@ -320,14 +308,14 @@ export function ChatSidebar({
           if (title !== undefined) {
             onSessionTitleChange?.(title);
           }
-        } else if (
-          type === "message.start" ||
-          type === "message.complete" ||
-          type === "tool.start" ||
-          type === "tool.complete"
-        ) {
-          setResearchTrace((prev) => reduceResearchTrace(prev, type, payload));
-          if (type !== "tool.complete") return;
+          const identity = chatSessionIdentityFromInfo(
+            frame.params.session_id,
+            payload,
+          );
+          if (identity) {
+            onSessionChange?.(identity);
+          }
+        } else if (type === "tool.complete") {
           const tool = payload as ToolCompletePayload | null;
           if (tool?.name !== "image_generate") return;
           const source = generatedImageFromToolResult(tool.result);
@@ -362,7 +350,7 @@ export function ChatSidebar({
       unmounting = true;
       ws?.close();
     };
-  }, [channel, onDashboardNewSessionRequest, onSessionTitleChange, version]);
+  }, [channel, onDashboardNewSessionRequest, onSessionChange, onSessionTitleChange, version]);
 
   // Seed the badge on mount and re-read it whenever the sockets are rebuilt
   // (a profile/channel switch bumps `version`).
@@ -389,8 +377,6 @@ export function ChatSidebar({
     (total, names) => total + names.length,
     0,
   );
-  const usedTools = summarizeResearchTools(researchTrace.tools);
-  const researchCapabilities = summarizeResearchCapabilities(info.tools ?? {});
 
   return (
     <aside
@@ -407,16 +393,11 @@ export function ChatSidebar({
 
           {managedOxaide ? (
             <div
-              className="min-w-0 max-w-full"
-              title="Managed research runtime. Provider details are available in the Trust Center."
+              className="flex min-w-0 max-w-full items-center gap-1.5 text-sm font-medium"
+              title={`Oxaide Research Engine · ${modelName} via Microsoft Azure`}
             >
-              <div className="flex min-w-0 items-center gap-1.5 text-sm font-medium">
-                <span className="truncate">{OXAIDE_RESEARCH_ENGINE_LABEL}</span>
-                <LockKeyhole className="size-3.5 shrink-0 text-text-tertiary" />
-              </div>
-              <div className="mt-0.5 line-clamp-2 text-[0.6875rem] leading-snug text-text-tertiary">
-                Source-linked analysis with saved research context
-              </div>
+              <span className="truncate">Oxaide Research Engine</span>
+              <LockKeyhole className="size-3.5 shrink-0 text-text-tertiary" />
             </div>
           ) : (
             <Button
@@ -447,118 +428,35 @@ export function ChatSidebar({
       {managedOxaide && (
         <Card className="px-3 py-3">
           <div className="text-display text-xs tracking-wider text-text-tertiary">
-            research setup
+            research capabilities
           </div>
           <div className="mt-1 text-sm font-medium">
             {preloadedSkills.length > 0
-              ? `${preloadedSkills.length} methods ${capabilityPreview ? "configured" : "loaded for every answer"}`
+              ? `${preloadedSkills.length} skills ${capabilityPreview ? "configured" : "loaded"}`
               : capabilityKnown
-                ? "No research methods configured"
-                : "Loading research methods…"}
+                ? "No session skills configured"
+                : "Loading session skills…"}
           </div>
           {preloadedSkills.length > 0 && (
-            <div className="mt-2 flex flex-col gap-2">
+            <div className="mt-2 flex max-h-24 flex-wrap gap-1 overflow-y-auto">
               {preloadedSkills.map((skill) => (
-                <div key={skill} className="min-w-0 border-l-2 border-success/40 pl-2">
-                  <div className="text-xs font-medium leading-snug text-foreground">
-                    {researchMethodLabel(skill)}
-                  </div>
-                  <div className="mt-0.5 text-[0.6875rem] leading-snug text-text-secondary">
-                    {researchMethodDescription(skill)}
-                  </div>
-                </div>
+                <Badge
+                  key={skill}
+                  tone="secondary"
+                  className="max-w-full px-1.5 py-0.5 text-[0.6875rem] font-normal leading-tight normal-case tracking-normal"
+                  title={skill}
+                >
+                  <span className="truncate">{skill}</span>
+                </Badge>
               ))}
             </div>
           )}
-          {researchCapabilities.length > 0 && (
-            <div className="mt-3 border-t border-border pt-2">
-              <div className="text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-text-tertiary">
-                Available capabilities
-              </div>
-              <div className="mt-2 flex flex-col gap-2">
-                {researchCapabilities.map((capability) => (
-                  <div key={capability.label} className="min-w-0">
-                    <div className="text-xs font-medium leading-snug text-foreground">
-                      {capability.label}
-                    </div>
-                    <div className="mt-0.5 text-[0.6875rem] leading-snug text-text-secondary">
-                      {capability.detail}
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className="mt-2 text-[0.6875rem] text-text-tertiary">
-                {toolCount} {capabilityPreview ? "configured" : "available"} tools across{" "}
-                {Object.keys(info.tools ?? {}).length} toolsets
-              </div>
-            </div>
-          )}
-        </Card>
-      )}
-
-      {managedOxaide && researchTrace.phase !== "idle" && (
-        <Card className="px-3 py-3">
-          <div className="flex items-center justify-between gap-2">
-            <div className="text-display text-xs tracking-wider text-text-tertiary">
-              used in this answer
-            </div>
-            <Badge
-              tone={researchTrace.phase === "running" ? "warning" : "success"}
-              className="shrink-0"
-            >
-              {researchTrace.phase === "running" ? "researching" : "complete"}
-            </Badge>
-          </div>
-
-          {usedTools.length > 0 ? (
-            <div className="mt-2 flex flex-col gap-2">
-              {usedTools.map((tool) => (
-                <div key={tool.name} className="min-w-0">
-                  <div className="flex min-w-0 items-center gap-1.5 text-xs font-medium">
-                    {tool.running ? (
-                      <LoaderCircle className="size-3.5 shrink-0 animate-spin text-warning" />
-                    ) : (
-                      <CheckCircle2 className="size-3.5 shrink-0 text-success" />
-                    )}
-                    <span className="truncate">{tool.label}</span>
-                    {tool.count > 1 && (
-                      <span className="shrink-0 text-text-tertiary">×{tool.count}</span>
-                    )}
-                  </div>
-                  {tool.detail && (
-                    <div className="mt-0.5 line-clamp-2 pl-5 text-[0.6875rem] leading-snug text-text-secondary">
-                      {tool.detail}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          ) : (
+          {toolCount > 0 && (
             <div className="mt-2 text-xs text-text-secondary">
-              {researchTrace.phase === "running"
-                ? "Reviewing the question before selecting data tools."
-                : "No data tools were needed for this answer."}
+              {toolCount} {capabilityPreview ? "configured" : "live"} tools across{" "}
+              {Object.keys(info.tools ?? {}).length} toolsets
             </div>
           )}
-
-          {researchTrace.openedSkills.length > 0 && (
-            <div className="mt-2 border-t border-border pt-2">
-              <div className="text-[0.6875rem] text-text-tertiary">
-                Opened this answer
-              </div>
-              <div className="mt-1 flex flex-wrap gap-1">
-                {researchTrace.openedSkills.map((skill) => (
-                  <Badge key={skill} tone="secondary" className="normal-case tracking-normal">
-                    {researchMethodLabel(skill)}
-                  </Badge>
-                ))}
-              </div>
-            </div>
-          )}
-
-          <div className="mt-2 border-t border-border pt-2 text-[0.6875rem] leading-snug text-text-tertiary">
-            Loaded methods guide the session. This trace lists observed calls only.
-          </div>
         </Card>
       )}
 

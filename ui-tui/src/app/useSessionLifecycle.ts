@@ -73,6 +73,7 @@ export const scheduleResumeScrollToBottom = (
   delays: readonly number[] = [0, 80, 240]
 ) => {
   const startedAt = Date.now()
+
   const timers = delays.map((delay, index) =>
     setTimeout(() => {
       const scroll = scrollRef.current
@@ -148,6 +149,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
       targetSid ? rpc<SessionCloseResponse>('session.close', { session_id: targetSid }) : Promise.resolve(null),
     [rpc]
   )
+
   const cancelResumeScrollRef = useRef<null | (() => void)>(null)
 
   const resetSession = useCallback(() => {

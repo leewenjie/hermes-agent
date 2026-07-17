@@ -193,27 +193,19 @@ export default function ConfigPage() {
       .catch(() => {});
   }, []);
 
-  // Set active category when categories load
-  useEffect(() => {
-    if (categoryOrder.length > 0 && !activeCategory) {
-      setActiveCategory(categoryOrder[0]);
-    }
-  }, [categoryOrder, activeCategory]);
-
   // Load YAML when switching to YAML mode
   useEffect(() => {
     if (yamlMode) {
-      setYamlLoading(true);
       api
         .getConfigRaw()
         .then((resp) => setYamlText(resp.yaml))
         .catch(() => showToast(t.config.failedToLoadRaw, "error"))
         .finally(() => setYamlLoading(false));
     }
-  }, [yamlMode]);
+  }, [showToast, t.config.failedToLoadRaw, yamlMode]);
 
   /* ---- Categories ---- */
-  const categories = useMemo(() => {
+  const categories = (() => {
     if (!schema) return [];
     const allCats = [
       ...new Set(
@@ -223,7 +215,8 @@ export default function ConfigPage() {
     const ordered = categoryOrder.filter((c) => allCats.includes(c));
     const extra = allCats.filter((c) => !categoryOrder.includes(c)).sort();
     return [...ordered, ...extra];
-  }, [schema, categoryOrder]);
+  })();
+  const effectiveActiveCategory = activeCategory || categories[0] || "";
 
   /* ---- Category field counts ---- */
   const categoryCounts = useMemo(() => {
@@ -238,10 +231,9 @@ export default function ConfigPage() {
 
   /* ---- Search ---- */
   const isSearching = searchQuery.trim().length > 0;
-  const lowerSearch = searchQuery.toLowerCase();
-
   const searchMatchedFields = useMemo(() => {
-    if (!isSearching || !schema) return [];
+    const lowerSearch = searchQuery.trim().toLowerCase();
+    if (!lowerSearch || !schema) return [];
     return Object.entries(schema).filter(([key, s]) => {
       const label = key.split(".").pop() ?? key;
       const humanLabel = label.replace(/_/g, " ");
@@ -256,15 +248,14 @@ export default function ConfigPage() {
           .includes(lowerSearch)
       );
     });
-  }, [isSearching, lowerSearch, schema]);
+  }, [searchQuery, schema]);
 
   /* ---- Active tab fields ---- */
-  const activeFields = useMemo(() => {
-    if (!schema || isSearching) return [];
-    return Object.entries(schema).filter(
-      ([, s]) => String(s.category ?? "general") === activeCategory,
-    );
-  }, [schema, activeCategory, isSearching]);
+  const activeFields = !schema || isSearching
+    ? []
+    : Object.entries(schema).filter(
+        ([, s]) => String(s.category ?? "general") === effectiveActiveCategory,
+      );
 
   /* ---- Handlers ---- */
   const handleSave = async () => {
@@ -316,7 +307,7 @@ export default function ConfigPage() {
     if (scopedFields.length === 0) return;
     const scopeLabel = isSearching
       ? t.config.searchResults
-      : prettyCategoryName(activeCategory);
+      : prettyCategoryName(effectiveActiveCategory);
     let next: Record<string, unknown> = config;
     for (const [key] of scopedFields) {
       next = setNestedValue(next, key, getNestedValue(defaults, key));
@@ -486,7 +477,10 @@ export default function ConfigPage() {
           <Button
             size="sm"
             outlined={!yamlMode}
-            onClick={() => setYamlMode(!yamlMode)}
+            onClick={() => {
+              if (!yamlMode) setYamlLoading(true);
+              setYamlMode(!yamlMode);
+            }}
             prefix={yamlMode ? <FormInput /> : <Code />}
           >
             {yamlMode ? t.common.form : "YAML"}
@@ -555,7 +549,7 @@ export default function ConfigPage() {
 
                 <div className="flex sm:flex-col gap-1 sm:gap-px p-2 sm:pt-1 overflow-x-auto sm:overflow-x-visible scrollbar-none sm:max-h-[calc(100vh-260px)] sm:overflow-y-auto">
                   {categories.map((cat) => {
-                    const isActive = !isSearching && activeCategory === cat;
+                    const isActive = !isSearching && effectiveActiveCategory === cat;
 
                     return (
                       <ListItem
@@ -626,10 +620,10 @@ export default function ConfigPage() {
                   <div className="flex items-center justify-between">
                     <CardTitle className="text-sm flex items-center gap-2">
                       <CategoryIcon
-                        category={activeCategory}
+                        category={effectiveActiveCategory}
                         className="h-4 w-4"
                       />
-                      {prettyCategoryName(activeCategory)}
+                      {prettyCategoryName(effectiveActiveCategory)}
                     </CardTitle>
                     <Badge tone="secondary" className="text-xs">
                       {activeFields.length}{" "}
@@ -657,7 +651,7 @@ export default function ConfigPage() {
           "{scope}",
           isSearching
             ? t.config.searchResults
-            : prettyCategoryName(activeCategory),
+            : prettyCategoryName(effectiveActiveCategory),
         )}
         description={`This will reset ${
           (isSearching ? searchMatchedFields : activeFields).length

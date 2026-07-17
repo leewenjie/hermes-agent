@@ -15,6 +15,7 @@ import {
   FolderOpen,
   FolderPlus,
   RefreshCw,
+  Sparkles,
   Trash2,
   Upload,
 } from "lucide-react";
@@ -47,6 +48,7 @@ import {
 } from "@/lib/file-preview";
 import { PluginSlot } from "@/plugins";
 import { Markdown } from "@/components/Markdown";
+import { useNavigate } from "react-router-dom";
 
 const DATE_FORMAT = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
@@ -92,6 +94,7 @@ function parentPath(path: string): string | undefined {
 }
 
 export default function FilesPage() {
+  const navigate = useNavigate();
   const { toast, showToast } = useToast();
   const { setAfterTitle, setEnd } = usePageHeader();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -396,6 +399,14 @@ export default function FilesPage() {
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <Button
             type="button"
+            onClick={() => navigate("/chat")}
+            size="sm"
+            prefix={<Sparkles />}
+          >
+            Create with agent
+          </Button>
+          <Button
+            type="button"
             onClick={() => fileInputRef.current?.click()}
             disabled={!canUpload}
             size="sm"
@@ -414,7 +425,7 @@ export default function FilesPage() {
             className="uppercase"
             prefix={<FolderPlus />}
           >
-            Create
+            New folder
           </Button>
         </div>
       </div>
@@ -489,7 +500,10 @@ export default function FilesPage() {
               Loading files...
             </div>
           ) : listing && listing.entries.length === 0 ? (
-            <div className="py-12 text-center text-sm text-muted-foreground">No files</div>
+            <div className="px-4 py-12 text-center text-sm text-muted-foreground">
+              No files yet. Ask the agent to create a memo, dataset, chart, or report,
+              then return here to preview or download it.
+            </div>
           ) : (
             listing?.entries.map((entry) => (
               <div

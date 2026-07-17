@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   capabilityInfoFromSessionCreate,
+  chatSessionIdentityFromInfo,
   emptyResearchTrace,
   generatedImageFromToolResult,
   isBrowserImageSource,
@@ -13,6 +14,15 @@ import {
 } from "./chat-sidebar-events";
 
 describe("chat sidebar event helpers", () => {
+  it("extracts the real PTY session identity for result sharing", () => {
+    expect(
+      chatSessionIdentityFromInfo(" session-123 ", {
+        title: " Market breadth review ",
+      }),
+    ).toEqual({ id: "session-123", title: "Market breadth review" });
+    expect(chatSessionIdentityFromInfo("", { title: "Missing id" })).toBeNull();
+  });
+
   it("hydrates the capability preview returned by session.create", () => {
     expect(
       capabilityInfoFromSessionCreate({
