@@ -6852,6 +6852,43 @@ class TestPtyWebSocket:
         assert env["HERMES_TUI_INLINE"] == "1"
         assert env["HERMES_TUI_DISABLE_MOUSE"] == "1"
 
+    def test_resolve_chat_argv_uses_oxaide_skin_for_managed_runtime(self, monkeypatch):
+        import hermes_cli.main as main_mod
+
+        monkeypatch.setattr(
+            main_mod,
+            "_make_tui_argv",
+            lambda project_root, tui_dev=False: (["node", "dist/entry.js"], "/tmp/ui-tui"),
+        )
+        monkeypatch.setenv("HERMES_OXAIDE_WORKSPACE_ID", "workspace-1")
+        monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", "a" * 48)
+        monkeypatch.delenv("HERMES_INTERNAL_TUI_SKIN", raising=False)
+        self.ws_module.app.state.bound_host = "127.0.0.1"
+        self.ws_module.app.state.auth_required = False
+
+        _argv, _cwd, env = self.ws_module._resolve_chat_argv()
+
+        assert env["HERMES_INTERNAL_TUI_SKIN"] == "oxaide"
+        assert env["HERMES_INTERNAL_OXAIDE_LOOPBACK_DEV"] == "1"
+
+    def test_resolve_chat_argv_does_not_bypass_hosted_oxaide_turn_auth(self, monkeypatch):
+        import hermes_cli.main as main_mod
+
+        monkeypatch.setattr(
+            main_mod,
+            "_make_tui_argv",
+            lambda project_root, tui_dev=False: (["node", "dist/entry.js"], "/tmp/ui-tui"),
+        )
+        monkeypatch.setenv("HERMES_OXAIDE_WORKSPACE_ID", "workspace-1")
+        monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", "a" * 48)
+        monkeypatch.delenv("HERMES_INTERNAL_OXAIDE_LOOPBACK_DEV", raising=False)
+        self.ws_module.app.state.bound_host = "0.0.0.0"
+        self.ws_module.app.state.auth_required = True
+
+        _argv, _cwd, env = self.ws_module._resolve_chat_argv()
+
+        assert "HERMES_INTERNAL_OXAIDE_LOOPBACK_DEV" not in env
+
     def test_resolve_chat_argv_backfills_colorterm_truecolor(self, monkeypatch):
         """Headless servers (cloud/systemd) have no COLORTERM, which made
         chalk in the TUI child degrade skin hex colors to the xterm 256

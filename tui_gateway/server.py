@@ -1275,6 +1275,7 @@ _OXAIDE_RESEARCH_RPC_METHODS = frozenset({
     "file.attach", "image.detach", "input.detect_drop", "paste.collapse",
     "clarify.respond", "terminal.read.respond", "sudo.respond", "secret.respond",
     "approval.respond", "delegation.status", "delegation.pause", "subagent.interrupt",
+    "pet.cells",
     "credits.view", "billing.state", "billing.charge", "billing.charge_status",
     "billing.auto_reload", "billing.step_up",
 })
@@ -2740,7 +2741,10 @@ def _load_enabled_toolsets() -> list[str] | None:
     ]
     if _is_oxaide_tenant_runtime():
         if not explicit:
-            raise RuntimeError("Oxaide tenant runtime requires HERMES_TUI_TOOLSETS")
+            # The managed bundle is fixed by server policy, so a missing
+            # deployment variable can safely resolve to that exact bundle.
+            # Explicit values remain strictly validated below.
+            return sorted(_OXAIDE_APPROVED_TOOLSETS)
         requested = set(explicit)
         rejected = sorted(requested - _OXAIDE_APPROVED_TOOLSETS)
         missing = sorted(_OXAIDE_APPROVED_TOOLSETS - requested)
@@ -4314,6 +4318,10 @@ def _parse_tui_skills_env() -> list[str]:
             seen.add(item)
             skills.append(item)
     if _is_oxaide_tenant_runtime():
+        if not skills:
+            # Match the fixed managed toolset behavior: absent configuration
+            # means the complete approved research bundle, never zero skills.
+            return sorted(_OXAIDE_REQUIRED_SKILLS)
         requested = set(skills)
         rejected = sorted(requested - _OXAIDE_REQUIRED_SKILLS)
         missing = sorted(_OXAIDE_REQUIRED_SKILLS - requested)
@@ -5471,6 +5479,11 @@ def _authorize_oxaide_user_turn(session: dict):
     turn = OxaideTurnClient(dict(context)).authorize()
     session["_oxaide_agent_authorized"] = True
     return turn
+
+
+def _is_oxaide_loopback_development() -> bool:
+    """Return whether this gateway was spawned by a loopback-only dashboard."""
+    return os.environ.get("HERMES_INTERNAL_OXAIDE_LOOPBACK_DEV") == "1"
 
 
 def _release_oxaide_turn(turn) -> None:
@@ -9413,7 +9426,11 @@ def _run_prompt_submit(
     *,
     oxaide_turn=None,
 ) -> None:
-    if _is_oxaide_tenant_runtime() and oxaide_turn is None:
+    if (
+        _is_oxaide_tenant_runtime()
+        and oxaide_turn is None
+        and not _is_oxaide_loopback_development()
+    ):
         raise RuntimeError("Oxaide hosted turns require pre-runtime authorization")
     with session["history_lock"]:
         history = list(session["history"])

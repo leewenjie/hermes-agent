@@ -537,6 +537,16 @@ export function fromSkin(
   const d = DEFAULT_THEME
   const c = (k: string) => colors[k]
   const hasSkinColors = Object.keys(colors).length > 0
+  const resolvedBranding = OXAIDE_STARTUP
+    ? {
+        ...branding,
+        agent_name: 'Oxaide Research',
+        org_name: 'Oxaide',
+        tagline: 'Source-linked research workspace',
+        welcome: 'Ask a focused research question or use /help.',
+        goodbye: 'Research session closed.'
+      }
+    : branding
 
   const accent = c('ui_accent') ?? c('banner_accent') ?? d.color.accent
   const bannerAccent = c('banner_accent') ?? c('banner_title') ?? d.color.accent
@@ -591,19 +601,19 @@ export function fromSkin(
       },
 
       brand: {
-        name: branding.agent_name ?? d.brand.name,
-        org: branding.org_name ?? d.brand.org,
-        tagline: branding.tagline ?? d.brand.tagline,
+        name: resolvedBranding.agent_name ?? d.brand.name,
+        org: resolvedBranding.org_name ?? d.brand.org,
+        tagline: resolvedBranding.tagline ?? d.brand.tagline,
         icon: d.brand.icon,
-        prompt: cleanPromptSymbol(branding.prompt_symbol, d.brand.prompt),
-        welcome: branding.welcome ?? d.brand.welcome,
-        goodbye: branding.goodbye ?? d.brand.goodbye,
+        prompt: cleanPromptSymbol(resolvedBranding.prompt_symbol, d.brand.prompt),
+        welcome: resolvedBranding.welcome ?? d.brand.welcome,
+        goodbye: resolvedBranding.goodbye ?? d.brand.goodbye,
         tool: toolPrefix || d.brand.tool,
-        helpHeader: branding.help_header ?? (helpHeader || d.brand.helpHeader)
+        helpHeader: resolvedBranding.help_header ?? (helpHeader || d.brand.helpHeader)
       },
 
-      bannerLogo,
-      bannerHero
+      bannerLogo: OXAIDE_STARTUP ? OXAIDE_STARTUP_LOGO : bannerLogo,
+      bannerHero: OXAIDE_STARTUP ? OXAIDE_STARTUP_HERO : bannerHero
     },
     process.env,
     DEFAULT_LIGHT_MODE
