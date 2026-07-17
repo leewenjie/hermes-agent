@@ -23,8 +23,7 @@ def test_oxaide_tool_policy_resolves_exact_approved_bundle(monkeypatch, oxaide_r
 
 def test_oxaide_tool_policy_rejects_missing_or_unapproved_entries(monkeypatch, oxaide_runtime):
     monkeypatch.delenv("HERMES_TUI_TOOLSETS", raising=False)
-    with pytest.raises(RuntimeError, match="requires HERMES_TUI_TOOLSETS"):
-        server._load_enabled_toolsets()
+    assert server._load_enabled_toolsets() == sorted(server._OXAIDE_APPROVED_TOOLSETS)
 
     approved = sorted(server._OXAIDE_APPROVED_TOOLSETS)
     monkeypatch.setenv("HERMES_TUI_TOOLSETS", ",".join([*approved, "browser"]))
@@ -38,6 +37,9 @@ def test_oxaide_tool_policy_rejects_missing_or_unapproved_entries(monkeypatch, o
 
 def test_oxaide_skill_policy_requires_fixed_research_bundle(monkeypatch, oxaide_runtime):
     expected = sorted(server._OXAIDE_REQUIRED_SKILLS)
+    monkeypatch.delenv("HERMES_TUI_SKILLS", raising=False)
+    assert server._parse_tui_skills_env() == expected
+
     monkeypatch.setenv("HERMES_TUI_SKILLS", ",".join(expected))
     assert sorted(server._parse_tui_skills_env()) == expected
 
@@ -247,6 +249,23 @@ def test_oxaide_dispatch_keeps_research_session_methods(oxaide_runtime, monkeypa
     })
 
     assert response["result"] == {"status": "idle"}
+
+
+def test_oxaide_dispatch_allows_read_only_pet_cells(oxaide_runtime, monkeypatch):
+    monkeypatch.setitem(
+        server._methods,
+        "pet.cells",
+        lambda rid, _params: server._ok(rid, {"frames": []}),
+    )
+
+    response = server.handle_request({
+        "jsonrpc": "2.0",
+        "id": "rid",
+        "method": "pet.cells",
+        "params": {"graphics": False, "state": "idle"},
+    })
+
+    assert response["result"] == {"frames": []}
 
 
 def test_oxaide_history_projection_removes_internal_messages_and_reasoning(oxaide_runtime):

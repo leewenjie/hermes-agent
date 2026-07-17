@@ -17,7 +17,8 @@ const RELEVANT_ENV = [
   'HERMES_TUI_BACKGROUND',
   'COLORFGBG',
   'COLORTERM',
-  'TERM_PROGRAM'
+  'TERM_PROGRAM',
+  'HERMES_INTERNAL_TUI_SKIN'
 ] as const
 
 async function importThemeWithEnv(env: Partial<Record<(typeof RELEVANT_ENV)[number], string>> = {}) {
@@ -187,6 +188,27 @@ describe('fromSkin', () => {
   // must dynamic-import it after sterilizing env — otherwise an ambient
   // HERMES_TUI_THEME=light would flip the base palette and make these
   // assertions order-dependent on the developer's shell.
+
+  it('keeps Oxaide identity when a generic gateway skin arrives', async () => {
+    const { fromSkin } = await importThemeWithEnv({ HERMES_INTERNAL_TUI_SKIN: 'oxaide' })
+
+    const theme = fromSkin(
+      {},
+      {
+        agent_name: 'Hermes Agent',
+        org_name: 'Nous Research',
+        tagline: 'Messenger of the Digital Gods'
+      },
+      'GENERIC LOGO',
+      'GENERIC HERO'
+    )
+
+    expect(theme.brand.name).toBe('Oxaide Research')
+    expect(theme.brand.org).toBe('Oxaide')
+    expect(theme.brand.tagline).toBe('Source-linked research workspace')
+    expect(theme.bannerLogo).toContain('OXAIDE RESEARCH')
+    expect(theme.bannerHero).not.toBe('GENERIC HERO')
+  })
 
   it('overrides banner colors', async () => {
     const { fromSkin } = await importThemeWithCleanEnv()

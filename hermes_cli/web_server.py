@@ -15666,6 +15666,16 @@ def _resolve_chat_argv(
     env["HERMES_TUI_DASHBOARD"] = "1"
     if _dashboard_branding_settings()["product"] == "oxaide":
         env["HERMES_INTERNAL_TUI_SKIN"] = "oxaide"
+        bound_host = str(getattr(app.state, "bound_host", "") or "").lower()
+        if (
+            not getattr(app.state, "auth_required", False)
+            and bound_host in _LOOPBACK_HOSTS
+        ):
+            # A loopback-only dashboard intentionally has no Oxaide launch
+            # ticket or hosted billing context. Mark only this server-spawned
+            # child as local development so managed policy/branding can be
+            # exercised without weakening hosted turn authorization.
+            env["HERMES_INTERNAL_OXAIDE_LOOPBACK_DEV"] = "1"
 
     if profile_dir is not None:
         env["HERMES_HOME"] = str(profile_dir)
@@ -18167,6 +18177,20 @@ def start_server(
     # Record the bound host so host_header_middleware can validate incoming
     # Host headers against it. Defends against DNS rebinding (GHSA-ppp5-vxwm-4cf7).
     app.state.bound_host = host
+
+    # Dashboard chat attaches its Node PTY to this process's in-memory Python
+    # gateway. The gateway therefore needs the same narrow local-development
+    # marker as the child process, not merely a value in the child's env.
+    # Clear it on every non-qualifying start so a later public bind in the same
+    # process can never inherit a previous loopback bypass.
+    if (
+        not app.state.auth_required
+        and host in _LOOPBACK_HOST_VALUES
+        and _dashboard_branding_settings()["product"] == "oxaide"
+    ):
+        os.environ["HERMES_INTERNAL_OXAIDE_LOOPBACK_DEV"] = "1"
+    else:
+        os.environ.pop("HERMES_INTERNAL_OXAIDE_LOOPBACK_DEV", None)
 
     # ── Start uvicorn with direct Server API ─────────────────────────
     # We use uvicorn.Server directly (not uvicorn.run) so we can split
