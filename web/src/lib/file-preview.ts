@@ -18,7 +18,12 @@ export function managedFilePreviewKind(
   const mime = (mimeType || "").toLowerCase();
   const extension = name.toLowerCase().split(".").pop() || "";
 
-  if (mime.startsWith("image/") || extension === "svg") return "image";
+  if (
+    mime.startsWith("image/") ||
+    ["gif", "jpeg", "jpg", "png", "svg", "webp"].includes(extension)
+  ) {
+    return "image";
+  }
   if (mime === "application/pdf" || extension === "pdf") return "pdf";
   if (mime === "text/html" || ["html", "htm"].includes(extension)) return "html";
   if (

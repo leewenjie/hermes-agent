@@ -426,16 +426,20 @@ export default function AnalyticsPage() {
       .catch(() => setShowTokens(false));
   }, []);
 
-  const load = useCallback(() => {
+  const requestAnalytics = useCallback(() => {
     if (!showTokens) return;
-    setLoading(true);
-    setError(null);
     api
       .getAnalytics(days)
       .then(setData)
       .catch((err) => setError(String(err)))
       .finally(() => setLoading(false));
   }, [days, showTokens]);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    requestAnalytics();
+  }, [requestAnalytics]);
 
   useLayoutEffect(() => {
     // Period selector + refresh both live in afterTitle so the controls
@@ -451,7 +455,11 @@ export default function AnalyticsPage() {
               type="button"
               size="sm"
               outlined={days !== p.days}
-              onClick={() => setDays(p.days)}
+              onClick={() => {
+                setLoading(true);
+                setError(null);
+                setDays(p.days);
+              }}
             >
               {p.label}
             </Button>
@@ -478,8 +486,8 @@ export default function AnalyticsPage() {
   }, [days, loading, load, setAfterTitle, setEnd, t.common.refresh, showTokens]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    requestAnalytics();
+  }, [requestAnalytics]);
 
   return (
     <div className="flex flex-col gap-6">

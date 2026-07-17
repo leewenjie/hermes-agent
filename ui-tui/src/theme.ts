@@ -223,6 +223,7 @@ function normalizeAnsiForeground(color: string): string {
   }
 
   const richAnsi = richEightBitColorNumber(rgb[0], rgb[1], rgb[2])
+
   const richRgb = xtermEightBitRgb(richAnsi)
 
   const ansi =
@@ -236,9 +237,11 @@ function normalizeAnsiForeground(color: string): string {
 // ── Defaults ─────────────────────────────────────────────────────────
 
 const OXAIDE_STARTUP = process.env.HERMES_INTERNAL_TUI_SKIN === 'oxaide'
+
 const OXAIDE_STARTUP_LOGO = `[bold #5FD0B8]╭────────────────────────╮[/]
 [bold #2A8B78]│[/] [bold #E8F5F1]OXAIDE RESEARCH[/]        [bold #2A8B78]│[/]
 [bold #5FD0B8]╰────────────────────────╯[/]`
+
 const OXAIDE_STARTUP_HERO = `[#2A8B78]      ╭────────╮[/]
 [#5FD0B8]   ╭──╯   ◇    ╰──╮[/]
 [#8ADBCB]   ╰──╮        ╭──╯[/]

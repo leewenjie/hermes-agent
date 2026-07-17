@@ -42,11 +42,14 @@ function bundleIsFresh(): boolean {
   if (!existsSync(bundlePath)) {
     return false
   }
+
   try {
     const bundleMtime = statSync(bundlePath).mtimeMs
+
     const sourceMtime = statSync(
       resolve(uiTuiRoot, 'packages/hermes-ink/src/entry-exports.ts'),
     ).mtimeMs
+
     return bundleMtime >= sourceMtime
   } catch {
     return false
@@ -69,6 +72,7 @@ beforeAll(() => {
       },
     )
   }
+
   bundleSrc = readFileSync(bundlePath, 'utf8')
 }, 180_000)
 

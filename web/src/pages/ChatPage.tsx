@@ -25,13 +25,14 @@ import "@xterm/xterm/css/xterm.css";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Typography } from "@nous-research/ui/ui/components/typography/index";
 import { cn } from "@/lib/utils";
-import { Copy, PanelRight, RotateCcw, X } from "lucide-react";
+import { Copy, PanelRight, RotateCcw, Share2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
 
 import { ChatSidebar } from "@/components/ChatSidebar";
 import { ChatSessionList } from "@/components/ChatSessionList";
+import { ResearchShareDialog } from "@/components/ResearchShareDialog";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { useI18n } from "@/i18n";
 import { api } from "@/lib/api";
@@ -59,6 +60,7 @@ import {
 import { PluginSlot } from "@/plugins";
 import { useTheme } from "@/themes";
 import { useProfileScope } from "@/contexts/useProfileScope";
+import type { ChatSessionIdentity } from "@/lib/chat-sidebar-events";
 
 // Channel id ties this chat tab's PTY child (publisher) to its sidebar
 // (subscriber).  Generated once per mount so a tab refresh starts a fresh
@@ -237,6 +239,11 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     scope: string;
     title: string | null;
   }>({ scope: "", title: null });
+  const [sessionIdentityState, setSessionIdentityState] = useState<{
+    scope: string;
+    session: ChatSessionIdentity | null;
+  }>({ scope: "", session: null });
+  const [shareOpen, setShareOpen] = useState(false);
   const { t } = useI18n();
   const managedOxaide = isOxaideManagedDashboard();
   const closeMobilePanel = useCallback(() => setMobilePanelOpenRaw(false), []);
@@ -282,8 +289,17 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   const titleScope = `${channel}\0${reconnectNonce}`;
   const sessionTitle =
     sessionTitleState.scope === titleScope ? sessionTitleState.title : null;
+  const currentResearchSession =
+    sessionIdentityState.scope === titleScope
+      ? sessionIdentityState.session
+      : null;
   const handleSessionTitleChange = useCallback(
     (title: string | null) => setSessionTitleState({ scope: titleScope, title }),
+    [titleScope],
+  );
+  const handleSessionChange = useCallback(
+    (session: ChatSessionIdentity) =>
+      setSessionIdentityState({ scope: titleScope, session }),
     [titleScope],
   );
 
@@ -307,6 +323,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       .then((session) => {
         if (cancelled) return;
         handleSessionTitleChange(normalizeSessionTitle(session.title));
+        handleSessionChange({ id: session.id, title: session.title });
       })
       .catch(() => {
         // Best-effort: the PTY-side session.info stream can still supply it.
@@ -315,7 +332,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, [resumeParam, scopedProfile, handleSessionTitleChange]);
+  }, [resumeParam, scopedProfile, handleSessionChange, handleSessionTitleChange]);
 
   useEffect(() => {
     if (!resumeParam) return;
@@ -380,30 +397,45 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       setEnd(null);
       return;
     }
-    if (!narrow) {
-      setEnd(null);
-      return;
-    }
-    setEnd(
+    const shareAction = managedOxaide && currentResearchSession ? (
       <Button
-        ghost
-        onClick={() => setMobilePanelOpenRaw(true)}
-        aria-expanded={mobilePanelOpen}
-        aria-controls="chat-side-panel"
-        className={cn(
-          "shrink-0 rounded border border-current/20",
-          "px-2 py-1 text-xs font-medium tracking-wide",
-          "text-text-secondary hover:text-midground hover:bg-midground/5",
-        )}
+        outlined
+        size="sm"
+        onClick={() => setShareOpen(true)}
+        prefix={<Share2 className="h-3.5 w-3.5" />}
+        className="shrink-0 normal-case tracking-normal"
       >
-        <span className="inline-flex items-center gap-1.5">
-          <PanelRight className="h-3 w-3 shrink-0" />
-          {modelToolsLabel}
-        </span>
-      </Button>,
+        Share result
+      </Button>
+    ) : null;
+    const detailsAction = narrow ? (
+      <Button
+          ghost
+          onClick={() => setMobilePanelOpenRaw(true)}
+          aria-expanded={mobilePanelOpen}
+          aria-controls="chat-side-panel"
+          className={cn(
+            "shrink-0 rounded border border-current/20",
+            "px-2 py-1 text-xs font-medium tracking-wide",
+            "text-text-secondary hover:text-midground hover:bg-midground/5",
+          )}
+        >
+          <span className="inline-flex items-center gap-1.5">
+            <PanelRight className="h-3 w-3 shrink-0" />
+            {modelToolsLabel}
+          </span>
+        </Button>
+    ) : null;
+    setEnd(
+      shareAction || detailsAction ? (
+        <div className="flex items-center gap-2">
+          {shareAction}
+          {detailsAction}
+        </div>
+      ) : null,
     );
     return () => setEnd(null);
-  }, [isActive, narrow, mobilePanelOpen, modelToolsLabel, setEnd]);
+  }, [currentResearchSession, isActive, managedOxaide, narrow, mobilePanelOpen, modelToolsLabel, setEnd]);
 
   const handleCopyLast = () => {
     const ws = wsRef.current;
@@ -1145,6 +1177,10 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         reconnectTimerRef.current = null;
       }
     };
+    // The PTY lifecycle is intentionally keyed only by connection identity.
+    // Theme changes are handled by the live-theme effect below, and adding
+    // searchParams would reconnect immediately after consuming ?learn=.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channel, clearReconnectTimer, resumeParam, scopedProfile, reconnectNonce]);
 
   // When the user returns to the chat tab (isActive: false → true), the
@@ -1352,6 +1388,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
                 className="h-auto overflow-visible pr-0"
                 profile={scopedProfile}
                 onDashboardNewSessionRequest={startFreshDashboardChat}
+                onSessionChange={handleSessionChange}
                 onSessionTitleChange={handleSessionTitleChange}
               />
             </div>
@@ -1467,20 +1504,18 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
             aria-label={modelToolsLabel}
             className="flex min-h-0 shrink-0 flex-col gap-3 overflow-hidden lg:h-full lg:w-72"
           >
-            {/* Model picker — keeps the rail thin. */}
-            <div className="shrink-0">
+            <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pr-1">
               <ChatSidebar
                 channel={channel}
+                className="h-auto overflow-visible pr-0"
                 profile={scopedProfile}
                 onDashboardNewSessionRequest={startFreshDashboardChat}
+                onSessionChange={handleSessionChange}
                 onSessionTitleChange={handleSessionTitleChange}
               />
-            </div>
-
-            {/* Session switcher fills the remaining height below the model box. */}
-            <div className="min-h-0 flex-1 overflow-hidden">
               <ChatSessionList
                 activeSessionId={resumeParam}
+                className="mt-3 min-h-64 border-t border-current/10 pt-2"
                 profile={scopedProfile}
                 onNewChat={startFreshDashboardChat}
               />
@@ -1489,6 +1524,16 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         )}
       </div>
       <PluginSlot name="chat:bottom" />
+      {shareOpen && currentResearchSession && (
+        <ResearchShareDialog
+          session={{
+            id: currentResearchSession.id,
+            preview: null,
+            title: currentResearchSession.title,
+          }}
+          onClose={() => setShareOpen(false)}
+        />
+      )}
     </div>
   );
 }

@@ -24,6 +24,9 @@ describe("managedFilePreviewKind", () => {
   it.each([
     ["image/svg+xml", "chart.svg", "image"],
     ["image/png", "chart.png", "image"],
+    [null, "chart.png", "image"],
+    [null, "chart.jpg", "image"],
+    [null, "chart.webp", "image"],
     ["application/pdf", "filing.pdf", "pdf"],
     ["text/html", "report.html", "html"],
     ["text/markdown", "memo.md", "markdown"],

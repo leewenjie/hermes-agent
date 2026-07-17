@@ -16,7 +16,10 @@ function removeLastChar(text: string): string {
 }
 
 function isPlainText(data: string): boolean {
-  return !/[\x00-\x1f\x7f]/.test(data);
+  return chars(data).every((char) => {
+    const codePoint = char.codePointAt(0) ?? 0;
+    return codePoint > 0x1f && codePoint !== 0x7f;
+  });
 }
 
 function lastWordMatch(line: string): RegExpMatchArray | null {

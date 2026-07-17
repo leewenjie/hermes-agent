@@ -56,6 +56,9 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (urlProfile !== null && urlProfile !== profile) {
       setManagementProfile(urlProfile);
+      // Intentional URL-to-state reconciliation: state must remain authoritative
+      // so bare sidebar links do not discard the selected management profile.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setProfileState(urlProfile);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

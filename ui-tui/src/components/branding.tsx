@@ -3,7 +3,6 @@ import { useEffect, useState } from 'react'
 import unicodeSpinners from 'unicode-animations'
 
 import { artWidth, caduceus, CADUCEUS_WIDTH, logo, LOGO_WIDTH } from '../banner.js'
-import type { ArtLine } from '../banner.js'
 import { flat } from '../lib/text.js'
 import type { Theme } from '../theme.js'
 import type { PanelSection, SessionInfo } from '../types.js'
@@ -28,16 +27,12 @@ function InlineLoader({ label, t }: { label: string; t: Theme }) {
   )
 }
 
-export function ArtLines({ lines }: { lines: ArtLine[] }) {
+export function ArtLines({ lines }: { lines: [string, string][] }) {
   return (
     <Box flexDirection="column" height={lines.length} opaque width={artWidth(lines)}>
-      {lines.map((runs, i) => (
-        <Text key={i} wrap="truncate-end">
-          {runs.map(([color, text], j) => (
-            <Text color={color || undefined} key={j}>
-              {text}
-            </Text>
-          ))}
+      {lines.map(([c, text], i) => (
+        <Text color={c} key={i} wrap="truncate-end">
+          {text}
         </Text>
       ))}
     </Box>
@@ -159,14 +154,6 @@ function CollapseToggle({
 
 const SKILLS_MAX = 8
 const TOOLSETS_MAX = 8
-
-const OXAIDE_METHOD_LABELS: Record<string, string> = {
-  'investment-research': 'Thesis and evidence review',
-  'market-return-analysis': 'Return and risk analysis',
-  stocks: 'Market data and quote provenance'
-}
-
-const oxaideMethodLabel = (skill: string) => OXAIDE_METHOD_LABELS[skill] ?? skill.replaceAll('-', ' ')
 
 export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
   const term = useStdout().stdout?.columns ?? 100
@@ -298,13 +285,7 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
   }
 
   return (
-    <Box
-      borderColor={t.color.border}
-      borderStyle={isHostedOxaide ? undefined : "round"}
-      marginBottom={1}
-      paddingX={isHostedOxaide ? 0 : 2}
-      paddingY={isHostedOxaide ? 0 : 1}
-    >
+    <Box borderColor={t.color.border} borderStyle="round" marginBottom={1} paddingX={2} paddingY={1}>
       {wide && (
         <Box flexDirection="column" marginRight={2} width={leftW}>
           <ArtLines lines={heroLines} />
@@ -395,9 +376,7 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
           {skillsOpen &&
             (isHostedOxaide ? (
               <Text color={t.color.text} wrap="truncate">
-                {preloadedSkills.length > 0
-                  ? preloadedSkills.map(oxaideMethodLabel).join(' · ')
-                  : 'No research methods loaded.'}
+                {preloadedSkills.length > 0 ? preloadedSkills.join(', ') : 'No session skills loaded.'}
               </Text>
             ) : (
               skillsBody()

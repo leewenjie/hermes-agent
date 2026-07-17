@@ -59,10 +59,11 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
   const { t } = useI18n();
 
   const onErrorRef = useRef(onError);
-  onErrorRef.current = onError;
+  useEffect(() => {
+    onErrorRef.current = onError;
+  }, [onError]);
 
-  const refresh = useCallback(() => {
-    setLoading(true);
+  const requestProviders = useCallback(() => {
     api
       .getOAuthProviders()
       .then((resp) => setProviders(resp.providers))
@@ -70,9 +71,14 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
       .finally(() => setLoading(false));
   }, []);
 
+  const refresh = useCallback(() => {
+    setLoading(true);
+    requestProviders();
+  }, [requestProviders]);
+
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    requestProviders();
+  }, [requestProviders]);
 
   const handleDisconnect = async (provider: OAuthProvider) => {
     setBusyId(provider.id);
@@ -106,7 +112,7 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
             ghost
             size="icon"
             className="text-muted-foreground hover:text-foreground"
-            onClick={refresh}
+            onClick={() => refresh()}
             disabled={loading}
             aria-label={t.common.refresh}
           >

@@ -21,8 +21,29 @@ import { Input } from "@nous-research/ui/ui/components/input";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 
 interface ResearchShareDialogProps {
-  session: SessionInfo;
+  session: Pick<SessionInfo, "id" | "preview" | "title">;
   onClose: () => void;
+}
+
+const SHARE_PREVIEW_TIMEOUT_MS = 12_000;
+
+function withSharePreviewTimeout<T>(promise: Promise<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(
+      () => reject(new Error("Share preview timed out. Close this dialog and try again.")),
+      SHARE_PREVIEW_TIMEOUT_MS,
+    );
+    promise.then(
+      (value) => {
+        window.clearTimeout(timeout);
+        resolve(value);
+      },
+      (reason) => {
+        window.clearTimeout(timeout);
+        reject(reason);
+      },
+    );
+  });
 }
 
 export function ResearchShareDialog({ session, onClose }: ResearchShareDialogProps) {
@@ -35,14 +56,15 @@ export function ResearchShareDialog({ session, onClose }: ResearchShareDialogPro
   const [loading, setLoading] = useState(true);
   const [publishing, setPublishing] = useState(false);
   const [revoking, setRevoking] = useState(false);
+  const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([
+    withSharePreviewTimeout(Promise.all([
       api.previewResearchShare(session.id),
       api.listResearchShares(session.id),
-    ])
+    ]))
       .then(([result, existing]) => {
         if (cancelled) return;
         setPreview(result);
@@ -90,6 +112,8 @@ export function ResearchShareDialog({ session, onClose }: ResearchShareDialogPro
   const copyLink = async () => {
     if (!published) return;
     await navigator.clipboard.writeText(published.public_url);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
   };
 
   const revoke = async () => {
@@ -154,6 +178,24 @@ export function ResearchShareDialog({ session, onClose }: ResearchShareDialogPro
               </div>
             ))}
 
+            {published && (
+              <div className="space-y-2 border border-success/30 bg-success/5 p-3 text-xs">
+                <div className="font-semibold uppercase tracking-[0.08em] text-success">
+                  Public link
+                </div>
+                <Input
+                  readOnly
+                  value={published.public_url}
+                  onFocus={(event) => event.currentTarget.select()}
+                  aria-label="Public research link"
+                  className="normal-case"
+                />
+                <div className="text-text-secondary">
+                  Expires {new Date(published.expires_at).toLocaleDateString()}
+                </div>
+              </div>
+            )}
+
             {!published && (
               <label className="flex cursor-pointer items-start gap-3 text-xs leading-5 text-foreground">
                 <Checkbox checked={confirmed} onCheckedChange={(value) => setConfirmed(value === true)} />
@@ -205,7 +247,9 @@ export function ResearchShareDialog({ session, onClose }: ResearchShareDialogPro
               <Button outlined onClick={() => void revoke()} disabled={revoking} prefix={revoking ? <Spinner /> : <Trash2 />}>
                 Revoke
               </Button>
-              <Button outlined onClick={() => void copyLink()} prefix={<Copy />}>Copy link</Button>
+              <Button outlined onClick={() => void copyLink()} prefix={copied ? <CheckCircle2 /> : <Copy />}>
+                {copied ? "Copied" : "Copy link"}
+              </Button>
               <Button onClick={() => window.open(published.public_url, "_blank", "noopener,noreferrer")} prefix={<ExternalLink />}>Open link</Button>
             </>
           ) : (

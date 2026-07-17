@@ -28,6 +28,7 @@ export function ThemeSwitcher({ collapsed = false, dropUp = false }: ThemeSwitch
   const { themeName, availableThemes, setTheme, fontId, fontChoices, setFont } = useTheme();
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
+  const [dropUpStyle, setDropUpStyle] = useState<{ bottom: number; left: number } | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const narrowViewport = useBelowBreakpoint(640);
@@ -65,7 +66,17 @@ export function ThemeSwitcher({ collapsed = false, dropUp = false }: ThemeSwitch
       <Button
         ghost
         size={collapsed ? "icon" : undefined}
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => {
+          if (!open && dropUp && !useMobileSheet) {
+            const rect = wrapperRef.current?.getBoundingClientRect();
+            setDropUpStyle(
+              rect
+                ? { bottom: window.innerHeight - rect.top + 4, left: rect.left }
+                : null,
+            );
+          }
+          setOpen((o) => !o);
+        }}
         className={cn(
           collapsed
             ? "text-text-secondary hover:text-foreground hover:bg-transparent"
@@ -113,7 +124,6 @@ export function ThemeSwitcher({ collapsed = false, dropUp = false }: ThemeSwitch
       )}
 
       {open && !useMobileSheet && (() => {
-        const rect = wrapperRef.current?.getBoundingClientRect();
         const dropdown = (
           <div
             ref={dropdownRef}
@@ -125,11 +135,7 @@ export function ThemeSwitcher({ collapsed = false, dropUp = false }: ThemeSwitch
               dropUp ? "fixed z-[100]" : "absolute z-50 right-0 top-full mt-1",
             )}
             role="listbox"
-            style={
-              dropUp && rect
-                ? { bottom: window.innerHeight - rect.top + 4, left: rect.left }
-                : undefined
-            }
+            style={dropUp ? dropUpStyle ?? undefined : undefined}
           >
             <div className="border-b border-current/20 px-3 py-2">
               <Typography

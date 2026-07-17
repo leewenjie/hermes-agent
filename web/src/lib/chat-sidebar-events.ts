@@ -9,6 +9,11 @@ export interface ChatSessionCapabilityInfo {
   title?: string;
 }
 
+export interface ChatSessionIdentity {
+  id: string;
+  title: string | null;
+}
+
 export interface ResearchToolUse {
   context?: string;
   detail?: string;
@@ -51,6 +56,20 @@ function recordFromUnknown(value: unknown): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+export function chatSessionIdentityFromInfo(
+  sessionId: unknown,
+  payload: unknown,
+): ChatSessionIdentity | null {
+  const id = typeof sessionId === "string" ? sessionId.trim() : "";
+  if (!id) return null;
+  const record = recordFromUnknown(payload);
+  const rawTitle = record?.title;
+  const title = typeof rawTitle === "string" && rawTitle.trim()
+    ? rawTitle.trim()
+    : null;
+  return { id, title };
 }
 
 const RESEARCH_TOOL_LABELS: Record<string, string> = {
