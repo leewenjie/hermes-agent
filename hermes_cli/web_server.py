@@ -15217,7 +15217,7 @@ def _dashboard_branding_settings() -> dict[str, str]:
     )
     defaults = {
         "product": "oxaide" if is_oxaide else "hermes",
-        "name": "Oxaide Research" if is_oxaide else "Hermes Agent",
+        "name": "Oxaide" if is_oxaide else "Hermes Agent",
         "short_name": "Oxaide" if is_oxaide else "HA",
         "org_name": "Oxaide" if is_oxaide else "Nous Research",
         "org_url": "https://oxaide.com" if is_oxaide else "https://nousresearch.com",

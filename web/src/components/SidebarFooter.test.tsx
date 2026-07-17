@@ -7,7 +7,7 @@ import { SidebarFooter } from "./SidebarFooter";
 
 const oxaideBranding: DashboardBranding = {
   product: "oxaide",
-  name: "Oxaide Research",
+  name: "Oxaide",
   shortName: "OXAIDE",
   orgName: "Oxaide",
   orgUrl: "https://oxaide.com",

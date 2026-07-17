@@ -3201,7 +3201,7 @@ class TestWebServerEndpoints:
             "dashboard": {
                 "branding": {
                     "product": "oxaide",
-                    "name": "Oxaide Research",
+                    "name": "Oxaide",
                     "org_name": "Oxaide",
                     "org_url": "https://oxaide.com",
                     "billing_url": "https://oxaide.com/console/billing",
@@ -3216,7 +3216,7 @@ class TestWebServerEndpoints:
         assert response.status_code == 200
         assert "window.__HERMES_DASHBOARD_BRANDING__=" in response.text
         assert '"product":"oxaide"' in response.text
-        assert '"name":"Oxaide Research"' in response.text
+        assert '"name":"Oxaide"' in response.text
         assert '"billing_url":"https://oxaide.com/console/billing"' in response.text
 
     def test_oxaide_product_ignores_deep_merged_hermes_branding_defaults(self, monkeypatch):
@@ -3240,7 +3240,7 @@ class TestWebServerEndpoints:
         branding = ws._dashboard_branding_settings()
 
         assert branding["product"] == "oxaide"
-        assert branding["name"] == "Oxaide Research"
+        assert branding["name"] == "Oxaide"
         assert branding["short_name"] == "Oxaide"
         assert branding["org_name"] == "Oxaide"
         assert branding["org_url"] == "https://oxaide.com"
@@ -3276,7 +3276,7 @@ class TestWebServerEndpoints:
 
         assert response.status_code == 200
         assert '"product":"oxaide"' in response.text
-        assert '"name":"Oxaide Research"' in response.text
+        assert '"name":"Oxaide"' in response.text
         assert '"org_name":"Oxaide"' in response.text
         assert '"account_url":"https://oxaide.com/app"' in response.text
 
