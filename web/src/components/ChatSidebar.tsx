@@ -37,11 +37,16 @@ import {
   chatSessionIdentityFromInfo,
   generatedImageFromToolResult,
   isBrowserImageSource,
+  researchMethodLabel,
   type ChatSessionIdentity,
   type ChatSessionCapabilityInfo,
 } from "@/lib/chat-sidebar-events";
 import { titleFromSessionInfoPayload } from "@/lib/chat-title";
 import { isOxaideManagedDashboard } from "@/lib/managed-dashboard";
+import {
+  shouldRetrySidebarSocket,
+  sidebarReconnectDelayMs,
+} from "@/lib/sidebar-reconnect";
 
 import { cn } from "@/lib/utils";
 import {
@@ -120,6 +125,10 @@ export function ChatSidebar({
   const [info, setInfo] = useState<SessionInfo>({});
   const [generatedImage, setGeneratedImage] = useState<GeneratedImage | null>(null);
   const mediaRequestRef = useRef(0);
+  const gatewayReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const gatewayReconnectAttemptRef = useRef(0);
   const [modelOpen, setModelOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The badge shows config.yaml's main model (`model.default`) via
@@ -243,6 +252,39 @@ export function ChatSidebar({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gw]);
 
+  // The metadata gateway is supporting UI, but it should recover just as the
+  // main PTY does after a dashboard restart, laptop sleep, or suspended tab.
+  useEffect(() => {
+    if (state === "open") {
+      gatewayReconnectAttemptRef.current = 0;
+      if (gatewayReconnectTimerRef.current) {
+        clearTimeout(gatewayReconnectTimerRef.current);
+        gatewayReconnectTimerRef.current = null;
+      }
+      return;
+    }
+    if (
+      (state !== "closed" && state !== "error") ||
+      gatewayReconnectTimerRef.current
+    ) {
+      return;
+    }
+
+    const attempt = Math.min(gatewayReconnectAttemptRef.current + 1, 5);
+    gatewayReconnectAttemptRef.current = attempt;
+    gatewayReconnectTimerRef.current = setTimeout(() => {
+      gatewayReconnectTimerRef.current = null;
+      setVersion((v) => v + 1);
+    }, sidebarReconnectDelayMs(attempt));
+
+    return () => {
+      if (gatewayReconnectTimerRef.current) {
+        clearTimeout(gatewayReconnectTimerRef.current);
+        gatewayReconnectTimerRef.current = null;
+      }
+    };
+  }, [state, version]);
+
   // Event subscriber WebSocket — receives the rebroadcast of every
   // dispatcher emit from the PTY child's gateway.  See /api/pub +
   // /api/events in hermes_cli/web_server.py for the broadcast hop.
@@ -262,30 +304,57 @@ export function ChatSidebar({
     // binding the cleanup reads via ``wsRef``.
     let unmounting = false;
     let ws: WebSocket | null = null;
-    void (async () => {
-      const url = await buildWsUrl("/api/events", { channel });
-      if (unmounting) {
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconnectAttempt = 0;
+    const RECONNECTING = "tool activity reconnecting automatically…";
+    const DISCONNECTED = "tool activity is temporarily unavailable";
+    const clearFeedError = () => {
+      if (unmounting) return;
+      setError((current) =>
+        current === RECONNECTING || current === DISCONNECTED ? null : current,
+      );
+    };
+    const surface = (msg: string) => !unmounting && setError(msg);
+    const scheduleReconnect = () => {
+      if (unmounting || reconnectTimer) return;
+      reconnectAttempt = Math.min(reconnectAttempt + 1, 5);
+      if (reconnectAttempt >= 2) surface(RECONNECTING);
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        void connect();
+      }, sidebarReconnectDelayMs(reconnectAttempt));
+    };
+    const connect = async () => {
+      let url: string;
+      try {
+        // Rebuild for every attempt so gated dashboards mint a fresh
+        // single-use WebSocket ticket rather than replaying an expired one.
+        url = await buildWsUrl("/api/events", { channel });
+      } catch {
+        scheduleReconnect();
         return;
       }
-      ws = new WebSocket(url);
+      if (unmounting) return;
 
-      // `unmounting` suppresses the banner during cleanup — `ws.close()`
-      // from the effect's return fires a close event with code 1005 that
-      // would otherwise look like an unexpected drop.
-      const DISCONNECTED = "events feed disconnected — tool calls may not appear";
-      const surface = (msg: string) => !unmounting && setError(msg);
-
-      ws.addEventListener("error", () => surface(DISCONNECTED));
-
-      ws.addEventListener("close", (ev) => {
+      const socket = new WebSocket(url);
+      ws = socket;
+      socket.addEventListener("open", () => {
+        reconnectAttempt = 0;
+        clearFeedError();
+      });
+      socket.addEventListener("close", (ev) => {
+        if (ws === socket) ws = null;
+        if (unmounting) return;
         if (ev.code === 4401 || ev.code === 4403) {
-          surface(`events feed rejected (${ev.code}) — reload the page`);
+          surface(`tool activity connection rejected (${ev.code}) — reload the page`);
+        } else if (shouldRetrySidebarSocket(ev.code)) {
+          scheduleReconnect();
         } else if (ev.code !== 1000) {
           surface(DISCONNECTED);
         }
       });
 
-      ws.addEventListener("message", (ev) => {
+      socket.addEventListener("message", (ev) => {
         let frame: RpcEnvelope;
 
         try {
@@ -344,10 +413,12 @@ export function ChatSidebar({
           onDashboardNewSessionRequest?.();
         }
       });
-    })();
+    };
+    void connect();
 
     return () => {
       unmounting = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       ws?.close();
     };
   }, [channel, onDashboardNewSessionRequest, onSessionChange, onSessionTitleChange, version]);
@@ -438,15 +509,15 @@ export function ChatSidebar({
                 : "Loading session skills…"}
           </div>
           {preloadedSkills.length > 0 && (
-            <div className="mt-2 flex max-h-24 flex-wrap gap-1 overflow-y-auto">
+            <div className="mt-2 grid max-h-32 gap-1.5 overflow-y-auto">
               {preloadedSkills.map((skill) => (
                 <Badge
                   key={skill}
                   tone="secondary"
-                  className="max-w-full px-1.5 py-0.5 text-[0.6875rem] font-normal leading-tight normal-case tracking-normal"
+                  className="w-full max-w-full justify-start whitespace-normal px-2 py-1 text-left font-sans text-xs font-medium leading-snug normal-case tracking-normal"
                   title={skill}
                 >
-                  <span className="truncate">{skill}</span>
+                  <span className="break-words">{researchMethodLabel(skill)}</span>
                 </Badge>
               ))}
             </div>

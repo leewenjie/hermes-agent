@@ -26,7 +26,7 @@ describe("dashboard branding", () => {
       value: {
         __HERMES_DASHBOARD_BRANDING__: {
           product: "oxaide",
-          name: "Oxaide Research",
+          name: "Oxaide",
           short_name: "Oxaide",
           org_name: "Oxaide",
           org_url: "https://oxaide.com",
@@ -39,7 +39,7 @@ describe("dashboard branding", () => {
 
     expect(getDashboardBranding(fallback)).toEqual({
       product: "oxaide",
-      name: "Oxaide Research",
+      name: "Oxaide",
       shortName: "Oxaide",
       orgName: "Oxaide",
       orgUrl: "https://oxaide.com",
