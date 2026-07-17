@@ -27,6 +27,7 @@ import { useSearchParams } from "react-router-dom";
 import { useI18n } from "@/i18n";
 import { ResearchShareDialog } from "@/components/ResearchShareDialog";
 import { api, type SessionInfo } from "@/lib/api";
+import { isOxaideManagedDashboard } from "@/lib/managed-dashboard";
 import { cn, timeAgo } from "@/lib/utils";
 
 const SESSION_LIMIT = 30;
@@ -71,6 +72,7 @@ export function ChatSessionList({
   const [shareSession, setShareSession] = useState<SessionInfo | null>(null);
   // Bumped to force a refetch (after switching, on Refresh, on mount).
   const [reloadNonce, setReloadNonce] = useState(0);
+  const managedOxaide = isOxaideManagedDashboard();
 
   // `profile` is read inside the fetch; it's part of the scope key so a
   // profile switch refetches. The empty-string fallback keeps the dep
@@ -219,10 +221,10 @@ export function ChatSessionList({
                   {s.message_count > 0 && (
                     <>
                       <span aria-hidden>·</span>
-                      <span>{s.message_count} msgs</span>
+                      <span>{s.message_count} messages</span>
                     </>
                   )}
-                  {s.source && s.source !== "cli" && (
+                  {!managedOxaide && s.source && s.source !== "cli" && (
                     <>
                       <span aria-hidden>·</span>
                       <span className="truncate">{s.source}</span>
@@ -251,6 +253,7 @@ export function ChatSessionList({
     activeSessionId,
     error,
     loading,
+    managedOxaide,
     pick,
     reload,
     sessions,
@@ -267,7 +270,7 @@ export function ChatSessionList({
     >
       <div className="flex items-center justify-between gap-2 px-2 pb-2">
         <span className="text-display text-xs tracking-wider text-text-tertiary">
-          {t.sessions.title}
+          {managedOxaide ? "Recent research" : t.sessions.title}
         </span>
         <Button
           ghost
@@ -288,7 +291,7 @@ export function ChatSessionList({
         prefix={<MessageSquarePlus />}
         className="mx-2 mb-2 justify-center"
       >
-        {t.sessions.newChat}
+        {managedOxaide ? "New research" : t.sessions.newChat}
       </Button>
 
       <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-1 pb-1">

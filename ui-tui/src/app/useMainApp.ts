@@ -7,6 +7,7 @@ import { MAX_HISTORY, WHEEL_SCROLL_STEP } from '../config/limits.js'
 import { RESIZE_COALESCE_MS } from '../config/timing.js'
 import { hasLeadGap, prevRenderedMsg } from '../domain/blockLayout.js'
 import { SECTION_NAMES, sectionMode } from '../domain/details.js'
+import { isManagedTranscriptMessage } from '../domain/managedPresentation.js'
 import { attachedImageNotice, imageTokenMeta } from '../domain/messages.js'
 import { composeTabTitle, fmtCwdBranch, shortCwd } from '../domain/paths.js'
 import { sessionScopedModelArg } from '../domain/slash.js'
@@ -321,9 +322,14 @@ export function useMainApp(gw: GatewayClient) {
   // mixed markdown — we deliberately remount every row so yoga re-measures
   // off live geometry. Cost: per-row local state (e.g. systemOpen toggles)
   // resets on resize; small UX hit for a hard correctness win.
+  const visibleHistoryItems = useMemo(
+    () => (ui.theme.brand.org === 'Oxaide' ? historyItems.filter(isManagedTranscriptMessage) : historyItems),
+    [historyItems, ui.theme.brand.org]
+  )
+
   const virtualRows = useMemo<TranscriptRow[]>(
-    () => historyItems.map((msg, index) => ({ index, key: `${messageId(msg)}:c${cols}`, msg })),
-    [cols, historyItems, messageId]
+    () => visibleHistoryItems.map((msg, index) => ({ index, key: `${messageId(msg)}:c${cols}`, msg })),
+    [cols, messageId, visibleHistoryItems]
   )
 
   const detailsLayoutKey = useMemo(() => {
@@ -579,7 +585,11 @@ export function useMainApp(gw: GatewayClient) {
   const tabCwd = managedOxaide ? undefined : ui.info?.cwd
 
   useTerminalTitle(
-    model ? composeTabTitle(marker, ui.sessionTitle, model, tabCwd ? shortCwd(tabCwd, 24) : '') : ui.theme.brand.name
+    managedOxaide
+      ? `${marker} Oxaide Research`
+      : model
+        ? composeTabTitle(marker, ui.sessionTitle, model, tabCwd ? shortCwd(tabCwd, 24) : '')
+        : ui.theme.brand.name
   )
 
   useEffect(() => {
@@ -976,7 +986,7 @@ export function useMainApp(gw: GatewayClient) {
       void startPromptLiveSession({
         dispatchSubmission,
         maybeWarn,
-        modelArg,
+        modelArg: managedOxaide ? undefined : modelArg,
         newLiveSession: session.newLiveSession,
         onModelSwitched: value =>
           patchUiState(state => ({
@@ -988,7 +998,7 @@ export function useMainApp(gw: GatewayClient) {
         sys
       })
     },
-    [dispatchSubmission, maybeWarn, rpc, session.newLiveSession, sys]
+    [dispatchSubmission, managedOxaide, maybeWarn, rpc, session.newLiveSession, sys]
   )
 
   const hasReasoning = useTurnSelector(state => Boolean(state.reasoning.trim()))
@@ -1148,8 +1158,8 @@ export function useMainApp(gw: GatewayClient) {
   )
 
   const appTranscript = useMemo(
-    () => ({ historyItems, scrollRef, virtualHistory, virtualRows }),
-    [historyItems, virtualHistory, virtualRows]
+    () => ({ historyItems: visibleHistoryItems, scrollRef, virtualHistory, virtualRows }),
+    [virtualHistory, virtualRows, visibleHistoryItems]
   )
 
   return { appActions, appComposer, appProgress, appStatus, appTranscript, gateway }

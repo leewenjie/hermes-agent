@@ -212,6 +212,9 @@ describe('protocol sentinels', () => {
   it('recognizes only standalone previewable managed-file paths', () => {
     expect(dashboardManagedFilePath('/opt/data/random_chart.svg')).toBe('/opt/data/random_chart.svg')
     expect(dashboardManagedFilePath('  `/opt/data/report.pdf`  ')).toBe('/opt/data/report.pdf')
+    expect(dashboardManagedFilePath('  "/opt/data/Quarterly Research Report.pdf"  ')).toBe(
+      '/opt/data/Quarterly Research Report.pdf'
+    )
     expect(dashboardManagedFilePath('saved at /opt/data/random_chart.svg')).toBeNull()
     expect(dashboardManagedFilePath('/opt/data/.env')).toBeNull()
     expect(dashboardManagedFilePath('/tmp/random_chart.svg')).toBeNull()

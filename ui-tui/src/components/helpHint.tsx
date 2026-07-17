@@ -1,6 +1,7 @@
 import { Box, Text } from '@hermes/ink'
 
 import { HOTKEYS } from '../content/hotkeys.js'
+import { OXAIDE_RESEARCH_COMMANDS, OXAIDE_RESEARCH_SHORTCUTS } from '../content/researchHelp.js'
 import type { Theme } from '../theme.js'
 
 const COMMON_COMMANDS: [string, string][] = [
@@ -15,7 +16,10 @@ const COMMON_COMMANDS: [string, string][] = [
 const HOTKEY_PREVIEW = HOTKEYS.slice(0, 8)
 
 export function HelpHint({ t }: { t: Theme }) {
-  const labelW = Math.max(...COMMON_COMMANDS.map(([k]) => k.length), ...HOTKEY_PREVIEW.map(([k]) => k.length))
+  const hostedOxaide = t.brand.org === 'Oxaide'
+  const commands = hostedOxaide ? OXAIDE_RESEARCH_COMMANDS : COMMON_COMMANDS
+  const shortcuts = hostedOxaide ? OXAIDE_RESEARCH_SHORTCUTS : HOTKEY_PREVIEW
+  const labelW = Math.max(...commands.map(([k]) => k.length), ...shortcuts.map(([k]) => k.length))
 
   const pad = (s: string) => s + ' '.repeat(Math.max(0, labelW - s.length + 2))
 
@@ -32,18 +36,20 @@ export function HelpHint({ t }: { t: Theme }) {
       >
         <Text>
           <Text bold color={t.color.primary}>
-            ? quick help
+            {hostedOxaide ? '? research help' : '? quick help'}
           </Text>
-          <Text color={t.color.muted}>{'  ·  type /help for the full panel  ·  backspace to dismiss'}</Text>
+          <Text color={t.color.muted}>
+            {hostedOxaide ? '  ·  backspace to dismiss' : '  ·  type /help for the full panel  ·  backspace to dismiss'}
+          </Text>
         </Text>
 
         <Box marginTop={1}>
           <Text bold color={t.color.accent}>
-            Common commands
+            {hostedOxaide ? 'Research actions' : 'Common commands'}
           </Text>
         </Box>
 
-        {COMMON_COMMANDS.map(([k, v]) => (
+        {commands.map(([k, v]) => (
           <Text key={k}>
             <Text color={t.color.label}>{pad(k)}</Text>
             <Text color={t.color.muted}>{v}</Text>
@@ -52,11 +58,11 @@ export function HelpHint({ t }: { t: Theme }) {
 
         <Box marginTop={1}>
           <Text bold color={t.color.accent}>
-            Hotkeys
+            {hostedOxaide ? 'Shortcuts' : 'Hotkeys'}
           </Text>
         </Box>
 
-        {HOTKEY_PREVIEW.map(([k, v]) => (
+        {shortcuts.map(([k, v]) => (
           <Text key={k}>
             <Text color={t.color.label}>{pad(k)}</Text>
             <Text color={t.color.muted}>{v}</Text>

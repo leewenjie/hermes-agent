@@ -646,6 +646,100 @@ async def security_headers_middleware(request: Request, call_next):
     return response
 
 
+_OXAIDE_RESEARCH_STATIC_API_METHODS = frozenset({
+    ("GET", "/api/auth/providers"),
+    ("GET", "/api/auth/me"),
+    ("POST", "/api/auth/ws-ticket"),
+    ("GET", "/api/status"),
+    ("GET", "/api/events"),
+    ("GET", "/api/pty"),
+    ("GET", "/api/ws"),
+    ("GET", "/api/media"),
+    ("GET", "/api/sessions"),
+    ("GET", "/api/sessions/search"),
+    ("GET", "/api/files"),
+    ("DELETE", "/api/files"),
+    ("GET", "/api/files/read"),
+    ("GET", "/api/files/download"),
+    ("POST", "/api/files/upload"),
+    ("POST", "/api/files/upload-stream"),
+    ("POST", "/api/files/mkdir"),
+    ("POST", "/api/chat/image-upload"),
+    ("GET", "/api/skills"),
+    ("POST", "/api/skills"),
+    ("PUT", "/api/skills/toggle"),
+    ("GET", "/api/skills/content"),
+    ("PUT", "/api/skills/content"),
+    ("GET", "/api/skills/hub/search"),
+    ("GET", "/api/skills/hub/sources"),
+    ("GET", "/api/skills/hub/preview"),
+    ("GET", "/api/skills/hub/scan"),
+    ("POST", "/api/skills/hub/install"),
+    ("POST", "/api/skills/hub/uninstall"),
+    ("POST", "/api/skills/hub/update"),
+    ("GET", "/api/tools/toolsets"),
+    ("GET", "/api/research-shares"),
+    ("POST", "/api/research-shares"),
+    ("POST", "/api/research-shares/preview"),
+})
+
+_OXAIDE_RESERVED_SESSION_PATH_PARTS = frozenset({
+    "bulk-delete", "empty", "import", "prune", "search", "stats",
+})
+
+
+def _oxaide_research_api_allowed(method: str, path: str) -> bool:
+    if method == "HEAD":
+        method = "GET"
+    if (method, path) in _OXAIDE_RESEARCH_STATIC_API_METHODS:
+        return True
+
+    toolset_match = re.fullmatch(
+        r"/api/tools/toolsets/[^/]+(?:/(config|provider|env|post-setup))?",
+        path,
+    )
+    if toolset_match is not None:
+        suffix = toolset_match.group(1)
+        if suffix == "config":
+            return method == "GET"
+        if suffix == "post-setup":
+            return method == "POST"
+        return method == "PUT"
+
+    match = re.fullmatch(
+        r"/api/sessions/([^/]+)(?:/(messages|latest-descendant|export))?",
+        path,
+    )
+    if match is None or match.group(1) in _OXAIDE_RESERVED_SESSION_PATH_PARTS:
+        return False
+    suffix = match.group(2)
+    if suffix is not None:
+        return method == "GET"
+    return method in {"GET", "PATCH", "DELETE"}
+
+
+@app.middleware("http")
+async def oxaide_research_boundary_middleware(request: Request, call_next):
+    """Hide generic Hermes administration APIs from managed tenants."""
+    path = request.url.path
+    if (
+        _dashboard_branding_settings().get("product") == "oxaide"
+        and path.startswith("/api/")
+        and not (
+            path == _HOSTED_RUNTIME_API_PREFIX
+            or path.startswith(_HOSTED_RUNTIME_API_PREFIX + "/")
+        )
+    ):
+        if request.query_params.get("profile"):
+            return JSONResponse(status_code=404, content={"detail": "Not found"})
+        method = request.method
+        if method == "OPTIONS":
+            method = request.headers.get("access-control-request-method", "GET").upper()
+        if not _oxaide_research_api_allowed(method, path):
+            return JSONResponse(status_code=404, content={"detail": "Not found"})
+    return await call_next(request)
+
+
 # ---------------------------------------------------------------------------
 # Config schema — auto-generated from DEFAULT_CONFIG
 # ---------------------------------------------------------------------------
@@ -1923,10 +2017,15 @@ def _resolve_managed_path(
         candidate = policy.default_path
     else:
         candidate = Path(text).expanduser()
-        if root is not None and not candidate.is_absolute():
+        if root is not None:
             if any(part == ".." for part in candidate.parts):
                 raise HTTPException(status_code=400, detail="Path cannot contain '..'")
-            candidate = root / candidate
+            # Managed responses expose a virtual root ("/foo.pdf"), never the
+            # host path. Translate that namespace back under the locked root.
+            # Still accept a physical path already under root for compatibility
+            # with in-flight clients from before path virtualization.
+            if not candidate.is_absolute() or not _path_is_under(root, candidate):
+                candidate = root / text.lstrip("/")
         elif not candidate.is_absolute():
             raise HTTPException(status_code=400, detail="Path must be absolute")
 
@@ -1948,16 +2047,30 @@ def _resolve_managed_path(
     if root is not None and not _path_is_under(root, resolved):
         raise HTTPException(status_code=403, detail="Path outside managed files root")
 
-    return policy, resolved, str(resolved)
+    display_path = str(resolved)
+    if root is not None:
+        relative = resolved.relative_to(root)
+        display_path = "/" + relative.as_posix() if relative.parts else "/"
+    return policy, resolved, display_path
 
 
 def _managed_response_meta(policy: ManagedFilesPolicy) -> Dict[str, Any]:
-    locked_root = str(policy.locked_root) if policy.locked_root is not None else None
+    locked_root = "/" if policy.locked_root is not None else None
     return {
         "root": locked_root,
         "locked_root": locked_root,
         "can_change_path": policy.can_change_path,
     }
+
+
+def _managed_file_error_detail(
+    policy: ManagedFilesPolicy,
+    public_message: str,
+    exc: OSError,
+) -> str:
+    if policy.locked_root is not None:
+        return public_message
+    return f"{public_message}: {exc}"
 
 
 def _managed_file_entry(policy: ManagedFilesPolicy, target: Path) -> Dict[str, Any]:
@@ -1971,13 +2084,20 @@ def _managed_file_entry(policy: ManagedFilesPolicy, target: Path) -> Dict[str, A
     try:
         st = resolved.stat()
     except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not stat path: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=_managed_file_error_detail(policy, "Could not stat path", exc),
+        )
 
     is_dir = resolved.is_dir()
     mime_type = None if is_dir else (mimetypes.guess_type(resolved.name)[0] or "application/octet-stream")
+    display_path = str(resolved)
+    if policy.locked_root is not None:
+        relative = resolved.relative_to(policy.locked_root)
+        display_path = "/" + relative.as_posix() if relative.parts else "/"
     return {
         "name": target.name or resolved.name or str(resolved),
-        "path": str(resolved),
+        "path": display_path,
         "is_directory": is_dir,
         "size": None if is_dir else st.st_size,
         "mtime": st.st_mtime,
@@ -2110,13 +2230,23 @@ async def list_managed_files(request: Request, path: Optional[str] = None):
     except PermissionError:
         raise HTTPException(status_code=403, detail="Directory is not readable")
     except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not read directory: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=_managed_file_error_detail(policy, "Could not read directory", exc),
+        )
 
     entries.sort(key=lambda item: (not item["is_directory"], str(item["name"]).lower()))
     locked_root = policy.locked_root
+    if locked_root is not None:
+        relative = target.relative_to(locked_root)
+        display_path = "/" + relative.as_posix() if relative.parts else "/"
     parent = None
     if target.parent != target and (locked_root is None or target != locked_root):
-        parent = str(target.parent)
+        if locked_root is not None:
+            relative_parent = target.parent.relative_to(locked_root)
+            parent = "/" + relative_parent.as_posix() if relative_parent.parts else "/"
+        else:
+            parent = str(target.parent)
     return {
         "path": display_path,
         "parent": parent,
@@ -2138,7 +2268,10 @@ async def read_managed_file(request: Request, path: str):
     try:
         size = target.stat().st_size
     except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not stat file: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=_managed_file_error_detail(policy, "Could not stat file", exc),
+        )
     if size > _FS_DATA_URL_MAX_BYTES:
         raise HTTPException(status_code=413, detail="File is too large to preview")
 
@@ -2148,8 +2281,14 @@ async def read_managed_file(request: Request, path: str):
     except PermissionError:
         raise HTTPException(status_code=403, detail="File is not readable")
     except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not read file: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=_managed_file_error_detail(policy, "Could not read file", exc),
+        )
 
+    if policy.locked_root is not None:
+        relative = target.relative_to(policy.locked_root)
+        display_path = "/" + relative.as_posix() if relative.parts else "/"
     return {
         "name": target.name,
         "path": display_path,
@@ -2182,7 +2321,10 @@ async def download_managed_file(request: Request, path: str):
     try:
         size = target.stat().st_size
     except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not stat file: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=_managed_file_error_detail(policy, "Could not stat file", exc),
+        )
     if size > _MANAGED_FILE_MAX_BYTES:
         raise HTTPException(status_code=413, detail="File is too large")
 
@@ -2221,7 +2363,10 @@ async def upload_managed_file(payload: ManagedFileUpload, request: Request):
     except PermissionError:
         raise HTTPException(status_code=403, detail="File is not writable")
     except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not write file: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=_managed_file_error_detail(policy, "Could not write file", exc),
+        )
     finally:
         if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)
@@ -2262,7 +2407,10 @@ async def upload_managed_file_stream(
     except PermissionError:
         raise HTTPException(status_code=403, detail="File is not writable")
     except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not create parent directory: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=_managed_file_error_detail(policy, "Could not create parent directory", exc),
+        )
 
     # Write to a sibling temp file first so a partial/aborted upload never
     # clobbers an existing file, then atomically rename into place.
@@ -2289,7 +2437,10 @@ async def upload_managed_file_stream(
     except PermissionError:
         raise HTTPException(status_code=403, detail="File is not writable")
     except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not write file: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=_managed_file_error_detail(policy, "Could not write file", exc),
+        )
     finally:
         # Clean up the temp file on every non-success exit, including
         # BaseException paths the `except` clauses above don't catch — most
@@ -2319,7 +2470,10 @@ async def create_managed_directory(payload: ManagedDirectoryCreate, request: Req
     except PermissionError:
         raise HTTPException(status_code=403, detail="Directory is not writable")
     except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not create directory: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=_managed_file_error_detail(policy, "Could not create directory", exc),
+        )
 
     return {
         "ok": True,
@@ -2349,7 +2503,10 @@ async def delete_managed_file(payload: ManagedFileDelete, request: Request):
             target.unlink()
     except OSError as exc:
         status_code = 409 if target.is_dir() and not payload.recursive else 500
-        raise HTTPException(status_code=status_code, detail=f"Could not delete path: {exc}")
+        raise HTTPException(
+            status_code=status_code,
+            detail=_managed_file_error_detail(policy, "Could not delete path", exc),
+        )
 
     return {"ok": True, "path": display_path, **_managed_response_meta(policy)}
 
@@ -2988,11 +3145,14 @@ async def get_status(profile: Optional[str] = None):
         # the network (a gated bind), so they must survive the auth gate. The
         # per-gateway ``gateways[]`` detail carries host ports (deployment
         # recon), so it stays gated with the host paths / PID below.
-        topology = await asyncio.get_running_loop().run_in_executor(
-            None, _collect_profile_gateway_topology
-        )
-        status["profiles"] = topology["profiles"]
-        status["gateway_mode"] = topology["gateway_mode"]
+        managed_oxaide = _dashboard_branding_settings().get("product") == "oxaide"
+        topology = {"profiles": [], "gateway_mode": "none", "gateways": []}
+        if not managed_oxaide:
+            topology = await asyncio.get_running_loop().run_in_executor(
+                None, _collect_profile_gateway_topology
+            )
+            status["profiles"] = topology["profiles"]
+            status["gateway_mode"] = topology["gateway_mode"]
 
         # Absolute host paths, the gateway PID, the internal gateway health
         # URL, and per-gateway ports are deployment recon a liveness probe never
@@ -4365,6 +4525,28 @@ async def get_action_status(name: str, lines: int = 200):
 # them; ``GET /api/sessions/{id}`` detail reads stay complete. List callers
 # that genuinely need the full rows can pass ``?full=1``.
 _SESSION_LIST_HEAVY_FIELDS = ("system_prompt", "model_config")
+_MANAGED_SESSION_PUBLIC_FIELDS = (
+    "id",
+    "title",
+    "started_at",
+    "ended_at",
+    "last_active",
+    "is_active",
+    "message_count",
+    "preview",
+    "parent_session_id",
+    "archived",
+    "profile",
+    "is_default_profile",
+)
+_MANAGED_COMPACTION_PREFIXES = (
+    "[CONTEXT COMPACTION — REFERENCE ONLY]",
+    "[CONTEXT COMPACTION - REFERENCE ONLY]",
+    "[CONTEXT SUMMARY]:",
+)
+_MANAGED_COMPACTION_END_MARKER = (
+    "--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---"
+)
 
 
 def _strip_session_list_rows(sessions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -4372,6 +4554,77 @@ def _strip_session_list_rows(sessions: List[Dict[str, Any]]) -> List[Dict[str, A
         for key in _SESSION_LIST_HEAVY_FIELDS:
             s.pop(key, None)
     return sessions
+
+
+def _managed_session_row(session: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: session[key]
+        for key in _MANAGED_SESSION_PUBLIC_FIELDS
+        if key in session
+    }
+
+
+def _managed_message_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                kind = item.get("type")
+                if kind in {"text", "input_text", "output_text"}:
+                    parts.append(str(item.get("text") or item.get("content") or ""))
+                elif kind in {"image_url", "input_image", "image"}:
+                    parts.append("[image]")
+                elif kind in {"input_audio", "audio"}:
+                    parts.append("[audio]")
+                elif kind:
+                    parts.append("[attachment]")
+        return "\n".join(part for part in parts if part)
+    if isinstance(content, dict):
+        kind = content.get("type")
+        if kind in {"text", "input_text", "output_text"}:
+            return str(content.get("text") or content.get("content") or "")
+        if kind in {"image_url", "input_image", "image"}:
+            return "[image]"
+        if kind in {"input_audio", "audio"}:
+            return "[audio]"
+        return "[attachment]"
+    return ""
+
+
+def _managed_session_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    projected = []
+    for message in messages:
+        role = message.get("role")
+        if role not in {"user", "assistant"}:
+            continue
+        content = _managed_message_text(message.get("content"))
+        if content.lstrip().startswith(
+            _MANAGED_COMPACTION_PREFIXES
+        ):
+            marker_index = content.find(_MANAGED_COMPACTION_END_MARKER)
+            if marker_index < 0:
+                continue
+            content = content[
+                marker_index + len(_MANAGED_COMPACTION_END_MARKER) :
+            ].lstrip()
+            if not content:
+                continue
+        if not content.strip():
+            continue
+        safe = {
+            key: message[key]
+            for key in ("id", "session_id", "role", "timestamp")
+            if key in message
+        }
+        safe["content"] = content
+        projected.append(safe)
+    return projected
 
 
 @app.get("/api/sessions")
@@ -4402,6 +4655,10 @@ def get_sessions(
     Rows omit ``system_prompt``/``model_config`` (the payload-dominating
     fields no list UI reads) unless ``full=1`` is passed.
     """
+    if limit < 1 or limit > 500:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be non-negative")
     if archived not in ("exclude", "only", "include"):
         raise HTTPException(
             status_code=400,
@@ -4416,7 +4673,8 @@ def get_sessions(
     if profile:
         profile_name, _ = _cron_profile_home(profile)
     try:
-        db = _open_session_db_for_profile(profile)
+        managed_oxaide = _dashboard_branding_settings().get("product") == "oxaide"
+        db = _open_session_db_for_profile(profile, read_only=True)
         try:
             min_message_count = max(0, min_messages)
             archived_only = archived == "only"
@@ -4439,7 +4697,7 @@ def get_sessions(
                 # SQL-level projection: when the caller didn't ask for full
                 # rows, skip the system_prompt blob inside SQLite too (pairs
                 # with the API-level _strip_session_list_rows below).
-                compact_rows=not full,
+                compact_rows=managed_oxaide or not full,
             )
             total = db.session_count(
                 source=source or None,
@@ -4461,7 +4719,9 @@ def get_sessions(
                     s["is_default_profile"] = profile_name == "default"
                 # SQLite stores the flag as 0/1; expose a real JSON boolean.
                 s["archived"] = bool(s.get("archived"))
-            if not full:
+            if managed_oxaide:
+                sessions = [_managed_session_row(session) for session in sessions]
+            elif not full:
                 _strip_session_list_rows(sessions)
             return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}
         finally:
@@ -4497,6 +4757,16 @@ def get_profiles_sessions(
     Rows omit ``system_prompt``/``model_config`` unless ``full=1`` — same
     list projection as ``/api/sessions``.
     """
+    managed_oxaide = _dashboard_branding_settings().get("product") == "oxaide"
+    if limit < 1 or limit > 500:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be non-negative")
+    if offset + limit > 500:
+        raise HTTPException(
+            status_code=400,
+            detail="offset + limit must not exceed 500",
+        )
     if archived not in ("exclude", "only", "include"):
         raise HTTPException(status_code=400, detail="archived must be one of: exclude, only, include")
     if order not in ("created", "recent"):
@@ -4559,7 +4829,7 @@ def get_profiles_sessions(
                 archived_only=archived_only,
                 order_by_last_active=order == "recent",
                 # Same SQL-level blob skip as /api/sessions (see above).
-                compact_rows=not full,
+                compact_rows=managed_oxaide or not full,
             )
             profile_total = db.session_count(
                 source=source_filter,
@@ -4588,7 +4858,9 @@ def get_profiles_sessions(
     sort_key = "last_active" if order == "recent" else "started_at"
     merged.sort(key=lambda s: s.get(sort_key) or s.get("started_at") or 0, reverse=True)
     window = merged[offset:offset + limit]
-    if not full:
+    if managed_oxaide:
+        window = [_managed_session_row(session) for session in window]
+    elif not full:
         _strip_session_list_rows(window)
     return {
         "sessions": window,
@@ -4615,7 +4887,8 @@ async def search_sessions(q: str = "", limit: int = 20, profile: Optional[str] =
     if not q or not q.strip():
         return {"results": []}
     try:
-        db = _open_session_db_for_profile(profile)
+        managed_oxaide = _dashboard_branding_settings().get("product") == "oxaide"
+        db = _open_session_db_for_profile(profile, read_only=True)
         try:
             safe_limit = max(1, min(int(limit or 20), 100))
 
@@ -4730,26 +5003,33 @@ async def search_sessions(q: str = "", limit: int = 20, profile: Optional[str] =
                     "preview": row.get("preview") or payload.get("snippet"),
                     "parent_session_id": row.get("parent_session_id"),
                 }
+                if managed_oxaide:
+                    payload = {
+                        key: payload[key]
+                        for key in ("session_id", "snippet", "role")
+                        if key in payload
+                    } | {"session": _managed_session_row(payload.get("session") or {})}
                 seen[root] = payload
 
             # Direct ID matches first: users often paste a session id from CLI,
             # logs, or another Hermes surface. FTS can't find those unless the
             # id happens to appear in message text. search_sessions_by_id is
             # SQL-bounded, so this stays cheap even with thousands of sessions.
-            for row in db.search_sessions_by_id(q, limit=safe_limit, include_archived=True):
-                sid = row.get("id")
-                preview = (row.get("preview") or "").strip()
-                snippet = preview or f"Session ID: {sid}"
-                add_lineage_result(
-                    sid,
-                    {
-                        "snippet": snippet,
-                        "role": None,
-                        "source": row.get("source"),
-                        "model": row.get("model"),
-                        "session_started": row.get("started_at"),
-                    },
-                )
+            if not managed_oxaide:
+                for row in db.search_sessions_by_id(q, limit=safe_limit, include_archived=True):
+                    sid = row.get("id")
+                    preview = (row.get("preview") or "").strip()
+                    snippet = preview or f"Session ID: {sid}"
+                    add_lineage_result(
+                        sid,
+                        {
+                            "snippet": snippet,
+                            "role": None,
+                            "source": row.get("source"),
+                            "model": row.get("model"),
+                            "session_started": row.get("started_at"),
+                        },
+                    )
 
             # Auto-add prefix wildcards so partial words match
             # e.g. "nimb" → "nimb*" matches "nimby"
@@ -4766,14 +5046,56 @@ async def search_sessions(q: str = "", limit: int = 20, profile: Optional[str] =
             # conversations even when several hits collapse onto one root.
             fetch_limit = max(safe_limit * 5, 50)
             matches = db.search_messages(query=prefix_query, limit=fetch_limit)
+            compaction_prefixes = (
+                "[CONTEXT COMPACTION — REFERENCE ONLY]",
+                "[CONTEXT COMPACTION - REFERENCE ONLY]",
+                "[CONTEXT SUMMARY]:",
+            )
+            compaction_end_marker = (
+                "--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---"
+            )
+
+            def managed_search_snippet(match: dict) -> Optional[str]:
+                original = str(match.get("content") or "")
+                snippet = str(match.get("snippet") or "")
+                plain_snippet = re.sub(
+                    r"</?mark>", "", snippet, flags=re.IGNORECASE
+                )
+                candidate = original if original else plain_snippet
+                if not candidate.lstrip().startswith(compaction_prefixes):
+                    return snippet
+
+                marker_index = candidate.find(compaction_end_marker)
+                if marker_index < 0:
+                    return None
+                remainder = candidate[
+                    marker_index + len(compaction_end_marker) :
+                ].lstrip()
+                query_terms = [
+                    term.strip('"*').casefold()
+                    for term in re.findall(r'"[^"]*"|\S+', q.strip())
+                    if term.upper() not in {"AND", "OR", "NOT"}
+                ]
+                if not remainder or not all(
+                    term in remainder.casefold() for term in query_terms if term
+                ):
+                    return None
+                return remainder
 
             for m in matches:
                 if len(seen) >= safe_limit:
                     break
+                if managed_oxaide and m.get("role") not in {"user", "assistant"}:
+                    continue
+                snippet = m.get("snippet", "")
+                if managed_oxaide:
+                    snippet = managed_search_snippet(m)
+                    if snippet is None:
+                        continue
                 add_lineage_result(
                     m["session_id"],
                     {
-                        "snippet": m.get("snippet", ""),
+                        "snippet": snippet,
                         "role": m.get("role"),
                         "source": m.get("source"),
                         "model": m.get("model"),
@@ -10117,7 +10439,7 @@ async def count_empty_sessions_endpoint(profile: Optional[str] = None):
     UI hides the affordance so users aren't presented with a button
     that does nothing. Cheap, single-COUNT query.
     """
-    db = _open_session_db_for_profile(profile)
+    db = _open_session_db_for_profile(profile, read_only=True)
     try:
         return {"count": db.count_empty_sessions()}
     finally:
@@ -10159,7 +10481,7 @@ async def get_session_stats(profile: Optional[str] = None):
     Registered before ``/api/sessions/{session_id}`` so the literal ``stats``
     path isn't captured as a session id by the parameterized route.
     """
-    db = _open_session_db_for_profile(profile)
+    db = _open_session_db_for_profile(profile, read_only=True)
     try:
         total = db.session_count(include_archived=True)
         active_store = db.session_count(include_archived=False)
@@ -10183,7 +10505,11 @@ async def get_session_stats(profile: Optional[str] = None):
         db.close()
 
 
-def _open_session_db_for_profile(profile: Optional[str]):
+def _open_session_db_for_profile(
+    profile: Optional[str],
+    *,
+    read_only: bool = False,
+):
     """Open a SessionDB for read paths, optionally for another profile.
 
     ``profile`` None/empty → this process's own ``state.db`` (the common,
@@ -10195,12 +10521,18 @@ def _open_session_db_for_profile(profile: Optional[str]):
     if not profile:
         return SessionDB()
     _name, home = _cron_profile_home(profile)
-    return SessionDB(db_path=Path(home) / "state.db")
+    db_path = Path(home) / "state.db"
+    if read_only and not db_path.exists():
+        raise HTTPException(status_code=404, detail="Profile session store not found")
+    return SessionDB(
+        db_path=db_path,
+        read_only=read_only,
+    )
 
 
 @app.get("/api/sessions/{session_id}")
 async def get_session_detail(session_id: str, profile: Optional[str] = None):
-    db = _open_session_db_for_profile(profile)
+    db = _open_session_db_for_profile(profile, read_only=True)
     try:
         sid = db.resolve_session_id(session_id)
         session = db.get_session(sid) if sid else None
@@ -10208,7 +10540,11 @@ async def get_session_detail(session_id: str, profile: Optional[str] = None):
             raise HTTPException(status_code=404, detail="Session not found")
         if profile:
             session["profile"] = _cron_profile_home(profile)[0]
-        return session
+        return (
+            _managed_session_row(session)
+            if _dashboard_branding_settings().get("product") == "oxaide"
+            else session
+        )
     finally:
         db.close()
 
@@ -10219,7 +10555,7 @@ async def get_session_latest_descendant(
     session_id: str,
     profile: Optional[str] = None,
 ):
-    db = _open_session_db_for_profile(profile)
+    db = _open_session_db_for_profile(profile, read_only=True)
     try:
         latest, path = _session_latest_descendant(session_id, db)
         if not latest:
@@ -10237,18 +10573,23 @@ async def get_session_latest_descendant(
 async def get_session_messages(
     session_id: str,
     profile: Optional[str] = None,
-    limit: Optional[int] = None,
+    limit: Optional[int] = 500,
     offset: int = 0,
 ):
-    db = _open_session_db_for_profile(profile)
+    db = _open_session_db_for_profile(profile, read_only=True)
     try:
         sid = db.resolve_session_id(session_id)
         if not sid:
             raise HTTPException(status_code=404, detail="Session not found")
         sid = db.resolve_resume_session_id(sid)
-        # Clamp limit to prevent abuse (max 500 per page)
-        _limit = min(limit, 500) if limit is not None else None
+        if limit is None or limit < 1 or limit > 500:
+            raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
+        if offset < 0:
+            raise HTTPException(status_code=400, detail="offset must be non-negative")
+        _limit = limit
         messages = db.get_messages(sid, limit=_limit, offset=offset)
+        if _dashboard_branding_settings().get("product") == "oxaide":
+            messages = _managed_session_messages(messages)
         return {
             "session_id": sid,
             "messages": messages,
@@ -10451,6 +10792,11 @@ async def rename_session_endpoint(session_id: str, body: SessionRename):
     restores the session. Either field may be omitted. ``profile`` targets
     another profile's session.
     """
+    if (
+        _dashboard_branding_settings().get("product") == "oxaide"
+        and body.profile
+    ):
+        raise HTTPException(status_code=404, detail="Not found")
     db = _open_session_db_for_profile(body.profile)
     try:
         sid = db.resolve_session_id(session_id)
@@ -10480,7 +10826,7 @@ async def rename_session_endpoint(session_id: str, body: SessionRename):
 @app.get("/api/sessions/{session_id}/export")
 async def export_session_endpoint(session_id: str, profile: Optional[str] = None):
     """Export a single session (metadata + messages) as JSON."""
-    db = _open_session_db_for_profile(profile)
+    db = _open_session_db_for_profile(profile, read_only=True)
     try:
         sid = db.resolve_session_id(session_id)
         if not sid:
@@ -10488,6 +10834,9 @@ async def export_session_endpoint(session_id: str, profile: Optional[str] = None
         data = db.export_session(sid)
         if data is None:
             raise HTTPException(status_code=404, detail="Session not found")
+        if _dashboard_branding_settings().get("product") == "oxaide":
+            messages = _managed_session_messages(data.get("messages") or [])
+            data = {**_managed_session_row(data), "messages": messages}
         return data
     finally:
         db.close()
@@ -10951,7 +11300,7 @@ def _list_cron_job_runs_sync(job_id: str, profile: Optional[str] = None, limit: 
     except (TypeError, ValueError):
         limit_n = 20
 
-    db = _open_session_db_for_profile(selected)
+    db = _open_session_db_for_profile(selected, read_only=True)
     try:
         runs = db.list_cron_job_runs(canonical, limit=limit_n, offset=0)
         now = time.time()
@@ -14574,7 +14923,7 @@ async def update_config_raw(body: RawConfigUpdate, profile: Optional[str] = None
 async def get_usage_analytics(days: int = 30, profile: Optional[str] = None):
     from agent.insights import InsightsEngine
 
-    db = _open_session_db_for_profile(profile)
+    db = _open_session_db_for_profile(profile, read_only=True)
     try:
         cutoff = time.time() - (days * 86400)
         cur = db._conn.execute("""
@@ -14648,7 +14997,7 @@ async def get_models_analytics(days: int = 30, profile: Optional[str] = None):
     Returns token/cost/session breakdown per model plus capability metadata
     from models.dev (context window, vision, tools, reasoning, etc.).
     """
-    db = _open_session_db_for_profile(profile)
+    db = _open_session_db_for_profile(profile, read_only=True)
     try:
         cutoff = time.time() - (days * 86400)
 
@@ -15197,8 +15546,7 @@ def _dashboard_branding_settings() -> dict[str, str]:
         )
 
     oxaide_runtime = bool(
-        len(str(os.environ.get("HERMES_OXAIDE_DEMO_AUTH_SECRET") or "").strip()) >= 32
-        and configured_pin("HERMES_OXAIDE_WORKSPACE_ID")
+        configured_pin("HERMES_OXAIDE_WORKSPACE_ID")
         and configured_pin("HERMES_OXAIDE_RUNTIME_KEY")
     )
     product = str(raw_configured.get("product") or configured.get("product") or "").strip().lower()
@@ -15324,7 +15672,8 @@ def _resolve_chat_argv(
 
     if resume:
         _resume_db = _open_session_db_for_profile(
-            requested if profile_dir is not None else None
+            requested if profile_dir is not None else None,
+            read_only=True,
         )
         try:
             latest_resume, _latest_path = _session_latest_descendant(resume, _resume_db)

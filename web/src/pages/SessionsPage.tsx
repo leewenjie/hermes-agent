@@ -77,6 +77,10 @@ import {
   customerRuntimeLabel,
   isOxaideManagedDashboard,
 } from "@/lib/managed-dashboard";
+import {
+  managedSessionMessageContent,
+  splitCompactionContent,
+} from "@/lib/managed-session-message";
 
 const SOURCE_CONFIG: Record<string, { icon: typeof Terminal; color: string }> =
   {
@@ -159,60 +163,6 @@ function ToolCallBlock({
   );
 }
 
-// Context-compaction handoff blocks are persisted as ``role="user"`` or
-// ``role="assistant"`` with content starting with one of these prefixes —
-// they're metadata inserted by ``agent/context_compressor.py``, NOT real
-// turns the user typed or the model replied with. Rendering them with
-// the same styling as regular messages confuses operators scrolling the
-// session timeline (#29824 — "WebUI can show context compaction block
-// instead of latest assistant response after compression"), so we
-// detect them here and downgrade them to a muted, clearly-labelled
-// "Context handoff" row.
-//
-// Keep these prefixes (and the END marker below) in sync with
-// ``SUMMARY_PREFIX`` / ``LEGACY_SUMMARY_PREFIX`` and the
-// merge-into-tail marker in ``agent/context_compressor.py``.
-const COMPACTION_PREFIXES = [
-  "[CONTEXT COMPACTION — REFERENCE ONLY]",
-  "[CONTEXT COMPACTION - REFERENCE ONLY]",
-  "[CONTEXT SUMMARY]:",
-] as const;
-
-// Marker the compressor inserts between a merged summary and the
-// original tail message content. When the summary role would collide
-// with both head and tail roles (e.g. head ends with ``user`` and tail
-// starts with ``assistant``), the compressor merges the summary as a
-// prefix on the first tail message instead of inserting a standalone
-// row. We split on this marker so the WebUI still shows the original
-// assistant reply as its own readable bubble — otherwise the merged
-// row reads as a single opaque "Context compaction" block and the
-// user can't see the reply (#29824).
-const COMPACTION_END_MARKER =
-  "--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---";
-
-interface CompactionSplit {
-  /** Summary text (header + body, without the end marker). */
-  summary: string;
-  /** Original message content that came after the end marker. */
-  remainder: string;
-}
-
-function splitCompactionContent(content: string): CompactionSplit | null {
-  const head = content.trimStart();
-  if (!COMPACTION_PREFIXES.some((p) => head.startsWith(p))) return null;
-  const markerIdx = content.indexOf(COMPACTION_END_MARKER);
-  if (markerIdx < 0) {
-    return { summary: content, remainder: "" };
-  }
-  return {
-    summary: content.slice(0, markerIdx),
-    remainder: content
-      .slice(markerIdx + COMPACTION_END_MARKER.length)
-      .replace(/^\s+/, ""),
-  };
-}
-
-
 function MessageBubble({
   msg,
   highlight,
@@ -221,6 +171,7 @@ function MessageBubble({
   highlight?: string;
 }) {
   const { t } = useI18n();
+  const managedOxaide = isOxaideManagedDashboard();
 
   const ROLE_STYLES: Record<
     string,
@@ -339,7 +290,7 @@ function MessageBubble({
         ) : (
           <Markdown content={msg.content} highlightTerms={highlightTerms} />
         ))}
-      {msg.tool_calls && msg.tool_calls.length > 0 && (
+      {!managedOxaide && msg.tool_calls && msg.tool_calls.length > 0 && (
         <div className="mt-1">
           {msg.tool_calls.map((tc) => (
             <ToolCallBlock key={tc.id} toolCall={tc} />
@@ -359,6 +310,13 @@ function MessageList({
   highlight?: string;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const managedOxaide = isOxaideManagedDashboard();
+  const visibleMessages = managedOxaide
+    ? messages.flatMap((message) => {
+        const content = managedSessionMessageContent(message.role, message.content ?? "");
+        return content === null ? [] : [{ ...message, content }];
+      })
+    : messages;
 
   useEffect(() => {
     if (!highlight || !containerRef.current) return;
@@ -377,7 +335,7 @@ function MessageList({
       ref={containerRef}
       className="flex flex-col gap-3 max-h-[600px] overflow-y-auto pr-2"
     >
-      {messages.map((msg, i) => (
+      {visibleMessages.map((msg, i) => (
         <MessageBubble key={i} msg={msg} highlight={highlight} />
       ))}
     </div>
@@ -447,9 +405,11 @@ function SessionRow({
 
   const actionButtons = (
     <>
-      <Badge tone="outline" className="text-xs">
-        {session.source ?? "local"}
-      </Badge>
+      {!managedOxaide && (
+        <Badge tone="outline" className="text-xs">
+          {session.source ?? "local"}
+        </Badge>
+      )}
 
       {resumeInChatEnabled && (
         <Button
@@ -486,19 +446,21 @@ function SessionRow({
         <Pencil />
       </Button>
 
-      <Button
-        ghost
-        size="icon"
-        className="text-muted-foreground hover:text-foreground"
-        aria-label="Export session"
-        title="Export session JSON"
-        onClick={(e) => {
-          e.stopPropagation();
-          onExport(session.id);
-        }}
-      >
-        <Download />
-      </Button>
+      {!managedOxaide && (
+        <Button
+          ghost
+          size="icon"
+          className="text-muted-foreground hover:text-foreground"
+          aria-label="Export session"
+          title="Export session JSON"
+          onClick={(e) => {
+            e.stopPropagation();
+            onExport(session.id);
+          }}
+        >
+          <Download />
+        </Button>
+      )}
 
       {sharingEnabled && (
         <Button
@@ -562,16 +524,20 @@ function SessionRow({
         className="flex cursor-pointer items-start gap-3 p-3 transition-colors hover:bg-secondary/30"
         onClick={onToggle}
       >
-        <span className="flex shrink-0 items-center pt-0.5">
-          <Checkbox
-            checked={isSelected}
-            onClick={handleSelectClick}
-            aria-label={t.sessions.selectSession}
-          />
-        </span>
-        <div className={`shrink-0 pt-0.5 ${sourceInfo.color}`}>
-          <SourceIcon className="h-4 w-4" />
-        </div>
+        {!managedOxaide && (
+          <span className="flex shrink-0 items-center pt-0.5">
+            <Checkbox
+              checked={isSelected}
+              onClick={handleSelectClick}
+              aria-label={t.sessions.selectSession}
+            />
+          </span>
+        )}
+        {!managedOxaide && (
+          <div className={`shrink-0 pt-0.5 ${sourceInfo.color}`}>
+            <SourceIcon className="h-4 w-4" />
+          </div>
+        )}
         <div className="flex min-w-0 flex-1 flex-col gap-2">
           <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start sm:justify-between sm:gap-3">
             <div className="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -639,18 +605,10 @@ function SessionRow({
                 )}
               </div>
               <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-muted-foreground">
-                <span className="max-w-[min(100%,12rem)] truncate sm:max-w-[180px]">
-                  {customerRuntimeLabel(
-                    session.model,
-                    managedOxaide,
-                    t.common.unknown,
-                  )}
-                </span>
-                <span className="text-border">&#183;</span>
                 <span className="shrink-0">
-                  {session.message_count} {t.common.msgs}
+                  {session.message_count} {managedOxaide ? "messages" : t.common.msgs}
                 </span>
-                {session.tool_call_count > 0 && (
+                {!managedOxaide && session.tool_call_count > 0 && (
                   <>
                     <span className="text-border">&#183;</span>
                     <span className="shrink-0">
@@ -834,19 +792,21 @@ export default function SessionsPage() {
 
   useEffect(() => {
     setEnd(
-      <Button
-        outlined
-        size="sm"
-        onClick={() => setPruneOpen(true)}
-        prefix={<Archive />}
-      >
-        Prune old sessions
-      </Button>,
+      managedOxaide ? null : (
+        <Button
+          outlined
+          size="sm"
+          onClick={() => setPruneOpen(true)}
+          prefix={<Archive />}
+        >
+          Prune old sessions
+        </Button>
+      ),
     );
     return () => {
       setEnd(null);
     };
-  }, [setEnd]);
+  }, [managedOxaide, setEnd]);
 
   const loadSessions = useCallback((p: number, silent = false) => {
     // ``silent`` skips the loading spinner so background refreshes
@@ -1283,6 +1243,7 @@ export default function SessionsPage() {
   const snippetMap = new Map<string, string>();
   if (searchResults) {
     for (const r of searchResults) {
+      if (managedOxaide && r.role !== "user" && r.role !== "assistant") continue;
       snippetMap.set(r.session_id, r.snippet);
     }
   }
@@ -1290,8 +1251,11 @@ export default function SessionsPage() {
   // Search is global across the session store, so render the complete session
   // rows returned beside each FTS hit rather than intersecting with the current
   // 20-row page. Otherwise a valid match from an older page disappears.
-  const filtered = searchResults
-    ? searchResults.map((result) => result.session)
+  const visibleSearchResults = managedOxaide
+    ? searchResults?.filter((result) => result.role === "user" || result.role === "assistant")
+    : searchResults;
+  const filtered = visibleSearchResults
+    ? visibleSearchResults.map((result) => result.session)
     : sessions;
 
   const platformEntries = status
@@ -1303,8 +1267,8 @@ export default function SessionsPage() {
 
   const isSearching = Boolean(search.trim());
   const showOverviewTab =
-    platformEntries.length > 0 || recentSessions.length > 0;
-  const showList = view === "list" || isSearching || !showOverviewTab;
+    !managedOxaide && (platformEntries.length > 0 || recentSessions.length > 0);
+  const showList = managedOxaide || view === "list" || isSearching || !showOverviewTab;
   const showPagination = showList && !searchResults && total > PAGE_SIZE;
 
   const alerts: { message: string; detail?: string }[] = [];
@@ -1444,7 +1408,7 @@ export default function SessionsPage() {
         </DialogContent>
       </Dialog>
 
-      {stats && (
+      {!managedOxaide && stats && (
         <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border border-border bg-background-base/40 px-4 py-3">
           <div className="flex flex-col">
             <span className="text-lg font-semibold tabular-nums leading-none">
@@ -1482,7 +1446,7 @@ export default function SessionsPage() {
         </div>
       )}
 
-      {alerts.length > 0 && (
+      {!managedOxaide && alerts.length > 0 && (
         <div className="border border-destructive/30 bg-destructive/[0.06] p-4">
           <div className="flex items-start gap-3">
             <AlertTriangle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
@@ -1504,7 +1468,7 @@ export default function SessionsPage() {
         </div>
       )}
 
-      {activeAction && (
+      {!managedOxaide && activeAction && (
         <div className="border border-border bg-background-base/50">
           <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
             <div className="flex items-center gap-2 min-w-0">
@@ -1611,7 +1575,7 @@ export default function SessionsPage() {
               </div>
             )}
 
-            {showList && emptyCount > 0 && !isSearching && (
+            {!managedOxaide && showList && emptyCount > 0 && !isSearching && (
               <Button
                 outlined
                 destructive
@@ -1628,7 +1592,7 @@ export default function SessionsPage() {
               </Button>
             )}
 
-            {!isSearching && (
+            {!managedOxaide && !isSearching && (
               <Button
                 outlined
                 size="sm"
@@ -1658,7 +1622,7 @@ export default function SessionsPage() {
         </div>
       ) : null}
 
-      {showList && selectedIds.size > 0 && (
+      {!managedOxaide && showList && selectedIds.size > 0 && (
         <div
           className="flex flex-wrap items-center gap-2 border border-primary/30 bg-primary/[0.06] px-3 py-2"
           role="region"

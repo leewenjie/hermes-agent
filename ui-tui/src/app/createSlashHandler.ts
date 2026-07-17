@@ -1,3 +1,4 @@
+import { isOxaideResearchCommand } from '../content/researchHelp.js'
 import { parseSlashCommand } from '../domain/slash.js'
 import type { SlashExecResponse } from '../gatewayTypes.js'
 import { asCommandDispatch, rpcErrorMessage } from '../lib/rpc.js'
@@ -18,6 +19,14 @@ export function createSlashHandler(ctx: SlashHandlerContext): (cmd: string) => b
     const sid = ui.sid
     const parsed = parseSlashCommand(cmd)
     const argTail = parsed.arg ? ` ${parsed.arg}` : ''
+
+    if (ui.theme.brand.org === 'Oxaide' && !isOxaideResearchCommand(parsed.name)) {
+      ctx.transcript.panel('Research command unavailable', [
+        { text: 'Use /help to see the actions available in this workspace.' }
+      ])
+
+      return true
+    }
 
     const stale = () => flight !== ctx.slashFlightRef.current || getUiState().sid !== sid
 

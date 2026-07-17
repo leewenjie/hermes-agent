@@ -2,6 +2,7 @@ export const OXAIDE_MANAGED_PATHS = new Set([
   "/chat",
   "/sessions",
   "/files",
+  "/skills",
   "/docs",
 ]);
 

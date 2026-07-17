@@ -11,3 +11,13 @@ export const PLACEHOLDERS = [
 ]
 
 export const PLACEHOLDER = pick(PLACEHOLDERS)
+
+export const OXAIDE_PLACEHOLDERS = [
+  'Research a company, market, or investment theme…',
+  'Compare two companies on returns, valuation, and risk…',
+  'Review a thesis and identify missing evidence…',
+  'Summarize the latest evidence on…',
+  'Analyze the drawdown and recovery profile of…'
+]
+
+export const OXAIDE_PLACEHOLDER = pick(OXAIDE_PLACEHOLDERS)

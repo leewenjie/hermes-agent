@@ -49,6 +49,8 @@ import {
 import { PluginSlot } from "@/plugins";
 import { Markdown } from "@/components/Markdown";
 import { useNavigate } from "react-router-dom";
+import { isOxaideManagedDashboard } from "@/lib/managed-dashboard";
+import { researchFileReference } from "@/lib/research-file-reference";
 
 const DATE_FORMAT = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
@@ -82,6 +84,11 @@ function downloadUrl(url: string, name: string) {
 
 function displayPath(path: string | null | undefined): string {
   return path?.trim() || "Files";
+}
+
+function folderLabel(path: string | null | undefined): string {
+  const clean = path?.trim().replace(/[\\/]+$/, "");
+  return clean?.split(/[\\/]/).pop() || "Research files";
 }
 
 function transferHasFiles(event: ReactDragEvent<HTMLElement>): boolean {
@@ -122,11 +129,13 @@ export default function FilesPage() {
   const [previewText, setPreviewText] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const managedOxaide = isOxaideManagedDashboard();
 
   const activePath = listing?.path ?? currentPath ?? "";
   const canChangePath = listing?.can_change_path ?? false;
   const canUpload = Boolean(activePath) && !uploading;
-  const headerPath = displayPath(listing?.locked_root ?? listing?.path ?? currentPath);
+  const rawHeaderPath = displayPath(listing?.locked_root ?? listing?.path ?? currentPath);
+  const headerPath = managedOxaide ? folderLabel(rawHeaderPath) : rawHeaderPath;
 
   const load = useCallback(
     async (path = currentPath) => {
@@ -138,12 +147,12 @@ export default function FilesPage() {
         setCurrentPath(result.path);
         setPathInput(result.path);
       } catch (e) {
-        setError(String(e));
+        setError(managedOxaide ? "Research files are temporarily unavailable. Please retry." : String(e));
       } finally {
         setLoading(false);
       }
     },
-    [currentPath],
+    [currentPath, managedOxaide],
   );
 
   useEffect(() => {
@@ -336,11 +345,22 @@ export default function FilesPage() {
   };
 
   const copyPathForChat = async (entry: ManagedFileEntry) => {
+    const clipboardText = managedOxaide
+      ? researchFileReference(entry, listing)
+      : entry.path;
     try {
-      await navigator.clipboard.writeText(entry.path);
-      showToast("File path copied. Paste it into Chat to use this file.", "success");
+      await navigator.clipboard.writeText(clipboardText);
+      showToast(
+        managedOxaide
+          ? "File reference copied. Paste it into Research to use this file."
+          : "File path copied. Paste it into Chat to use this file.",
+        "success",
+      );
     } catch {
-      showToast(`Copy this path into Chat: ${entry.path}`, "error");
+      showToast(
+        managedOxaide ? clipboardText : `Copy this path into Chat: ${entry.path}`,
+        "error",
+      );
     }
   };
 
@@ -372,7 +392,7 @@ export default function FilesPage() {
       />
 
       <div className="flex min-w-0 flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-        {canChangePath ? (
+        {canChangePath && !managedOxaide ? (
           <form
             className="flex min-w-0 flex-1 items-center gap-2"
             onSubmit={(event) => {
@@ -391,11 +411,11 @@ export default function FilesPage() {
               Go
             </Button>
           </form>
-        ) : (
+        ) : !managedOxaide ? (
           <div className="min-w-0 truncate font-mono text-sm text-text-secondary" title={activePath}>
             {activePath}
           </div>
-        )}
+        ) : <div />}
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <Button
             type="button"
@@ -403,7 +423,7 @@ export default function FilesPage() {
             size="sm"
             prefix={<Sparkles />}
           >
-            Create with agent
+            {managedOxaide ? "Continue research" : "Create with agent"}
           </Button>
           <Button
             type="button"
@@ -453,8 +473,8 @@ export default function FilesPage() {
             <span className="block text-sm font-semibold uppercase tracking-[0.08em] text-foreground">
               {uploading ? "Uploading" : draggingFiles ? "Release to upload" : "Drop files here"}
             </span>
-            <span className="block truncate font-mono text-xs text-text-secondary" title={activePath}>
-              {activePath || "Loading"}
+            <span className="block truncate text-xs text-text-secondary" title={managedOxaide ? undefined : activePath}>
+              {managedOxaide ? "Memos, datasets, charts, and reports" : activePath || "Loading"}
             </span>
           </span>
         </span>
@@ -553,8 +573,8 @@ export default function FilesPage() {
                         size="icon"
                         type="button"
                         onClick={() => void copyPathForChat(entry)}
-                        aria-label={`Copy path for ${entry.name}`}
-                        title="Copy path for Chat"
+                        aria-label={managedOxaide ? `Use ${entry.name} in research` : `Copy path for ${entry.name}`}
+                        title={managedOxaide ? "Use in research" : "Copy path for Chat"}
                       >
                         <ClipboardCopy />
                       </Button>
@@ -600,7 +620,7 @@ export default function FilesPage() {
           <DialogHeader>
             <DialogTitle>Create folder</DialogTitle>
             <DialogDescription>
-              Target: {activePath || "Loading"}
+              {managedOxaide ? "Add a folder for related research files." : `Target: ${activePath || "Loading"}`}
             </DialogDescription>
           </DialogHeader>
           <div className="p-4">
@@ -662,9 +682,11 @@ export default function FilesPage() {
         <DialogContent className="max-h-[88vh] max-w-5xl overflow-hidden">
           <DialogHeader>
             <DialogTitle>{previewEntry?.name || "File preview"}</DialogTitle>
-            <DialogDescription className="break-all font-mono text-xs">
-              {previewEntry?.path}
-            </DialogDescription>
+            {!managedOxaide && (
+              <DialogDescription className="break-all font-mono text-xs">
+                {previewEntry?.path}
+              </DialogDescription>
+            )}
           </DialogHeader>
 
           <div className="min-h-64 overflow-auto border-y border-border bg-background/40 p-4">
@@ -680,8 +702,9 @@ export default function FilesPage() {
               <ManagedFilePreview file={previewFile} text={previewText} />
             ) : (
               <div className="flex min-h-64 items-center justify-center text-center text-sm text-muted-foreground">
-                No safe inline preview is available for this file type. Download the file
-                or copy its path into Chat.
+                {managedOxaide
+                  ? "No safe inline preview is available for this file type. You can still download it."
+                  : "No safe inline preview is available for this file type. Download the file or copy its path into Chat."}
               </div>
             )}
           </div>
@@ -694,7 +717,7 @@ export default function FilesPage() {
                 onClick={() => void copyPathForChat(previewEntry)}
                 prefix={<ClipboardCopy />}
               >
-                Copy path for Chat
+                {managedOxaide ? "Use in research" : "Copy path for Chat"}
               </Button>
             )}
             {previewEntry && (
