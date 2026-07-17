@@ -472,9 +472,21 @@ export default function App() {
     const analyticsFiltered = showTokenAnalytics
       ? base
       : base.filter((n) => n.path !== "/analytics");
-    return branding.product === "oxaide"
-      ? analyticsFiltered.filter((item) => OXAIDE_MANAGED_PATHS.has(item.path))
-      : analyticsFiltered;
+    if (branding.product !== "oxaide") return analyticsFiltered;
+
+    const managedLabels: Record<string, string> = {
+      "/chat": "Research",
+      "/sessions": "Research history",
+      "/files": "Research files",
+      "/docs": "Help",
+    };
+    return analyticsFiltered
+      .filter((item) => OXAIDE_MANAGED_PATHS.has(item.path))
+      .map((item) => ({
+        ...item,
+        label: managedLabels[item.path] ?? item.label,
+        labelKey: undefined,
+      }));
   }, [branding.product, embeddedChat, showTokenAnalytics]);
 
   const sidebarNav = useMemo(

@@ -28,12 +28,13 @@ describe("managed Oxaide dashboard policy", () => {
       "/sessions",
       "/files",
       "/docs",
+      "/skills",
     ]);
     expect(filterOxaideManagedRoutes(routes, false)).toBe(routes);
   });
 
-  it("does not expose mutable skills or model routes", () => {
-    expect(OXAIDE_MANAGED_PATHS.has("/skills")).toBe(false);
+  it("exposes skills without exposing model routes", () => {
+    expect(OXAIDE_MANAGED_PATHS.has("/skills")).toBe(true);
     expect(OXAIDE_MANAGED_PATHS.has("/models")).toBe(false);
     expect(OXAIDE_MANAGED_PATHS.has("/chat")).toBe(true);
   });

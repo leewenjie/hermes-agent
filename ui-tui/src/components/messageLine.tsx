@@ -50,6 +50,7 @@ export const MessageLine = memo(function MessageLine({
   const toolsMode = sectionMode('tools', detailsMode, sections, detailsModeCommandOverride)
   const activityMode = sectionMode('activity', detailsMode, sections, detailsModeCommandOverride)
   const thinking = msg.thinking?.trim() ?? ''
+  const managedOxaide = t.brand.org === 'Oxaide'
 
   // One blank line above this block iff it opens a new visual group relative
   // to the block directly above it (`prev`) — the flex-grouping rule. Applied
@@ -125,7 +126,8 @@ export const MessageLine = memo(function MessageLine({
   const gutterWidth = transcriptGutterWidth(msg.role, t.brand.prompt)
 
   const showDetails =
-    (toolsMode !== 'hidden' && Boolean(msg.tools?.length)) || (thinkingMode !== 'hidden' && Boolean(thinking))
+    !managedOxaide &&
+    ((toolsMode !== 'hidden' && Boolean(msg.tools?.length)) || (thinkingMode !== 'hidden' && Boolean(thinking)))
 
   const showResponseSeparator = shouldShowResponseSeparator(msg, showDetails)
 

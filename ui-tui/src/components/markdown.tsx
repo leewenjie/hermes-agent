@@ -115,7 +115,8 @@ const DASHBOARD_PREVIEWABLE_EXTENSIONS = new Set([
 ])
 
 export const dashboardManagedFilePath = (line: string): string | null => {
-  const path = line.trim().match(/^[`"']?(\/opt\/data\/[^\s`"']+)[`"']?$/)?.[1]
+  const candidate = line.trim()
+  const path = candidate.match(/^[`"'](\/opt\/data\/[^`"']+)[`"']$/)?.[1] ?? candidate.match(/^(\/opt\/data\/.+)$/)?.[1]
   const extension = path?.split('.').pop()?.toLowerCase()
 
   return path && extension && DASHBOARD_PREVIEWABLE_EXTENSIONS.has(extension) ? path : null

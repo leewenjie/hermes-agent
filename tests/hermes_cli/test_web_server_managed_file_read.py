@@ -36,9 +36,9 @@ def test_managed_file_read_returns_small_text_artifact(monkeypatch, tmp_path):
     result = asyncio.run(web_server.read_managed_file(_request(), str(artifact)))
 
     assert result["name"] == "analysis.json"
-    assert result["path"] == str(artifact)
+    assert result["path"] == "/analysis.json"
     assert result["mime_type"] == "application/json"
-    assert result["locked_root"] == str(tmp_path)
+    assert result["locked_root"] == "/"
     assert result["can_change_path"] is False
     header, encoded = result["data_url"].split(",", 1)
     assert header == "data:application/json;base64"
@@ -55,4 +55,6 @@ def test_managed_file_read_rejects_outside_locked_root(monkeypatch, tmp_path):
     with pytest.raises(HTTPException) as exc_info:
         asyncio.run(web_server.read_managed_file(_request(), str(outside)))
 
-    assert exc_info.value.status_code == 403
+    # A leading slash is a virtual managed-root path, not a host path. The
+    # outside host file is therefore neither reached nor disclosed.
+    assert exc_info.value.status_code == 404

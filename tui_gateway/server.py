@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -1138,6 +1139,8 @@ def write_json(obj: dict) -> bool:
 
 
 def _emit(event: str, sid: str, payload: dict | None = None):
+    if event == "session.info" and payload is not None and _is_oxaide_tenant_runtime():
+        payload = _managed_session_info(payload)
     params = {"type": event, "session_id": sid}
     if payload is not None:
         params["payload"] = payload
@@ -1249,10 +1252,32 @@ def handle_request(req: dict) -> dict | None:
         return normalized
 
     rid, method, params = normalized
+    if _is_oxaide_tenant_runtime() and method not in _OXAIDE_RESEARCH_RPC_METHODS:
+        # Managed research tenants are not generic Hermes installations.
+        # Enforce that boundary at dispatch, not merely in whichever client UI
+        # happens to be connected, so hand-crafted RPC calls cannot enumerate
+        # or mutate models, config, skills, tools, plugins, or shell state.
+        return _err(rid, -32601, f"unknown method: {method}")
     fn = _methods.get(method)
     if not fn:
         return _err(rid, -32601, f"unknown method: {method}")
     return fn(rid, params)
+
+
+_OXAIDE_RESEARCH_RPC_METHODS = frozenset({
+    "session.create", "session.list", "session.most_recent", "session.resume",
+    "session.cwd.set", "session.active_list", "session.activate", "session.delete",
+    "session.title", "session.usage", "session.status", "session.history",
+    "session.undo", "session.compress", "session.save", "session.close",
+    "session.branch", "session.interrupt", "session.steer",
+    "prompt.submit", "prompt.background", "terminal.resize",
+    "clipboard.paste", "image.attach", "image.attach_bytes", "pdf.attach",
+    "file.attach", "image.detach", "input.detect_drop", "paste.collapse",
+    "clarify.respond", "terminal.read.respond", "sudo.respond", "secret.respond",
+    "approval.respond", "delegation.status", "delegation.pause", "subagent.interrupt",
+    "credits.view", "billing.state", "billing.charge", "billing.charge_status",
+    "billing.auto_reload", "billing.step_up",
+})
 
 
 def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
@@ -2655,6 +2680,14 @@ _OXAIDE_APPROVED_TOOLSETS = frozenset(
 _OXAIDE_REQUIRED_SKILLS = frozenset(
     {"investment-research", "market-return-analysis", "stocks"}
 )
+_OXAIDE_RESEARCH_COMMANDS = {
+    "help": "Show research actions",
+    "new": "Start new research",
+    "resume": "Open prior research",
+    "copy": "Copy the latest response",
+    "retry": "Run the last request again",
+    "title": "Name this research",
+}
 
 
 def _is_oxaide_tenant_runtime() -> bool:
@@ -5102,9 +5135,64 @@ def _coerce_message_text(content: Any) -> str:
     return str(content)
 
 
+_COMPACTION_PREFIXES = (
+    "[CONTEXT COMPACTION — REFERENCE ONLY]",
+    "[CONTEXT COMPACTION - REFERENCE ONLY]",
+    "[CONTEXT SUMMARY]:",
+)
+_COMPACTION_END_MARKER = (
+    "--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---"
+)
+
+
+def _managed_customer_message_text(text: str) -> str:
+    if text.lstrip().startswith(_COMPACTION_PREFIXES):
+        marker_index = text.find(_COMPACTION_END_MARKER)
+        if marker_index < 0:
+            return ""
+        text = text[marker_index + len(_COMPACTION_END_MARKER) :].lstrip()
+    # Tool output can be summarized into an otherwise customer-visible
+    # assistant message. Never replay host filesystem layout to managed users.
+    text = re.sub(r"(?<![\w:])/(?:[^\s/]+/)*[^\s/]+", "[research file]", text)
+    text = re.sub(r"(?i)\b[A-Z]:\\(?:[^\s\\]+\\)*[^\s\\]+", "[research file]", text)
+    return text
+
+
+def _managed_customer_content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        chunks = []
+        for part in content:
+            if isinstance(part, str):
+                chunks.append(part)
+            elif isinstance(part, dict):
+                kind = part.get("type")
+                if kind in {"text", "input_text", "output_text"}:
+                    chunks.append(str(part.get("text") or part.get("content") or ""))
+                elif kind in {"image_url", "input_image", "image"}:
+                    chunks.append("[image]")
+                elif kind in {"input_audio", "audio"}:
+                    chunks.append("[audio]")
+                elif kind:
+                    chunks.append("[attachment]")
+        return "\n".join(chunk for chunk in chunks if chunk)
+    if isinstance(content, dict):
+        kind = content.get("type")
+        if kind in {"text", "input_text", "output_text"}:
+            return str(content.get("text") or content.get("content") or "")
+        if kind in {"image_url", "input_image", "image"}:
+            return "[image]"
+        if kind in {"input_audio", "audio"}:
+            return "[audio]"
+        return "[attachment]"
+    return "" if content is None else str(content)
+
+
 def _history_to_messages(history: list[dict]) -> list[dict]:
     messages = []
     tool_call_args = {}
+    managed_oxaide = _is_oxaide_tenant_runtime()
 
     for m in history:
         if not isinstance(m, dict):
@@ -5112,7 +5200,15 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
         role = m.get("role")
         if role not in {"user", "assistant", "tool", "system"}:
             continue
-        content_text = _coerce_message_text(m.get("content"))
+        if managed_oxaide and role not in {"user", "assistant"}:
+            continue
+        content_text = (
+            _managed_customer_content_text(m.get("content"))
+            if managed_oxaide
+            else _coerce_message_text(m.get("content"))
+        )
+        if managed_oxaide:
+            content_text = _managed_customer_message_text(content_text)
         if role == "assistant" and m.get("tool_calls"):
             for tc in m["tool_calls"]:
                 fn = tc.get("function", {})
@@ -5147,13 +5243,13 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
             "reasoning_details",
             "codex_reasoning_items",
         )
-        has_reasoning = role == "assistant" and any(
+        has_reasoning = not managed_oxaide and role == "assistant" and any(
             m.get(key) for key in reasoning_keys
         )
         if not content_text.strip() and not has_reasoning:
             continue
         msg = {"role": role, "text": content_text}
-        if role == "assistant":
+        if role == "assistant" and not managed_oxaide:
             for key in reasoning_keys:
                 if key in m and m.get(key) is not None:
                     msg[key] = m.get(key)
@@ -5600,6 +5696,30 @@ def _(rid, params: dict) -> dict:
         _schedule_agent_build(sid)
     _schedule_session_cap_enforcement()  # trim detached idle sessions over the cap
     capability_preview = _pre_agent_capability_preview()
+    info = {
+        # Reflect the per-session model override (desktop composer pick)
+        # in the immediate response so the client doesn't briefly clobber
+        # its sticky pick with the global default before the deferred
+        # build's session.info lands.
+        "model": (
+            session_model_override.get("model")
+            if session_model_override
+            else _resolve_model()
+        ),
+        **(
+            {"provider": session_model_override["provider"]}
+            if session_model_override and session_model_override.get("provider")
+            else {}
+        ),
+        **capability_preview,
+        "cwd": _sessions[sid]["cwd"],
+        "branch": _git_branch_for_cwd(_sessions[sid]["cwd"]),
+        "lazy": True,
+        "desktop_contract": DESKTOP_BACKEND_CONTRACT,
+        "profile_name": _current_profile_name(),
+    }
+    if _is_oxaide_tenant_runtime():
+        info = _managed_session_info(info)
 
     return _ok(
         rid,
@@ -5608,28 +5728,7 @@ def _(rid, params: dict) -> dict:
             "stored_session_id": key,
             "message_count": len(history),
             "messages": _history_to_messages(history),
-            "info": {
-                # Reflect the per-session model override (desktop composer pick)
-                # in the immediate response so the client doesn't briefly clobber
-                # its sticky pick with the global default before the deferred
-                # build's session.info lands.
-                "model": (
-                    session_model_override.get("model")
-                    if session_model_override
-                    else _resolve_model()
-                ),
-                **(
-                    {"provider": session_model_override["provider"]}
-                    if session_model_override and session_model_override.get("provider")
-                    else {}
-                ),
-                **capability_preview,
-                "cwd": _sessions[sid]["cwd"],
-                "branch": _git_branch_for_cwd(_sessions[sid]["cwd"]),
-                "lazy": True,
-                "desktop_contract": DESKTOP_BACKEND_CONTRACT,
-                "profile_name": _current_profile_name(),
-            },
+            "info": info,
         },
     )
 
@@ -5670,7 +5769,11 @@ def _(rid, params: dict) -> dict:
                         "preview": s.get("preview") or "",
                         "started_at": s.get("started_at") or 0,
                         "message_count": s.get("message_count") or 0,
-                        "source": s.get("source") or "",
+                        **(
+                            {}
+                            if _is_oxaide_tenant_runtime()
+                            else {"source": s.get("source") or ""}
+                        ),
                     }
                     for s in rows
                 ]
@@ -6013,7 +6116,11 @@ def _(rid, params: dict) -> dict:
                 "resumed": target,
                 "message_count": len(messages),
                 "messages": messages,
-                "info": _lazy_resume_info(cwd),
+                "info": (
+                    _managed_session_info(_lazy_resume_info(cwd))
+                    if _is_oxaide_tenant_runtime()
+                    else _lazy_resume_info(cwd)
+                ),
                 "inflight": None,
                 "running": child_running,
                 "session_key": target,
@@ -6092,10 +6199,14 @@ def _(rid, params: dict) -> dict:
                 "resumed": target,
                 "message_count": len(messages),
                 "messages": messages,
-                "info": _lazy_resume_info(
-                    cwd,
-                    model=model_override.get("model") or "",
-                    provider=overrides.get("provider_override") or "",
+                "info": (
+                    _managed_session_info(_lazy_resume_info(cwd))
+                    if _is_oxaide_tenant_runtime()
+                    else _lazy_resume_info(
+                        cwd,
+                        model=model_override.get("model") or "",
+                        provider=overrides.get("provider_override") or "",
+                    )
                 ),
                 "inflight": None,
                 "running": False,
@@ -6231,7 +6342,11 @@ def _(rid, params: dict) -> dict:
             "resumed": target,
             "message_count": len(messages),
             "messages": messages,
-            "info": _session_info(agent, session),
+            "info": (
+                _managed_session_info(_session_info(agent, session))
+                if _is_oxaide_tenant_runtime()
+                else _session_info(agent, session)
+            ),
             "inflight": None,
             "running": False,
             "session_key": target,
@@ -6261,6 +6376,8 @@ def _(rid, params: dict) -> dict:
         "branch": _git_branch_for_cwd(cwd),
         "lazy": True,
     }
+    if _is_oxaide_tenant_runtime():
+        info = _managed_session_info(info)
     _emit("session.info", params.get("session_id", ""), info)
     return _ok(rid, info)
 
@@ -6317,7 +6434,7 @@ def _session_live_item(sid: str, session: dict, current_sid: str = "") -> dict:
         preview = inflight.get("assistant") or inflight.get("user") or preview
         preview = " ".join(str(preview).split())[:160]
     now = time.time()
-    return {
+    item = {
         "current": sid == current_sid,
         "id": sid,
         "last_active": float(session.get("last_active") or session.get("created_at") or now),
@@ -6329,6 +6446,9 @@ def _session_live_item(sid: str, session: dict, current_sid: str = "") -> dict:
         "status": status,
         "title": _session_live_title(session, key),
     }
+    if _is_oxaide_tenant_runtime():
+        item.pop("model", None)
+    return item
 
 
 def _session_lookup_key(session: dict, *, fallback: str = "") -> str:
@@ -6353,13 +6473,24 @@ def _find_live_session_by_key(session_key: str) -> tuple[str, dict] | None:
 def _fallback_session_info(session: dict) -> dict:
     agent = session.get("agent")
     if agent is not None:
-        return _session_info(agent)
-    return {
+        info = _session_info(agent)
+    else:
+        info = {
         "cwd": _default_session_cwd(),
         "lazy": True,
         "model": _resolve_model(),
         "skills": {},
         "tools": {},
+        }
+    return _managed_session_info(info) if _is_oxaide_tenant_runtime() else info
+
+
+def _managed_session_info(info: dict) -> dict:
+    return {
+        "model": "Oxaide Research Engine",
+        "skills": {},
+        "tools": {},
+        **({"lazy": bool(info.get("lazy"))} if "lazy" in info else {}),
     }
 
 
@@ -8093,8 +8224,6 @@ def _(rid, params: dict) -> dict:
     if err:
         return err
 
-    from hermes_constants import display_hermes_home
-
     key = session.get("session_key") or params.get("session_id") or ""
     agent = session.get("agent")
     meta = {}
@@ -8119,6 +8248,21 @@ def _(rid, params: dict) -> dict:
         if meta.get(field):
             updated = _dt(meta.get(field), created)
             break
+
+    if _is_oxaide_tenant_runtime():
+        title = (meta.get("title") or "").strip()
+        lines = ["Research workspace", "", f"Status: {'Working' if session.get('running') else 'Ready'}"]
+        if title:
+            lines.append(f"Research: {title}")
+        lines.extend(
+            [
+                f"Started: {created.strftime('%Y-%m-%d %H:%M')}",
+                f"Last activity: {updated.strftime('%Y-%m-%d %H:%M')}",
+            ]
+        )
+        return _ok(rid, {"output": "\n".join(lines)})
+
+    from hermes_constants import display_hermes_home
 
     usage = _get_usage(agent) if agent is not None else {}
     provider = getattr(agent, "provider", None) or "unknown"
@@ -12113,6 +12257,20 @@ _WORKER_BLOCKED_COMMANDS: frozenset[str] = frozenset({"snapshot", "snap"})
 @method("commands.catalog")
 def _(rid, params: dict) -> dict:
     """Registry-backed slash metadata for the TUI — categorized, no aliases."""
+    if _is_oxaide_tenant_runtime():
+        pairs = [[f"/{name}", description] for name, description in _OXAIDE_RESEARCH_COMMANDS.items()]
+        return _ok(
+            rid,
+            {
+                "pairs": pairs,
+                "sub": {},
+                "canon": {pair[0]: pair[0] for pair in pairs},
+                "categories": [{"name": "Research actions", "pairs": pairs}],
+                "skill_count": 0,
+                "warning": "",
+            },
+        )
+
     try:
         from hermes_cli.commands import (
             COMMAND_REGISTRY,
@@ -12228,6 +12386,8 @@ def _cli_exec_blocked(argv: list[str]) -> str | None:
 @method("cli.exec")
 def _(rid, params: dict) -> dict:
     """Run `python -m hermes_cli.main` with argv; capture stdout/stderr (non-interactive only)."""
+    if _is_oxaide_tenant_runtime():
+        return _err(rid, 4030, "CLI commands are unavailable in this research workspace.")
     argv = params.get("argv", [])
     if not isinstance(argv, list) or not all(isinstance(x, str) for x in argv):
         return _err(rid, 4003, "argv must be list[str]")
@@ -12290,6 +12450,8 @@ def _resolve_name(name: str) -> str:
 @method("command.dispatch")
 def _(rid, params: dict) -> dict:
     name, arg = params.get("name", "").lstrip("/"), params.get("arg", "")
+    if _is_oxaide_tenant_runtime() and name.lower() not in _OXAIDE_RESEARCH_COMMANDS:
+        return _err(rid, 4030, "That command is unavailable in this research workspace.")
     resolved = _resolve_name(name)
     if resolved != name:
         name = resolved
@@ -13246,6 +13408,19 @@ def _(rid, params: dict) -> dict:
     if not text.startswith("/"):
         return _ok(rid, {"items": []})
 
+    if _is_oxaide_tenant_runtime():
+        prefix = text[1:].strip().lower()
+        items = [
+            {
+                "text": f"/{name}",
+                "display": f"/{name}",
+                "meta": description,
+            }
+            for name, description in _OXAIDE_RESEARCH_COMMANDS.items()
+            if name.startswith(prefix) and name != prefix
+        ]
+        return _ok(rid, {"items": items, "replace_from": 1})
+
     try:
         from hermes_cli.commands import SlashCommandCompleter
         from prompt_toolkit.document import Document
@@ -13617,10 +13792,6 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
 
 @method("slash.exec")
 def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
-    if err:
-        return err
-
     cmd = params.get("command", "").strip()
     if not cmd:
         return _err(rid, 4004, "empty command")
@@ -13634,6 +13805,13 @@ def _(rid, params: dict) -> dict:
     _cmd_parts = _cmd_text.split(maxsplit=1)
     _cmd_base = (_cmd_parts[0] if _cmd_parts else "").lower()
     _cmd_arg = _cmd_parts[1] if len(_cmd_parts) > 1 else ""
+
+    if _is_oxaide_tenant_runtime() and _cmd_base not in _OXAIDE_RESEARCH_COMMANDS:
+        return _err(rid, 4030, "That command is unavailable in this research workspace.")
+
+    session, err = _sess(params, rid)
+    if err:
+        return err
 
     if _cmd_base in _PENDING_INPUT_COMMANDS:
         # Route directly to command.dispatch instead of returning an error

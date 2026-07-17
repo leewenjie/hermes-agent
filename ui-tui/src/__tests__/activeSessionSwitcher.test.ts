@@ -11,6 +11,7 @@ import {
   draftTitleFromPrompt,
   fixedSessionColumnStyle,
   isNewSessionRow,
+  managedOrchestratorContextHintSegments,
   newSessionMarkerColor,
   newSessionRowIndex,
   orchestratorContextHint,
@@ -43,6 +44,13 @@ describe('session orchestrator helpers', () => {
     expect(orchestratorContextHint(true)).toBe('New row: type prompt · Enter start · Tab model')
     expect(orchestratorGlobalHotkeyHint).toBe('↑↓ move · Ctrl+N new · Ctrl+R refresh · Esc close')
     expect(orchestratorGlobalHotkeyHint.length).toBeLessThanOrEqual(56)
+  })
+
+  it('omits model controls from managed research hints', () => {
+    const hints = managedOrchestratorContextHintSegments(true)
+
+    expect(hints.map(segment => segment.text).join('')).toBe('New research: type a question · Enter start')
+    expect(hints.some(segment => /model|Tab/.test(segment.text))).toBe(false)
   })
 
   it('assigns themed colors consistently to orchestrator labels and hotkeys', () => {
@@ -191,6 +199,10 @@ describe('unified Sessions overlay helpers', () => {
 
     expect(resumableHistory(history, live).map(h => h.id)).toEqual(['a', 'c'])
     expect(resumableHistory(history, []).map(h => h.id)).toEqual(['a', 'b', 'c'])
+    expect(resumableHistory(history, [{ id: 'runtime-b', session_key: 'b', status: 'idle' }]).map(h => h.id)).toEqual([
+      'a',
+      'c'
+    ])
   })
 
   it('labels live + resumable counts compactly', () => {

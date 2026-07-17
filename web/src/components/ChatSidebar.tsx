@@ -38,6 +38,7 @@ import {
   generatedImageFromToolResult,
   isBrowserImageSource,
   researchMethodLabel,
+  summarizeResearchCapabilities,
   type ChatSessionIdentity,
   type ChatSessionCapabilityInfo,
 } from "@/lib/chat-sidebar-events";
@@ -94,6 +95,17 @@ const STATE_TONE: Record<
   closed: "secondary",
   error: "destructive",
 };
+
+function managedErrorMessage(message: string): string {
+  const value = message.toLowerCase();
+  if (value.includes("credential") || value.includes("provider") || value.includes("model")) {
+    return "Research is temporarily unavailable. Please retry shortly.";
+  }
+  if (value.includes("tool") || value.includes("websocket") || value.includes("connection")) {
+    return "The research workspace lost its connection. Reconnecting…";
+  }
+  return "The research workspace hit a temporary problem. Please retry.";
+}
 
 interface ChatSidebarProps {
   channel: string;
@@ -442,12 +454,8 @@ export function ChatSidebar({
   const modelLabel = modelName.split("/").slice(-1)[0] ?? "—";
   const banner = error ?? info.credential_warning ?? null;
   const preloadedSkills = info.preloaded_skills ?? [];
-  const capabilityKnown = info.preloaded_skills !== undefined;
-  const capabilityPreview = Boolean(info.capability_preview);
-  const toolCount = Object.values(info.tools ?? {}).reduce(
-    (total, names) => total + names.length,
-    0,
-  );
+  const researchCapabilities = summarizeResearchCapabilities(info.tools ?? {});
+  const visibleBanner = managedOxaide && banner ? managedErrorMessage(banner) : banner;
 
   return (
     <aside
@@ -459,15 +467,15 @@ export function ChatSidebar({
       <Card className="flex items-center justify-between gap-2 px-3 py-2">
         <div className="min-w-0 flex-1">
           <div className="text-display text-xs tracking-wider text-text-tertiary">
-            model
+            {managedOxaide ? "research workspace" : "model"}
           </div>
 
           {managedOxaide ? (
             <div
               className="flex min-w-0 max-w-full items-center gap-1.5 text-sm font-medium"
-              title={`Oxaide Research Engine · ${modelName} via Microsoft Azure`}
+              title="Managed by Oxaide"
             >
-              <span className="truncate">Oxaide Research Engine</span>
+              <span className="truncate">Ready for research</span>
               <LockKeyhole className="size-3.5 shrink-0 text-text-tertiary" />
             </div>
           ) : (
@@ -491,9 +499,11 @@ export function ChatSidebar({
           )}
         </div>
 
-        <Badge tone={STATE_TONE[state]} className="shrink-0">
-          {STATE_LABEL[state]}
-        </Badge>
+        {(!managedOxaide || state !== "open") && (
+          <Badge tone={STATE_TONE[state]} className="shrink-0">
+            {managedOxaide && state === "connecting" ? "starting" : STATE_LABEL[state]}
+          </Badge>
+        )}
       </Card>
 
       {managedOxaide && (
@@ -501,13 +511,7 @@ export function ChatSidebar({
           <div className="text-display text-xs tracking-wider text-text-tertiary">
             research capabilities
           </div>
-          <div className="mt-1 text-sm font-medium">
-            {preloadedSkills.length > 0
-              ? `${preloadedSkills.length} skills ${capabilityPreview ? "configured" : "loaded"}`
-              : capabilityKnown
-                ? "No session skills configured"
-                : "Loading session skills…"}
-          </div>
+          <div className="mt-1 text-sm font-medium">Research methods ready</div>
           {preloadedSkills.length > 0 && (
             <div className="mt-2 grid max-h-32 gap-1.5 overflow-y-auto">
               {preloadedSkills.map((skill) => (
@@ -515,17 +519,21 @@ export function ChatSidebar({
                   key={skill}
                   tone="secondary"
                   className="w-full max-w-full justify-start whitespace-normal px-2 py-1 text-left font-sans text-xs font-medium leading-snug normal-case tracking-normal"
-                  title={skill}
+                  title={researchMethodLabel(skill)}
                 >
                   <span className="break-words">{researchMethodLabel(skill)}</span>
                 </Badge>
               ))}
             </div>
           )}
-          {toolCount > 0 && (
-            <div className="mt-2 text-xs text-text-secondary">
-              {toolCount} {capabilityPreview ? "configured" : "live"} tools across{" "}
-              {Object.keys(info.tools ?? {}).length} toolsets
+          {researchCapabilities.length > 0 && (
+            <div className="mt-3 grid gap-2 border-t border-border pt-2">
+              {researchCapabilities.map((capability) => (
+                <div key={capability.label}>
+                  <div className="text-xs font-medium">{capability.label}</div>
+                  <div className="text-xs text-text-secondary">{capability.detail}</div>
+                </div>
+              ))}
             </div>
           )}
         </Card>
@@ -553,7 +561,7 @@ export function ChatSidebar({
             href={generatedImage.src}
             target="_blank"
             rel="noreferrer"
-            title={generatedImage.source}
+            title="Open generated image"
             className="block border-t border-border bg-black/20 p-2"
           >
             <img
@@ -590,12 +598,12 @@ export function ChatSidebar({
         </Card>
       )}
 
-      {banner && (
+      {visibleBanner && (
         <Card className="flex items-start gap-2 border-destructive/40 bg-destructive/5 px-3 py-2 text-xs">
           <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
 
           <div className="min-w-0 flex-1">
-            <div className="wrap-break-word text-destructive">{banner}</div>
+            <div className="wrap-break-word text-destructive">{visibleBanner}</div>
 
             {error && (
               <Button
@@ -605,7 +613,7 @@ export function ChatSidebar({
                 onClick={reconnect}
                 prefix={<RefreshCw />}
               >
-                reconnect tools feed
+                {managedOxaide ? "retry connection" : "reconnect tools feed"}
               </Button>
             )}
           </div>

@@ -1126,6 +1126,35 @@ class TestWebServerEndpoints:
         assert row["system_prompt"].startswith("# SOUL.md")
         assert "temperature" in (row["model_config"] or "")
 
+    def test_managed_session_list_and_detail_hide_internal_configuration(self, monkeypatch):
+        from hermes_cli import web_server
+
+        self._create_session_with_heavy_fields("managed-private-row")
+        monkeypatch.setattr(
+            web_server,
+            "_dashboard_branding_settings",
+            lambda: {"product": "oxaide"},
+        )
+
+        listed = self.client.get("/api/sessions?limit=20&offset=0&full=1")
+        assert listed.status_code == 200
+        row = next(s for s in listed.json()["sessions"] if s["id"] == "managed-private-row")
+        assert "system_prompt" not in row
+        assert "model_config" not in row
+        assert "model" not in row
+
+        detail = self.client.get("/api/sessions/managed-private-row")
+        assert detail.status_code == 200
+        assert "system_prompt" not in detail.json()
+        assert "model_config" not in detail.json()
+        assert "model" not in detail.json()
+
+        exported = self.client.get("/api/sessions/managed-private-row/export")
+        assert exported.status_code == 200
+        assert "system_prompt" not in exported.json()
+        assert "model_config" not in exported.json()
+        assert "model" not in exported.json()
+
     def test_profiles_sessions_strips_heavy_fields_by_default(self):
         """The cross-profile aggregate applies the same list projection."""
         self._create_session_with_heavy_fields("lean-profiles-row")
@@ -1357,6 +1386,79 @@ class TestWebServerEndpoints:
     def test_profiles_sessions_rejects_unknown_archived_value(self):
         resp = self.client.get("/api/profiles/sessions?archived=bogus")
         assert resp.status_code == 400
+
+    def test_oxaide_http_boundary_hides_admin_api_families(self, monkeypatch):
+        from hermes_cli import web_server
+
+        monkeypatch.setattr(
+            web_server,
+            "_dashboard_branding_settings",
+            lambda: {"product": "oxaide"},
+        )
+
+        for method, path in (
+            ("GET", "/api/config"),
+            ("GET", "/api/env"),
+            ("GET", "/api/model/options"),
+            ("GET", "/api/providers/oauth"),
+            ("GET", "/api/mcp/servers"),
+            ("GET", "/api/profiles"),
+            ("POST", "/api/gateway/restart"),
+            ("GET", "/api/cron/jobs"),
+            ("POST", "/api/credentials/pool"),
+            ("GET", "/api/memory"),
+            ("GET", "/api/profiles/sessions"),
+            ("POST", "/api/sessions/import"),
+            ("POST", "/api/sessions/prune"),
+            ("GET", "/api/sessions/stats"),
+            ("POST", "/api/sessions/bulk-delete"),
+        ):
+            assert self.client.request(method, path).status_code == 404
+
+        assert self.client.get("/api/skills").status_code == 200
+        assert self.client.get("/api/tools/toolsets").status_code == 200
+        assert self.client.get("/api/sessions").status_code == 200
+        assert self.client.get("/api/sessions?profile=worker").status_code == 404
+        assert self.client.get("/api/status?profile=worker").status_code == 404
+        assert self.client.post(
+            "/api/chat/image-upload?profile=worker",
+            json={"data_url": "data:image/png;base64,aGVsbG8="},
+        ).status_code == 404
+        assert self.client.patch(
+            "/api/sessions/example",
+            json={"title": "Nope", "profile": "worker"},
+        ).status_code == 404
+
+    def test_session_list_pagination_rejects_unbounded_sqlite_values(self):
+        for query in ("limit=-1", "limit=501", "offset=-1"):
+            assert self.client.get(f"/api/sessions?{query}").status_code == 400
+
+        for query in (
+            "limit=-1",
+            "limit=501",
+            "offset=-1",
+            "offset=490&limit=20",
+        ):
+            assert self.client.get(f"/api/profiles/sessions?{query}").status_code == 400
+
+        assert (
+            self.client.get("/api/profiles/sessions?offset=480&limit=20").status_code
+            == 200
+        )
+
+    def test_named_profile_read_does_not_create_missing_store(self):
+        from hermes_cli import profiles as profiles_mod
+
+        worker_home = profiles_mod.get_profile_dir("worker")
+        worker_home.mkdir(parents=True)
+        db_path = worker_home / "state.db"
+
+        resp = self.client.get("/api/sessions?profile=worker")
+
+        assert resp.status_code == 404
+        assert not db_path.exists()
+        assert not Path(f"{db_path}-wal").exists()
+        assert not Path(f"{db_path}-shm").exists()
 
     def test_sessions_endpoint_reads_requested_profile(self):
         """The machine dashboard's global profile switcher must retarget
@@ -1646,6 +1748,64 @@ class TestWebServerEndpoints:
         payload = resp.json()
         assert payload["session_id"] == "desktop-tip"
         assert [m["content"] for m in payload["messages"]] == ["after compression"]
+
+    def test_managed_session_messages_only_return_customer_content(self, monkeypatch):
+        from hermes_cli import web_server
+        from hermes_state import SessionDB
+
+        marker = (
+            "--- END OF CONTEXT SUMMARY — respond to the message below, "
+            "not the summary above ---"
+        )
+        db = SessionDB()
+        try:
+            db.create_session(session_id="managed-messages", source="cli")
+            db.append_message("managed-messages", role="system", content="private instructions")
+            db.append_message("managed-messages", role="user", content="customer question")
+            db.append_message(
+                "managed-messages",
+                role="assistant",
+                content="",
+                reasoning="private chain of thought",
+                tool_calls=[{"id": "call-1", "function": {"name": "terminal", "arguments": "{}"}}],
+            )
+            db.append_message(
+                "managed-messages",
+                role="tool",
+                content="private tool output",
+                tool_call_id="call-1",
+            )
+            db.append_message(
+                "managed-messages",
+                role="assistant",
+                content="[CONTEXT SUMMARY]: private handoff",
+            )
+            db.append_message(
+                "managed-messages",
+                role="assistant",
+                content=f"[CONTEXT SUMMARY]: private handoff\n{marker}\ncustomer answer",
+                reasoning="private reasoning",
+            )
+        finally:
+            db.close()
+
+        monkeypatch.setattr(
+            web_server,
+            "_dashboard_branding_settings",
+            lambda: {"product": "oxaide"},
+        )
+
+        response = self.client.get("/api/sessions/managed-messages/messages")
+        assert response.status_code == 200
+        messages = response.json()["messages"]
+        assert [(message["role"], message["content"]) for message in messages] == [
+            ("user", "customer question"),
+            ("assistant", "customer answer"),
+        ]
+        assert all(
+            not ({"reasoning", "tool_calls", "tool_name", "tool_call_id"} & message.keys())
+            for message in messages
+        )
 
     def test_get_sessions_archived_is_boolean(self):
         from hermes_state import SessionDB

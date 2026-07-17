@@ -1,5 +1,6 @@
 """Tests for the dashboard-managed file browser API."""
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -78,19 +79,21 @@ def test_forced_root_file_upload_list_read_delete_roundtrip(forced_files_client)
         },
     )
     assert created.status_code == 200
-    assert created.json()["entry"]["path"] == str(file_path)
-    assert created.json()["locked_root"] == str(root)
+    assert created.json()["path"] == "/out/hello.txt"
+    assert created.json()["entry"]["path"] == "/out/hello.txt"
+    assert created.json()["locked_root"] == "/"
     assert created.json()["can_change_path"] is False
+    assert str(root) not in created.text
     assert file_path.read_text() == "hello"
 
-    listing = client.get("/api/files", params={"path": str(root / "out")})
+    listing = client.get("/api/files", params={"path": "/out"})
     assert listing.status_code == 200
-    assert listing.json()["path"] == str(root / "out")
-    assert listing.json()["parent"] == str(root)
+    assert listing.json()["path"] == "/out"
+    assert listing.json()["parent"] == "/"
     assert listing.json()["entries"] == [
         {
             "name": "hello.txt",
-            "path": str(file_path),
+            "path": "/out/hello.txt",
             "is_directory": False,
             "size": 5,
             "mtime": pytest.approx(file_path.stat().st_mtime),
@@ -98,16 +101,19 @@ def test_forced_root_file_upload_list_read_delete_roundtrip(forced_files_client)
         }
     ]
 
-    read = client.get("/api/files/read", params={"path": str(file_path)})
+    read = client.get("/api/files/read", params={"path": "/out/hello.txt"})
     assert read.status_code == 200
+    assert read.json()["path"] == "/out/hello.txt"
     assert read.json()["data_url"] == "data:text/plain;base64,aGVsbG8="
 
     deleted = client.request(
         "DELETE",
         "/api/files",
-        json={"path": str(file_path)},
+        json={"path": "/out/hello.txt"},
     )
     assert deleted.status_code == 200
+    assert deleted.json()["path"] == "/out/hello.txt"
+    assert str(root) not in deleted.text
     assert not file_path.exists()
 
 
@@ -118,11 +124,14 @@ def test_directory_management_requires_recursive_delete_for_nonempty_dirs(forced
 
     created = client.post("/api/files/mkdir", json={"path": str(checkpoints_path)})
     assert created.status_code == 200
+    assert created.json()["path"] == "/runs/checkpoints"
+    assert created.json()["entry"]["path"] == "/runs/checkpoints"
+    assert str(root) not in created.text
     assert checkpoints_path.is_dir()
 
     listing = client.get("/api/files", params={"path": str(runs_path)})
     assert listing.status_code == 200
-    assert listing.json()["entries"][0]["path"] == str(checkpoints_path)
+    assert listing.json()["entries"][0]["path"] == "/runs/checkpoints"
     assert listing.json()["entries"][0]["is_directory"] is True
 
     non_recursive = client.request(
@@ -131,6 +140,8 @@ def test_directory_management_requires_recursive_delete_for_nonempty_dirs(forced
         json={"path": str(runs_path), "recursive": False},
     )
     assert non_recursive.status_code == 409
+    assert non_recursive.json()["detail"] == "Could not delete path"
+    assert str(root) not in non_recursive.text
 
     recursive = client.request(
         "DELETE",
@@ -138,6 +149,8 @@ def test_directory_management_requires_recursive_delete_for_nonempty_dirs(forced
         json={"path": str(runs_path), "recursive": True},
     )
     assert recursive.status_code == 200
+    assert recursive.json()["path"] == "/runs"
+    assert str(root) not in recursive.text
     assert not runs_path.exists()
 
 
@@ -151,7 +164,10 @@ def test_forced_root_paths_stay_under_root(forced_files_client, tmp_path):
     assert traversal.status_code == 400
 
     outside_absolute = client.get("/api/files", params={"path": str(outside)})
-    assert outside_absolute.status_code == 403
+    # Under a locked root, all leading-slash paths use the virtual namespace.
+    # This resolves safely beneath root and does not reveal whether the host
+    # path exists outside it.
+    assert outside_absolute.status_code == 404
 
     root_delete = client.request(
         "DELETE",
@@ -262,7 +278,10 @@ def test_local_mode_defaults_to_home_and_can_jump_to_absolute_path(local_files_c
     assert default_listing.json()["path"] == str(home)
     assert default_listing.json()["locked_root"] is None
     assert default_listing.json()["can_change_path"] is True
-    assert default_listing.json()["entries"][0]["path"] == str(home / "home.txt")
+    home_entry = next(
+        entry for entry in default_listing.json()["entries"] if entry["name"] == "home.txt"
+    )
+    assert home_entry["path"] == str(home / "home.txt")
 
     other = tmp_path / "other"
     other.mkdir()
@@ -358,6 +377,39 @@ def test_download_returns_file_as_attachment(forced_files_client):
     assert "hello.txt" in disposition
 
 
+def test_download_stat_error_hides_locked_physical_path(monkeypatch, tmp_path):
+    root = tmp_path / "private-host-root"
+    policy = web_server.ManagedFilesPolicy(
+        default_path=root,
+        locked_root=root,
+        can_change_path=False,
+    )
+
+    class BrokenTarget:
+        def exists(self):
+            return True
+
+        def is_file(self):
+            return True
+
+        def stat(self):
+            raise OSError(f"cannot stat {root}/report.pdf")
+
+    monkeypatch.setattr(
+        web_server,
+        "_resolve_managed_path",
+        lambda *_args, **_kwargs: (policy, BrokenTarget(), "/report.pdf"),
+    )
+    monkeypatch.setattr(web_server, "_is_sensitive_path", lambda _target: False)
+
+    with pytest.raises(web_server.HTTPException) as exc_info:
+        asyncio.run(web_server.download_managed_file(SimpleNamespace(), "/report.pdf"))
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "Could not stat file"
+    assert str(root) not in exc_info.value.detail
+
+
 def test_large_file_uses_download_endpoint_beyond_preview_cap(forced_files_client, monkeypatch):
     client, root = forced_files_client
     root.mkdir(parents=True, exist_ok=True)
@@ -448,8 +500,10 @@ def test_stream_upload_roundtrip(forced_files_client):
         files={"file": ("backup.zip", payload, "application/zip")},
     )
     assert created.status_code == 200, created.text
-    assert created.json()["entry"]["path"] == str(file_path)
-    assert created.json()["locked_root"] == str(root)
+    assert created.json()["path"] == "/out/backup.zip"
+    assert created.json()["entry"]["path"] == "/out/backup.zip"
+    assert created.json()["locked_root"] == "/"
+    assert str(root) not in created.text
     # Bytes land verbatim — no base64 round-trip, no corruption.
     assert file_path.read_bytes() == payload
 

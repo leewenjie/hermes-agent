@@ -5,6 +5,7 @@ import type { AppLayoutProgressProps } from '../app/interfaces.js'
 import { toggleTodoCollapsed, useTurnSelector } from '../app/turnStore.js'
 import { $uiState } from '../app/uiStore.js'
 import { blockRenders } from '../domain/blockLayout.js'
+import { isManagedTranscriptMessage } from '../domain/managedPresentation.js'
 import { appendToolShelfMessage } from '../lib/liveProgress.js'
 import type { ActiveTool, DetailsMode, Msg, SectionVisibility } from '../types.js'
 
@@ -36,8 +37,9 @@ export const StreamingAssistant = memo(function StreamingAssistant({
   const streaming = useTurnSelector(state => state.streaming)
   const activeTools = useTurnSelector(state => state.tools)
   const showStreamingArea = Boolean(streaming)
+  const managedOxaide = ui.theme.brand.org === 'Oxaide'
 
-  if (!progress.showProgressArea && !showStreamingArea && !activeTools.length) {
+  if ((!progress.showProgressArea || managedOxaide) && !showStreamingArea && (!activeTools.length || managedOxaide)) {
     return null
   }
 
@@ -46,9 +48,13 @@ export const StreamingAssistant = memo(function StreamingAssistant({
   // back into settled history (prevMsg). Tracking the predecessor rather than
   // the live text is what keeps the streaming block from jumping when it
   // flushes into a settled segment.
-  const blocks: LiveBlock[] = groupedSegments(streamSegments).map((msg, i) => ({ key: `seg:${i}`, msg }))
+  const visibleSegments = managedOxaide
+    ? groupedSegments(streamSegments).filter(isManagedTranscriptMessage)
+    : groupedSegments(streamSegments)
 
-  if (activeTools.length) {
+  const blocks: LiveBlock[] = visibleSegments.map((msg, i) => ({ key: `seg:${i}`, msg }))
+
+  if (!managedOxaide && activeTools.length) {
     blocks.push({ key: 'active-tools', msg: { kind: 'trail', role: 'system', text: '' }, tools: activeTools })
   }
 
@@ -58,7 +64,7 @@ export const StreamingAssistant = memo(function StreamingAssistant({
       key: 'streaming',
       msg: { role: 'assistant', text: streaming, ...(streamPendingTools.length && { tools: streamPendingTools }) }
     })
-  } else if (streamPendingTools.length) {
+  } else if (!managedOxaide && streamPendingTools.length) {
     blocks.push({ key: 'pending-tools', msg: { kind: 'trail', role: 'system', text: '', tools: streamPendingTools } })
   }
 
@@ -104,7 +110,9 @@ export const LiveTodoPanel = memo(function LiveTodoPanel() {
   const todos = useTurnSelector(state => state.todos)
   const collapsed = useTurnSelector(state => state.todoCollapsed)
 
-  return <TodoPanel collapsed={collapsed} onToggle={toggleTodoCollapsed} t={ui.theme} todos={todos} />
+  return ui.theme.brand.org === 'Oxaide' ? null : (
+    <TodoPanel collapsed={collapsed} onToggle={toggleTodoCollapsed} t={ui.theme} todos={todos} />
+  )
 })
 
 interface StreamingAssistantProps {

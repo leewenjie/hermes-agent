@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest'
 
 import { FACES } from '../content/faces.js'
 import { HOTKEYS } from '../content/hotkeys.js'
-import { PLACEHOLDERS } from '../content/placeholders.js'
+import { OXAIDE_PLACEHOLDERS, PLACEHOLDERS } from '../content/placeholders.js'
+import { OXAIDE_RESEARCH_COMMANDS, OXAIDE_RESEARCH_SHORTCUTS } from '../content/researchHelp.js'
 import { TOOL_VERBS, VERBS } from '../content/verbs.js'
 import { ROLE } from '../domain/roles.js'
 import { ZERO } from '../domain/usage.js'
@@ -13,10 +14,21 @@ describe('constants', () => {
   it('ZERO', () => expect(ZERO).toEqual({ calls: 0, input: 0, output: 0, total: 0 }))
 
   it('string arrays are populated', () => {
-    for (const arr of [FACES, PLACEHOLDERS, VERBS]) {
+    for (const arr of [FACES, OXAIDE_PLACEHOLDERS, PLACEHOLDERS, VERBS]) {
       expect(arr.length).toBeGreaterThan(0)
       arr.forEach(s => expect(typeof s).toBe('string'))
     }
+  })
+
+  it('keeps Oxaide placeholders focused on research rather than coding', () => {
+    expect(OXAIDE_PLACEHOLDERS.join(' ')).toMatch(/research|company|market|thesis/i)
+    expect(OXAIDE_PLACEHOLDERS.join(' ')).not.toMatch(/codebase|lint|auth module|config loader/i)
+  })
+
+  it('keeps Oxaide help focused on customer research actions', () => {
+    const help = [...OXAIDE_RESEARCH_COMMANDS, ...OXAIDE_RESEARCH_SHORTCUTS].flat().join(' ')
+    expect(help).toMatch(/research|response|questions/i)
+    expect(help).not.toMatch(/quit|details|tool|shell|editor|gateway|model|system prompt/i)
   })
 
   it('HOTKEYS are [key, desc] pairs', () => {

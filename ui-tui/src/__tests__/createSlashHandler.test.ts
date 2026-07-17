@@ -5,6 +5,7 @@ import { getOverlayState, resetOverlayState } from '../app/overlayStore.js'
 import { DASHBOARD_EXIT_DISABLED_MESSAGE, DASHBOARD_UPDATE_DISABLED_MESSAGE } from '../app/slash/commands/core.js'
 import { getUiState, patchUiState, resetUiState } from '../app/uiStore.js'
 import type * as EnvModule from '../config/env.js'
+import { isOxaideResearchCommand } from '../content/researchHelp.js'
 import { TUI_SESSION_MODEL_FLAG } from '../domain/slash.js'
 
 // DASHBOARD_TUI_MODE resolves once at module load from HERMES_TUI_DASHBOARD,
@@ -34,6 +35,32 @@ describe('createSlashHandler', () => {
 
     expect(createSlashHandler(ctx)('/resume')).toBe(true)
     expect(getOverlayState().sessions).toBe(true)
+  })
+
+  it('blocks operator commands in an Oxaide research workspace', () => {
+    const theme = getUiState().theme
+    patchUiState({ theme: { ...theme, brand: { ...theme.brand, org: 'Oxaide' } } })
+    const ctx = buildCtx()
+
+    expect(createSlashHandler(ctx)('/status')).toBe(true)
+    expect(ctx.transcript.panel).toHaveBeenCalledWith('Research command unavailable', [
+      { text: 'Use /help to see the actions available in this workspace.' }
+    ])
+    expect(ctx.gateway.gw.request).not.toHaveBeenCalled()
+    expect(ctx.gateway.rpc).not.toHaveBeenCalled()
+  })
+
+  it('keeps customer research commands available in an Oxaide workspace', () => {
+    const theme = getUiState().theme
+    patchUiState({ theme: { ...theme, brand: { ...theme.brand, org: 'Oxaide' } } })
+    const ctx = buildCtx()
+
+    expect(createSlashHandler(ctx)('/resume')).toBe(true)
+    expect(getOverlayState().sessions).toBe(true)
+  })
+
+  it('keeps the browser image bridge allowed but outside customer help', () => {
+    expect(isOxaideResearchCommand('image')).toBe(true)
   })
 
   it('resumes a prior session by id when /resume has an argument', () => {

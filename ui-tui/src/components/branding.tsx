@@ -160,6 +160,12 @@ function CollapseToggle({
 const SKILLS_MAX = 8
 const TOOLSETS_MAX = 8
 
+const OXAIDE_RESEARCH_METHODS = [
+  'Thesis and evidence review',
+  'Return and risk analysis',
+  'Market data and quote provenance'
+]
+
 export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
   const term = useStdout().stdout?.columns ?? 100
   const cols = Math.max(20, Math.min(term, maxWidth ?? term))
@@ -287,6 +293,32 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
     }
 
     return <Text color={t.color.muted}>{info.system_prompt}</Text>
+  }
+
+  if (isHostedOxaide) {
+    return (
+      <Box borderColor={t.color.border} borderStyle="round" flexDirection="column" marginBottom={1} paddingX={2} paddingY={1}>
+        <Text bold color={t.color.primary}>
+          Research workspace ready
+        </Text>
+        <Text color={t.color.muted}>Ask about a company, market, asset, or saved thesis.</Text>
+
+        <Box flexDirection="column" marginTop={1}>
+          <Text bold color={t.color.accent}>
+            Research methods
+          </Text>
+          {OXAIDE_RESEARCH_METHODS.map(method => (
+            <Text color={t.color.text} key={method}>
+              • {method}
+            </Text>
+          ))}
+        </Box>
+
+        <Box marginTop={1}>
+          <Text color={t.color.muted}>Sources and limits stay visible. Final decisions remain yours.</Text>
+        </Box>
+      </Box>
+    )
   }
 
   return (

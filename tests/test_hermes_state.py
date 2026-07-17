@@ -597,6 +597,27 @@ class TestSessionLifecycle:
         finally:
             db.close()
 
+    def test_read_only_db_discovers_existing_fts_indexes(self, tmp_path):
+        db_path = tmp_path / "state.db"
+        writable = SessionDB(db_path=db_path)
+        try:
+            writable.create_session(session_id="searchable", source="cli")
+            writable.append_message(
+                "searchable",
+                role="user",
+                content="read only profile search sentinel",
+            )
+        finally:
+            writable.close()
+
+        readonly = SessionDB(db_path=db_path, read_only=True)
+        try:
+            assert readonly._fts_enabled is True
+            results = readonly.search_messages("sentinel")
+            assert [row["session_id"] for row in results] == ["searchable"]
+        finally:
+            readonly.close()
+
     def test_existing_fts_tables_do_not_break_without_fts5(
         self, tmp_path, monkeypatch
     ):

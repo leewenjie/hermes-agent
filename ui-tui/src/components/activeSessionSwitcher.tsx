@@ -84,7 +84,7 @@ export const relativeSessionAge = (ts?: number) => {
 
 /** Drop already-live sessions from the resumable history list (dedupe by id). */
 export const resumableHistory = (history: readonly SessionListItem[], live: readonly SessionActiveItem[]) => {
-  const liveIds = new Set(live.map(s => s.id))
+  const liveIds = new Set(live.map(s => s.session_key || s.id))
 
   return history.filter(h => !liveIds.has(h.id))
 }
@@ -122,6 +122,21 @@ export const orchestratorContextHintSegments = (newSelected: boolean): Orchestra
         { role: 'text', text: ' switch · ' },
         { role: 'hotkey', text: 'Ctrl+D' },
         { role: 'text', text: ' close' }
+      ]
+
+export const managedOrchestratorContextHintSegments = (newSelected: boolean): OrchestratorHintSegment[] =>
+  newSelected
+    ? [
+        { role: 'label', text: 'New research:' },
+        { role: 'text', text: ' type a question · ' },
+        { role: 'hotkey', text: 'Enter' },
+        { role: 'text', text: ' start' }
+      ]
+    : [
+        { role: 'label', text: 'Research row:' },
+        { role: 'text', text: ' ' },
+        { role: 'hotkey', text: 'Enter' },
+        { role: 'text', text: ' open' }
       ]
 
 export const orchestratorGlobalHotkeyHintSegments: OrchestratorHintSegment[] = [
@@ -291,6 +306,7 @@ export function ActiveSessionSwitcher({
   onSelect,
   t
 }: ActiveSessionSwitcherProps) {
+  const managedOxaide = t.brand.org === 'Oxaide'
   const [items, setItems] = useState<SessionActiveItem[]>([])
   const [history, setHistory] = useState<SessionListItem[]>([])
   const [err, setErr] = useState('')
@@ -451,9 +467,9 @@ export function ActiveSessionSwitcher({
       }
 
       setDraft('')
-      onNewPrompt(prompt, draftModel || undefined)
+      onNewPrompt(prompt, managedOxaide ? undefined : draftModel || undefined)
     },
-    [draftModel, onNewPrompt]
+    [draftModel, managedOxaide, onNewPrompt]
   )
 
   const closeSelected = useCallback(async () => {
@@ -592,7 +608,7 @@ export function ActiveSessionSwitcher({
       return
     }
 
-    if (key.tab) {
+    if (key.tab && !managedOxaide) {
       if (newSelected) {
         setPickingModel(true)
       }
@@ -647,7 +663,7 @@ export function ActiveSessionSwitcher({
     }
   })
 
-  if (pickingModel) {
+  if (pickingModel && !managedOxaide) {
     return (
       <ModelPicker
         allowPersistGlobal={false}
@@ -685,7 +701,11 @@ export function ActiveSessionSwitcher({
       <Text bold color={t.color.accent}>
         Sessions
       </Text>
-      <Text color={t.color.muted}>{sessionsCountLabel(items.length, history.length)}</Text>
+      <Text color={t.color.muted}>
+        {managedOxaide
+          ? `${items.length + history.length} saved ${items.length + history.length === 1 ? 'research' : 'research sessions'}`
+          : sessionsCountLabel(items.length, history.length)}
+      </Text>
 
       {err && <Text color={t.color.label}>error: {err}</Text>}
 
@@ -706,17 +726,17 @@ export function ActiveSessionSwitcher({
           </Text>
         </Box>
 
-        <Box {...fixedSessionColumnStyle()} width={11}>
+        {!managedOxaide && <Box {...fixedSessionColumnStyle()} width={11}>
           <Text color={newRowTextColor ?? t.color.muted} wrap="truncate-end">
             ✎ draft
           </Text>
-        </Box>
+        </Box>}
 
-        <Box {...fixedSessionColumnStyle()} width={18}>
+        {!managedOxaide && <Box {...fixedSessionColumnStyle()} width={18}>
           <Text color={newRowTextColor ?? t.color.muted} wrap="truncate-end">
             {draftModelDisplayLabel(draftModel)}
           </Text>
-        </Box>
+        </Box>}
 
         <Box flexGrow={1} flexShrink={1} minWidth={0}>
           <Text bold={newSelectedRow} color={newRowTextColor ?? t.color.muted} wrap="truncate-end">
@@ -762,11 +782,11 @@ export function ActiveSessionSwitcher({
                 </Text>
               </Box>
 
-              <Box {...fixedSessionColumnStyle()} width={11}>
+              {!managedOxaide && <Box {...fixedSessionColumnStyle()} width={11}>
                 <Text bold={selected} color={rowTextColor ?? t.color.muted} wrap="truncate-end">
                   {h.id}
                 </Text>
-              </Box>
+              </Box>}
 
               <Box {...fixedSessionColumnStyle()} width={11}>
                 <Text color={rowTextColor ?? t.color.muted} wrap="truncate-end">
@@ -774,11 +794,11 @@ export function ActiveSessionSwitcher({
                 </Text>
               </Box>
 
-              <Box {...fixedSessionColumnStyle()} width={18}>
+              {!managedOxaide && <Box {...fixedSessionColumnStyle()} width={18}>
                 <Text color={rowTextColor ?? t.color.muted} wrap="truncate-end">
                   {h.message_count} msgs
                 </Text>
-              </Box>
+              </Box>}
 
               <Box flexGrow={1} flexShrink={1} minWidth={0}>
                 <Text
@@ -816,7 +836,7 @@ export function ActiveSessionSwitcher({
               </Text>
             </Box>
 
-            <Box {...fixedSessionColumnStyle()} width={11}>
+            {!managedOxaide && <Box {...fixedSessionColumnStyle()} width={11}>
               <Text
                 bold={selected}
                 color={rowTextColor ?? (current ? t.color.label : t.color.muted)}
@@ -824,9 +844,9 @@ export function ActiveSessionSwitcher({
               >
                 {current ? 'current' : s.id}
               </Text>
-            </Box>
+            </Box>}
 
-            <Box {...fixedSessionColumnStyle()} width={11}>
+            {!managedOxaide && <Box {...fixedSessionColumnStyle()} width={11}>
               <Text
                 color={
                   rowTextColor ??
@@ -836,13 +856,13 @@ export function ActiveSessionSwitcher({
               >
                 {STATUS_GLYPH[status] ?? '·'} {STATUS_LABEL[status] ?? status}
               </Text>
-            </Box>
+            </Box>}
 
-            <Box {...fixedSessionColumnStyle()} width={18}>
+            {!managedOxaide && <Box {...fixedSessionColumnStyle()} width={18}>
               <Text color={rowTextColor ?? t.color.muted} wrap="truncate-end">
                 {shortModel(s.model)}
               </Text>
-            </Box>
+            </Box>}
 
             <Box flexGrow={1} flexShrink={1} minWidth={0}>
               <Text bold={selected} color={rowTextColor ?? t.color.muted} wrap="truncate-end">
@@ -861,16 +881,25 @@ export function ActiveSessionSwitcher({
             <Text color={t.color.label}>prompt › </Text>
             <TextInput columns={promptColumns} onChange={setDraft} onSubmit={submitDraft} value={draft} />
           </Box>
-          <OrchestratorHintText segments={orchestratorContextHintSegments(true)} t={t} />
-          <Text color={t.color.muted} wrap="truncate-end">
+          <OrchestratorHintText
+            segments={
+              managedOxaide ? managedOrchestratorContextHintSegments(true) : orchestratorContextHintSegments(true)
+            }
+            t={t}
+          />
+          {!managedOxaide && <Text color={t.color.muted} wrap="truncate-end">
             model: {draftModelDisplayLabel(draftModel)}
-          </Text>
+          </Text>}
         </>
       ) : (
         <Box flexDirection="column" marginTop={1}>
           <OrchestratorHintText
             segments={
-              selectedKind === 'history' ? resumeRowContextHintSegments : orchestratorContextHintSegments(false)
+              managedOxaide
+                ? managedOrchestratorContextHintSegments(false)
+                : selectedKind === 'history'
+                  ? resumeRowContextHintSegments
+                  : orchestratorContextHintSegments(false)
             }
             t={t}
           />

@@ -3,6 +3,7 @@ import { forceRedraw, type MouseTrackingMode } from '@hermes/ink'
 import { DASHBOARD_TUI_MODE, NO_CONFIRM_DESTRUCTIVE } from '../../../config/env.js'
 import { dailyFortune, randomFortune } from '../../../content/fortunes.js'
 import { HOTKEYS } from '../../../content/hotkeys.js'
+import { OXAIDE_RESEARCH_COMMANDS, OXAIDE_RESEARCH_SHORTCUTS } from '../../../content/researchHelp.js'
 import { isSectionName, nextDetailsMode, parseDetailsMode, SECTION_NAMES } from '../../../domain/details.js'
 import type {
   ConfigGetValueResponse,
@@ -89,6 +90,21 @@ export const coreCommands: SlashCommand[] = [
     help: 'list commands + hotkeys',
     name: 'help',
     run: (_arg, ctx) => {
+      if (ctx.ui.theme.brand.org === 'Oxaide') {
+        ctx.transcript.panel('Research help', [
+          {
+            rows: OXAIDE_RESEARCH_COMMANDS,
+            title: 'Research actions'
+          },
+          {
+            rows: OXAIDE_RESEARCH_SHORTCUTS,
+            title: 'Shortcuts'
+          }
+        ])
+
+        return
+      }
+
       const sections: PanelSection[] = (ctx.local.catalog?.categories ?? []).map(cat => ({
         rows: cat.pairs,
         title: cat.name

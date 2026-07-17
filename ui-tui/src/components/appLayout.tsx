@@ -9,7 +9,7 @@ import { $petBox } from '../app/petFlashStore.js'
 import { $uiState } from '../app/uiStore.js'
 import { usePet } from '../app/usePet.js'
 import { INLINE_MODE, SHOW_FPS, TERMUX_TUI_MODE } from '../config/env.js'
-import { PLACEHOLDER } from '../content/placeholders.js'
+import { OXAIDE_PLACEHOLDER, PLACEHOLDER } from '../content/placeholders.js'
 import { prevRenderedMsg } from '../domain/blockLayout.js'
 import {
   COMPOSER_PROMPT_GAP_WIDTH,
@@ -409,7 +409,15 @@ const ComposerPane = memo(function ComposerPane({
                   onChange={composer.updateInput}
                   onPaste={composer.handleTextPaste}
                   onSubmit={composer.submit}
-                  placeholder={composer.empty ? PLACEHOLDER : ui.busy ? 'Ctrl+C to interrupt…' : ''}
+                  placeholder={
+                    composer.empty
+                      ? ui.theme.brand.org === 'Oxaide'
+                        ? OXAIDE_PLACEHOLDER
+                        : PLACEHOLDER
+                      : ui.busy
+                        ? 'Ctrl+C to interrupt…'
+                        : ''
+                  }
                   value={composer.input}
                   voiceRecordKey={composer.voiceRecordKey}
                 />
