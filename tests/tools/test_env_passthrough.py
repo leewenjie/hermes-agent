@@ -217,6 +217,24 @@ class TestTerminalIntegration:
             assert var not in result
             assert "PATH" in result
 
+    def test_passthrough_cannot_override_managed_runtime_secrets(self):
+        """Skills and config cannot expose Oxaide or break-glass credentials."""
+        from tools.environments.local import (
+            _HERMES_MANAGED_RUNTIME_SECRET_KEYS,
+            _sanitize_subprocess_env,
+        )
+
+        for var in _HERMES_MANAGED_RUNTIME_SECRET_KEYS:
+            register_env_passthrough([var])
+            assert not is_env_passthrough(var), (
+                f"{var} should be refused passthrough registration"
+            )
+            result = _sanitize_subprocess_env({var: "synthetic-secret", "PATH": "/usr/bin"})
+            assert var not in result
+            assert result["PATH"] == "/usr/bin"
+
+        assert "HERMES_HOSTED_RUNTIME_SHARED_SECRET" in _HERMES_MANAGED_RUNTIME_SECRET_KEYS
+
     def test_passthrough_allows_auxiliary_non_secret_routing(self):
         """AUXILIARY_*_PROVIDER / _MODEL and GATEWAY_RELAY routing hints are not
         secrets, so a skill may still register them (they're not protected)."""

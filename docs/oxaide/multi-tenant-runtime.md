@@ -92,7 +92,7 @@ Avoid loading unrelated finance-modeling skills by default. Every loaded skill c
 Oxaide tenant runtimes must set both environment pins exactly:
 
 - `HERMES_TUI_TOOLSETS=web,terminal,file,memory,session_search,clarify,delegation,todo,vision`
-- `HERMES_TUI_SKILLS=investment-research,market-return-analysis,stocks`
+- `HERMES_TUI_SKILLS=investment-research,market-return-analysis,polymarket,stocks`
 
 The TUI gateway validates this contract whenever both Oxaide workspace and runtime pins are present. Missing, incomplete, or expanded policies fail agent creation rather than falling back to personal-agent defaults.
 

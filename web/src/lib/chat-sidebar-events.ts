@@ -90,12 +90,14 @@ const RESEARCH_TOOL_LABELS: Record<string, string> = {
 const RESEARCH_METHOD_LABELS: Record<string, string> = {
   "investment-research": "Thesis and evidence review",
   "market-return-analysis": "Return and risk analysis",
+  polymarket: "Prediction-market research",
   stocks: "Market data and quote provenance",
 };
 
 const RESEARCH_METHOD_DESCRIPTIONS: Record<string, string> = {
   "investment-research": "Structure claims, counter-evidence, risks, catalysts, and missing checks.",
   "market-return-analysis": "Compare returns, volatility, drawdowns, and distributions with stated assumptions.",
+  polymarket: "Review event probabilities, price history, volume, and order books from public market data.",
   stocks: "Fetch timestamped quotes and adjusted history with source metadata and limitations.",
 };
 

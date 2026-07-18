@@ -1,6 +1,6 @@
 ---
 name: polymarket
-description: "Query Polymarket: markets, prices, orderbooks, history."
+description: "Query point-in-time Polymarket public market data."
 version: 1.0.0
 author: Hermes Agent + Teknium
 tags: [polymarket, prediction-markets, market-data, trading]
@@ -16,17 +16,19 @@ See `references/api-endpoints.md` for the full endpoint reference with curl exam
 
 ## When to Use
 
-- User asks about prediction markets, betting odds, or event probabilities
-- User wants to know "what are the odds of X happening?"
+- User asks about prediction markets or market-implied event likelihoods
+- User wants a point-in-time view of how a Polymarket contract is priced
 - User asks about Polymarket specifically
 - User wants market prices, orderbook data, or price history
-- User asks to monitor or track prediction market movements
+- User asks to compare timestamped prediction-market observations
 
 ## Key Concepts
 
 - **Events** contain one or more **Markets** (1:many relationship)
 - **Markets** are binary outcomes with Yes/No prices between 0.00 and 1.00
-- Prices ARE probabilities: price 0.65 means the market thinks 65% likely
+- Prices are market-implied observations, not objective probabilities: a Yes
+	price of 0.65 can be presented as a 65% market-implied likelihood at the
+	retrieval time, subject to liquidity, spread, participant, and market-rule risk
 - `outcomePrices` field: JSON-encoded array like `["0.80", "0.20"]`
 - `clobTokenIds` field: JSON-encoded array of two token IDs [Yes, No] for price/book queries
 - `conditionId` field: hex string used for price history queries
@@ -35,7 +37,7 @@ See `references/api-endpoints.md` for the full endpoint reference with curl exam
 ## Three Public APIs
 
 1. **Gamma API** at `gamma-api.polymarket.com` — Discovery, search, browsing
-2. **CLOB API** at `clob.polymarket.com` — Real-time prices, orderbooks, history
+2. **CLOB API** at `clob.polymarket.com` — Point-in-time prices, orderbooks, history
 3. **Data API** at `data-api.polymarket.com` — Trades, open interest
 
 ## Typical Workflow
@@ -44,14 +46,16 @@ When a user asks about prediction market odds:
 
 1. **Search** using the Gamma API public-search endpoint with their query
 2. **Parse** the response — extract events and their nested markets
-3. **Present** market question, current prices as percentages, and volume
+3. **Present** market question, retrieval timestamp, observed prices as
+	market-implied percentages, and volume
 4. **Deep dive** if asked — use clobTokenIds for orderbook, conditionId for history
 
 ## Presenting Results
 
 Format prices as percentages for readability:
 - outcomePrices `["0.652", "0.348"]` becomes "Yes: 65.2%, No: 34.8%"
-- Always show the market question and probability
+- Always show the market question, source, retrieval time, and observed price
+- Label percentages as market-implied likelihoods, not objective probabilities
 - Include volume when available
 
 Example: `"Will X happen?" — 65.2% Yes ($1.2M volume)`
@@ -72,6 +76,10 @@ Generous — unlikely to hit for normal usage:
 ## Limitations
 
 - This skill is read-only — it does not support placing trades
+- Each query is a point-in-time retrieval, not a streaming feed, continuous
+	monitoring service, or alerting system
+- Data may be delayed, stale, thinly traded, or unavailable; verify timestamps,
+	liquidity, spreads, market rules, and resolution criteria before drawing conclusions
 - Trading requires wallet-based crypto authentication (EIP-712 signatures)
 - Some new markets may have empty price history
-- Geographic restrictions apply to trading but read-only data is globally accessible
+- Availability and permitted use can vary by jurisdiction, network, and provider policy

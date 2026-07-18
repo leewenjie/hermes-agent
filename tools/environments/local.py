@@ -131,6 +131,22 @@ def _resolve_safe_cwd(cwd: str) -> str:
 # Hermes-internal env vars that should NOT leak into terminal subprocesses.
 _HERMES_PROVIDER_ENV_FORCE_PREFIX = "_HERMES_FORCE_"
 
+# Oxaide managed-runtime control-plane and dashboard break-glass credentials.
+# These are injected into the long-lived dashboard process, but no terminal,
+# execute-code, browser, TUI host, or model-driving CLI child needs them. Keep
+# this exact-name set narrow so non-secret managed metadata (workspace/user IDs,
+# runtime mode, branding, and policy hints) remains available to child tooling.
+_HERMES_MANAGED_RUNTIME_SECRET_KEYS: frozenset[str] = frozenset({
+    "HERMES_HOSTED_RUNTIME_SHARED_SECRET",
+    "HERMES_OXAIDE_DEMO_AUTH_SECRET",
+    "HERMES_OXAIDE_USAGE_SIGNING_SECRET",
+    "HERMES_OXAIDE_RESEARCH_SHARE_SIGNING_SECRET",
+    "HERMES_DASHBOARD_BASIC_AUTH_USERNAME",
+    "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD",
+    "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH",
+    "HERMES_DASHBOARD_BASIC_AUTH_SECRET",
+})
+
 # Hermes-managed AWS *inference* credentials for ``auth_type="aws_sdk"``
 # providers (Bedrock).  Scoped DELIBERATELY NARROW: this lists only the
 # Bedrock-specific bearer token, which is a Hermes inference secret exactly
@@ -310,6 +326,8 @@ def _is_hermes_internal_secret(key: str) -> bool:
     a model-driving CLI legitimately needs matches these patterns.
     """
     upper = key.upper()
+    if upper in _HERMES_MANAGED_RUNTIME_SECRET_KEYS:
+        return True
     if upper.startswith("AUXILIARY_") and (
         upper.endswith("_API_KEY") or upper.endswith("_BASE_URL")
     ):

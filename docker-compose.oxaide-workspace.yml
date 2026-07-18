@@ -32,7 +32,7 @@ services:
       HERMES_TUI_PROVIDER: ${HERMES_OXAIDE_PROVIDER:-azure-foundry}
       HERMES_TUI_MAX_TURNS: "16"
       HERMES_TUI_TOOLSETS: web,terminal,file,memory,session_search,clarify,delegation,todo,vision
-      HERMES_TUI_SKILLS: investment-research,market-return-analysis,stocks
+      HERMES_TUI_SKILLS: investment-research,market-return-analysis,polymarket,stocks
       DELEGATION_MAX_CONCURRENT_CHILDREN: "2"
       DELEGATION_CHILD_TIMEOUT_SECONDS: "240"
       OXAIDE_TURN_ENDPOINT: ${OXAIDE_TURN_ENDPOINT:-https://oxaide.com/api/agents/billing/usage/record}

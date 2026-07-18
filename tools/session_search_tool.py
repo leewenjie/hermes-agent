@@ -29,8 +29,10 @@ shape with no mode parameter, no summary LLM path, and explicit scroll
 support.
 """
 
+import copy
 import json
 import logging
+import os
 from typing import Any, Dict, List, Optional, Union
 
 # Sources that are excluded from session browsing/searching by default.
@@ -139,6 +141,17 @@ def _shape_message(m: Dict[str, Any], anchor_id: Optional[int] = None) -> Dict[s
     # Strip None values to keep payload tight, but always keep content
     # (absent content is meaningful — tool-call-only assistant turns).
     return {k: v for k, v in entry.items() if v is not None or k in ("content",)}
+
+
+def _is_oxaide_managed_runtime() -> bool:
+    """Return whether session access must stay inside one Oxaide tenant DB."""
+    managed_policy = os.environ.get("HERMES_OXAIDE_MANAGED_POLICY", "").strip().lower()
+    if managed_policy in {"1", "true", "yes", "on"}:
+        return True
+    return bool(
+        os.environ.get("HERMES_OXAIDE_WORKSPACE_ID", "").strip()
+        and os.environ.get("HERMES_OXAIDE_RUNTIME_KEY", "").strip()
+    )
 
 
 def _resolve_profile_db(profile: str):
@@ -642,6 +655,21 @@ def session_search(
     ``@session:<profile>/<id>`` link). Scroll wins over read/discovery when an
     anchor is set — the agent has asked for a specific slice.
     """
+    managed_oxaide = _is_oxaide_managed_runtime()
+    if managed_oxaide:
+        if profile is not None and str(profile).strip():
+            return tool_error(
+                "cross-profile session access is unavailable in managed Oxaide runtimes",
+                success=False,
+            )
+        if isinstance(session_id, str) and "/" in session_id:
+            _, _, embedded_id = session_id.partition("/")
+            if embedded_id:
+                return tool_error(
+                    "profile-qualified session ids are unavailable in managed Oxaide runtimes",
+                    success=False,
+                )
+
     if db is None:
         try:
             from hermes_state import SessionDB
@@ -692,18 +720,19 @@ def session_search(
         if json.loads(result).get("success"):
             return result
 
-        # Miss in the target profile — the model may have dropped the owning
-        # profile from the link. Scan every profile and read it from wherever
-        # it lives, tagging the profile it was found in.
-        located, owner = _locate_session_db(sid)
-        if located is not None:
-            try:
-                found = json.loads(_read_session(located, sid))
-            finally:
-                located.close()
-            if found.get("success"):
-                found["profile"] = owner
-                return json.dumps(found, ensure_ascii=False)
+        if not managed_oxaide:
+            # Miss in the target profile — the model may have dropped the
+            # owning profile from the link. Scan every profile and read it
+            # from wherever it lives, tagging the profile it was found in.
+            located, owner = _locate_session_db(sid)
+            if located is not None:
+                try:
+                    found = json.loads(_read_session(located, sid))
+                finally:
+                    located.close()
+                if found.get("success"):
+                    found["profile"] = owner
+                    return json.dumps(found, ensure_ascii=False)
         return result
 
     # Limit clamp [1, 10]
@@ -897,6 +926,27 @@ SESSION_SEARCH_SCHEMA = {
 }
 
 
+def _session_search_schema_overrides() -> dict:
+    """Hide cross-profile instructions and inputs in managed Oxaide mode."""
+    if not _is_oxaide_managed_runtime():
+        return {}
+
+    parameters = copy.deepcopy(SESSION_SEARCH_SCHEMA["parameters"])
+    parameters["properties"].pop("profile", None)
+    description = SESSION_SEARCH_SCHEMA["description"]
+    read_start = description.index("  3) READ")
+    browse_start = description.index("  4) BROWSE")
+    description = (
+        description[:read_start]
+        + "  3) READ — pass `session_id` only (no around_message_id):\n"
+        "     session_search(session_id=\"...\")\n"
+        "     Dumps the whole session by id (first 20 + last 10 messages when \n"
+        "     large). Reads are confined to the current managed tenant's session DB.\n\n"
+        + description[browse_start:]
+    )
+    return {"description": description, "parameters": parameters}
+
+
 # --- Registry ---
 from tools.registry import registry, tool_error
 
@@ -917,5 +967,6 @@ registry.register(
         current_session_id=kw.get("current_session_id"),
     ),
     check_fn=check_session_search_requirements,
+    dynamic_schema_overrides=_session_search_schema_overrides,
     emoji="🔍",
 )
