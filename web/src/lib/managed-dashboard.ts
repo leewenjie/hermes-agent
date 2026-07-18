@@ -2,9 +2,19 @@ export const OXAIDE_MANAGED_PATHS = new Set([
   "/chat",
   "/sessions",
   "/files",
+  "/scheduled-research",
   "/skills",
   "/docs",
 ]);
+
+export function getOxaideManagedPaths(
+  scheduledResearchEnabled: boolean,
+): Set<string> {
+  if (scheduledResearchEnabled) return OXAIDE_MANAGED_PATHS;
+  return new Set(
+    [...OXAIDE_MANAGED_PATHS].filter((path) => path !== "/scheduled-research"),
+  );
+}
 
 export const OXAIDE_RESEARCH_ENGINE_LABEL = "Oxaide Research Engine";
 
@@ -93,11 +103,13 @@ export function customerRuntimeLabel(
 export function filterOxaideManagedRoutes<T>(
   routes: Record<string, T>,
   managed: boolean,
+  scheduledResearchEnabled = true,
 ): Record<string, T> {
   if (!managed) return routes;
+  const managedPaths = getOxaideManagedPaths(scheduledResearchEnabled);
   return Object.fromEntries(
     Object.entries(routes).filter(
-      ([path]) => path === "/" || OXAIDE_MANAGED_PATHS.has(path),
+      ([path]) => path === "/" || managedPaths.has(path),
     ),
   );
 }

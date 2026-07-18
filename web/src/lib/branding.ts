@@ -7,6 +7,7 @@ export interface DashboardBranding {
   accountUrl: string;
   billingUrl: string;
   docsUrl: string;
+  scheduledResearchEnabled: boolean;
 }
 
 declare global {
@@ -20,6 +21,7 @@ declare global {
       account_url?: string;
       billing_url?: string;
       docs_url?: string;
+      scheduled_research_enabled?: boolean;
     };
   }
 }
@@ -49,6 +51,7 @@ export function getDashboardBranding(fallbacks: BrandingFallbacks): DashboardBra
       injected.docs_url?.trim() ||
       fallbacks.docsUrl ||
       "https://hermes-agent.nousresearch.com/docs/",
+    scheduledResearchEnabled: injected.scheduled_research_enabled !== false,
   };
 }
 

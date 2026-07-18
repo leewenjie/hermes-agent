@@ -1721,7 +1721,7 @@ export default function SessionsPage() {
                   onRename={handleRename}
                   onExport={handleExport}
                   onShare={() => setShareSession(s)}
-                  sharingEnabled={Boolean(status?.oxaide_runtime_key)}
+                  sharingEnabled={Boolean(status?.research_sharing_enabled)}
                   resumeInChatEnabled={resumeInChatEnabled}
                 />
               ))}

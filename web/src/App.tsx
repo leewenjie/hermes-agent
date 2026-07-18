@@ -82,6 +82,7 @@ import LogsPage from "@/pages/LogsPage";
 import AnalyticsPage from "@/pages/AnalyticsPage";
 import ModelsPage from "@/pages/ModelsPage";
 import CronPage from "@/pages/CronPage";
+import ScheduledResearchPage from "@/pages/ScheduledResearchPage";
 import ProfilesPage from "@/pages/ProfilesPage";
 import ProfileBuilderPage from "@/pages/ProfileBuilderPage";
 import SkillsPage from "@/pages/SkillsPage";
@@ -105,7 +106,7 @@ import type { StatusResponse, UpdateCheckResponse } from "@/lib/api";
 import { brandingLines, getDashboardBranding } from "@/lib/branding";
 import {
   filterOxaideManagedRoutes,
-  OXAIDE_MANAGED_PATHS,
+  getOxaideManagedPaths,
 } from "@/lib/managed-dashboard";
 
 function RootRedirect() {
@@ -150,6 +151,7 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/models": ModelsPage,
   "/logs": LogsPage,
   "/cron": CronPage,
+  "/scheduled-research": ScheduledResearchPage,
   "/skills": SkillsPage,
   "/plugins": PluginsPage,
   "/mcp": McpPage,
@@ -194,6 +196,7 @@ const BUILTIN_NAV_REST: NavItem[] = [
   },
   { path: "/logs", labelKey: "logs", label: "Logs", icon: FileText },
   { path: "/cron", labelKey: "cron", label: "Cron", icon: Clock },
+  { path: "/scheduled-research", label: "Scheduled research", icon: Clock },
   { path: "/skills", labelKey: "skills", label: "Skills", icon: Package },
   { path: "/plugins", labelKey: "plugins", label: "Plugins", icon: Puzzle },
   { path: "/mcp", label: "MCP", icon: Plug },
@@ -461,8 +464,9 @@ export default function App() {
       filterOxaideManagedRoutes(
         builtinRoutes,
         branding.product === "oxaide",
+        branding.scheduledResearchEnabled,
       ),
-    [branding.product, builtinRoutes],
+    [branding.product, branding.scheduledResearchEnabled, builtinRoutes],
   );
 
   const builtinNav = useMemo(() => {
@@ -478,16 +482,25 @@ export default function App() {
       "/chat": "Research",
       "/sessions": "Research history",
       "/files": "Research files",
+      "/scheduled-research": "Scheduled research",
       "/docs": "Help",
     };
+    const managedPaths = getOxaideManagedPaths(
+      branding.scheduledResearchEnabled,
+    );
     return analyticsFiltered
-      .filter((item) => OXAIDE_MANAGED_PATHS.has(item.path))
+      .filter((item) => managedPaths.has(item.path))
       .map((item) => ({
         ...item,
         label: managedLabels[item.path] ?? item.label,
         labelKey: undefined,
       }));
-  }, [branding.product, embeddedChat, showTokenAnalytics]);
+  }, [
+    branding.product,
+    branding.scheduledResearchEnabled,
+    embeddedChat,
+    showTokenAnalytics,
+  ]);
 
   const sidebarNav = useMemo(
     () => partitionSidebarNav(builtinNav, branding.product === "oxaide" ? [] : manifests),

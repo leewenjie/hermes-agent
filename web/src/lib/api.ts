@@ -662,6 +662,28 @@ export const api = {
   deleteCronJob: (id: string, profile = "default") =>
     fetchJSON<{ ok: boolean }>(`/api/cron/jobs/${encodeURIComponent(id)}?profile=${encodeURIComponent(profile)}`, { method: "DELETE" }),
 
+  // Managed Oxaide recurring research (intentionally not profile-scoped).
+  getResearchSchedules: () =>
+    fetchJSON<ResearchSchedule[]>("/api/research-schedules"),
+  createResearchSchedule: (schedule: ResearchScheduleMutation) =>
+    fetchJSON<ResearchSchedule>("/api/research-schedules", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(schedule),
+    }),
+  updateResearchSchedule: (id: string, schedule: ResearchScheduleMutation) =>
+    fetchJSON<ResearchSchedule>(`/api/research-schedules/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(schedule),
+    }),
+  pauseResearchSchedule: (id: string) =>
+    fetchJSON<ResearchSchedule>(`/api/research-schedules/${encodeURIComponent(id)}/pause`, { method: "POST" }),
+  resumeResearchSchedule: (id: string) =>
+    fetchJSON<ResearchSchedule>(`/api/research-schedules/${encodeURIComponent(id)}/resume`, { method: "POST" }),
+  deleteResearchSchedule: (id: string) =>
+    fetchJSON<{ ok: boolean }>(`/api/research-schedules/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
   // Automation Blueprints — parameterized automation blueprints
   getAutomationBlueprints: () =>
     fetchJSON<{ blueprints: AutomationBlueprint[] }>("/api/cron/blueprints"),
@@ -1845,6 +1867,8 @@ export interface PlatformStatus {
 
 export interface StatusResponse {
   oxaide_runtime_key?: string;
+  /** Managed publication or the loopback-only Oxaide development store. */
+  research_sharing_enabled?: boolean;
   active_sessions: number;
   /** Phase 7: ``true`` when the dashboard's OAuth gate is engaged
    * (public bind, no ``--insecure``). Read alongside ``auth_providers``
@@ -2201,6 +2225,33 @@ export interface ModelsAnalyticsResponse {
 export interface CronJobRepeat {
   times: number | null;
   completed?: number;
+}
+
+export interface ResearchScheduleMutation {
+  name: string;
+  prompt: string;
+  schedule: string;
+}
+
+export interface ResearchSchedule {
+  id: string;
+  name: string;
+  prompt: string;
+  schedule: {
+    kind?: string;
+    expr?: string;
+    minutes?: number;
+    run_at?: string;
+    display?: string;
+  };
+  schedule_input: string;
+  schedule_display: string;
+  enabled: boolean;
+  state: string;
+  created_at?: string | null;
+  last_run_at?: string | null;
+  next_run_at?: string | null;
+  last_status?: string | null;
 }
 
 export interface CronJobMutation {

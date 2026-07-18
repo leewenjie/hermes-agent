@@ -33,6 +33,7 @@ describe("dashboard branding", () => {
           account_url: "https://oxaide.com/app",
           billing_url: "https://oxaide.com/console/billing",
           docs_url: "https://oxaide.com/docs",
+          scheduled_research_enabled: false,
         },
       },
     });
@@ -46,6 +47,7 @@ describe("dashboard branding", () => {
       accountUrl: "https://oxaide.com/app",
       billingUrl: "https://oxaide.com/console/billing",
       docsUrl: "https://oxaide.com/docs",
+      scheduledResearchEnabled: false,
     });
     Object.defineProperty(globalThis, "window", {
       configurable: true,

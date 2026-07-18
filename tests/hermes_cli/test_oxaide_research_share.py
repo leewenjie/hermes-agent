@@ -1,14 +1,20 @@
 import base64
+import json
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
+from hermes_cli import oxaide_research_share
 from hermes_cli.oxaide_research_share import (
     build_research_snapshot,
+    load_local_research_share,
     list_recorded_shares,
+    publish_local_research_share,
     record_share,
     remove_recorded_share,
     ResearchShareError,
+    revoke_local_research_share,
     session_fingerprint,
     sign_research_share_body,
     snapshot_digest,
@@ -141,6 +147,28 @@ def test_snapshot_rejects_active_svg_and_omits_symlinks(tmp_path, monkeypatch):
     assert result["warnings"]
 
 
+def test_snapshot_omits_artifact_replaced_after_validation(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_DASHBOARD_FILES_ROOT", str(tmp_path))
+    chart = tmp_path / "chart.svg"
+    replacement = tmp_path / "replacement.svg"
+    chart.write_text('<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>')
+    replacement.write_text('<svg xmlns="http://www.w3.org/2000/svg"><circle/></svg>')
+    original_open = oxaide_research_share.os.open
+
+    def swap_before_open(path, flags):
+        replacement.replace(chart)
+        return original_open(path, flags)
+
+    monkeypatch.setattr(oxaide_research_share.os, "open", swap_before_open)
+    result = build_research_snapshot(_session(), [
+        {"role": "user", "content": "Question"},
+        {"role": "assistant", "content": f"Answer\nMEDIA:{chart}"},
+    ])
+
+    assert result["snapshot"]["artifacts"] == []
+    assert result["warnings"]
+
+
 def test_session_fingerprint_is_stable_and_hides_raw_ids():
     fingerprint = session_fingerprint("runtime-secret-key", "session-private-id")
     assert fingerprint == session_fingerprint("runtime-secret-key", "session-private-id")
@@ -173,6 +201,31 @@ def test_recorded_shares_survive_dialog_reopen_and_can_be_removed(tmp_path, monk
     assert list_recorded_shares("session-1")[0]["public_url"] == result["public_url"]
     remove_recorded_share(result["share_id"])
     assert list_recorded_shares("session-1") == []
+
+
+def test_local_share_stores_only_token_hash_and_revokes_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    preview = build_research_snapshot(_session(), [
+        {"role": "user", "content": "Question"},
+        {"role": "assistant", "content": "Answer"},
+    ])
+
+    result = publish_local_research_share(
+        session_id="session-1",
+        preview=preview,
+        expires_in_days=7,
+        base_url="http://127.0.0.1:9119/",
+    )
+    token = urlsplit(result["public_url"]).path.rsplit("/", 1)[-1]
+    stored_text = (tmp_path / "oxaide-research-share-dev-snapshots.json").read_text()
+    stored = json.loads(stored_text)
+
+    assert token not in stored_text
+    assert len(stored[0]["token_sha256"]) == 64
+    assert load_local_research_share(token)["snapshot"] == preview["snapshot"]
+
+    revoke_local_research_share(result["share_id"])
+    assert load_local_research_share(token) is None
 
 
 def test_research_share_signature_matches_cross_language_vector():
