@@ -17,6 +17,7 @@ from tools.session_search_tool import (
     SESSION_SEARCH_SCHEMA,
     _HIDDEN_SESSION_SOURCES,
     _format_timestamp,
+    _session_search_schema_overrides,
     session_search,
 )
 
@@ -570,6 +571,51 @@ class TestCrossProfileRead:
             assert result["success"] is True, kwargs
             assert result["mode"] == "read"
             assert result["session_id"] == "s_other"
+
+
+class TestManagedOxaideIsolation:
+    def test_explicit_profile_is_rejected_without_opening_it(self, db, monkeypatch):
+        monkeypatch.setenv("HERMES_OXAIDE_MANAGED_POLICY", "true")
+        monkeypatch.setattr(
+            "tools.session_search_tool._resolve_profile_db",
+            lambda *_: pytest.fail("managed search must not open another profile DB"),
+        )
+
+        result = json.loads(session_search(session_id="s_other", profile="other", db=db))
+
+        assert result["success"] is False
+        assert "cross-profile" in result.get("error", "")
+
+    def test_profile_qualified_id_is_rejected(self, db, monkeypatch):
+        monkeypatch.setenv("HERMES_OXAIDE_MANAGED_POLICY", "true")
+
+        result = json.loads(session_search(session_id="other/s_other", db=db))
+
+        assert result["success"] is False
+        assert "profile-qualified" in result.get("error", "")
+
+    def test_bare_id_miss_does_not_scan_profiles(self, db, monkeypatch):
+        monkeypatch.setenv("HERMES_OXAIDE_MANAGED_POLICY", "true")
+        monkeypatch.setattr(
+            "tools.session_search_tool._locate_session_db",
+            lambda *_: pytest.fail("managed search must not scan profile DBs"),
+        )
+
+        result = json.loads(session_search(session_id="missing", db=db))
+
+        assert result["success"] is False
+        assert "not found" in result.get("error", "")
+
+    def test_managed_schema_omits_cross_profile_surface(self, monkeypatch):
+        monkeypatch.setenv("HERMES_OXAIDE_WORKSPACE_ID", "workspace-1")
+        monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", "runtime-key-1")
+
+        overrides = _session_search_schema_overrides()
+
+        assert "profile" not in overrides["parameters"]["properties"]
+        assert "@session:<profile>" not in overrides["description"]
+        assert "profile=\"work\"" not in overrides["description"]
+        assert "current managed tenant's session DB" in overrides["description"]
 
 
 # =========================================================================

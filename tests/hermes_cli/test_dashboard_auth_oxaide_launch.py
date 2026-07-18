@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hermes_cli import web_server
+from hermes_cli import hosted_runtime_bridge
 from hermes_cli.dashboard_auth import clear_providers
 from hermes_cli.dashboard_auth.ws_tickets import _reset_for_tests, consume_ticket
 from hermes_cli.dashboard_auth.routes import (
@@ -73,6 +74,11 @@ def gated_app(monkeypatch):
     monkeypatch.setenv("HERMES_OXAIDE_WORKSPACE_ID", "workspace-1")
     monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", "runtimekey1234567890abcd")
     monkeypatch.setenv("HERMES_HOSTED_RUNTIME_SHARED_SECRET", "test-hosted-runtime-secret-at-least-32-bytes")
+    monkeypatch.setattr(
+        hosted_runtime_bridge,
+        "load_config",
+        lambda: {"hosted_runtime_bridge": {"enabled": True}},
+    )
     clear_providers()
     _reset_for_tests()
     _reset_oxaide_launch_tokens_for_tests()
@@ -415,6 +421,22 @@ def test_hosted_runtime_uses_its_own_shared_secret_on_gated_dashboard(gated_app)
 
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+
+
+def test_hosted_runtime_bridge_is_hidden_when_disabled(gated_app, monkeypatch):
+    client, _secret = gated_app
+    monkeypatch.setattr(
+        hosted_runtime_bridge,
+        "load_config",
+        lambda: {"hosted_runtime_bridge": {"enabled": False}},
+    )
+
+    response = client.get(
+        "/api/hosted/runtime/health",
+        headers={"X-Hermes-Hosted-Secret": "test-hosted-runtime-secret-at-least-32-bytes"},
+    )
+
+    assert response.status_code == 404
 
 
 def test_hosted_runtime_rejects_missing_shared_secret(gated_app):

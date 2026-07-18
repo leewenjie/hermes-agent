@@ -62,6 +62,15 @@ import { Input } from "@nous-research/ui/ui/components/input";
 import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { PluginSlot } from "@/plugins";
+import {
+  filterOxaideMarketCoverage,
+  filterOxaideResearchSkills,
+  isOxaideManagedDashboard,
+} from "@/lib/managed-dashboard";
+import {
+  researchMethodDescription,
+  researchMethodLabel,
+} from "@/lib/chat-sidebar-events";
 
 /* ------------------------------------------------------------------ */
 /*  Types & helpers                                                    */
@@ -140,6 +149,7 @@ export default function SkillsPage() {
   const { toast, showToast } = useToast();
   const { t } = useI18n();
   const { setAfterTitle, setEnd } = usePageHeader();
+  const managedOxaide = isOxaideManagedDashboard();
 
   // ── Profile scoping ──
   // The write target comes from the GLOBAL profile switcher (sidebar) via
@@ -159,7 +169,9 @@ export default function SkillsPage() {
     let cancelled = false;
     Promise.all([
       api.getSkills(selectedProfile || undefined),
-      api.getToolsets(selectedProfile || undefined),
+      managedOxaide
+        ? Promise.resolve([] as ToolsetInfo[])
+        : api.getToolsets(selectedProfile || undefined),
     ])
       .then(([s, tsets]) => {
         if (cancelled) return;
@@ -171,7 +183,7 @@ export default function SkillsPage() {
     return () => {
       cancelled = true;
     };
-  }, [selectedProfile, showToast, t.common.loading]);
+  }, [managedOxaide, selectedProfile, showToast, t.common.loading]);
 
   /* ---- Toggle skill ---- */
   const handleToggleSkill = async (skill: SkillInfo) => {
@@ -262,35 +274,46 @@ export default function SkillsPage() {
   );
 
   /* ---- Derived data ---- */
+  const visibleSkills = useMemo(
+    () => filterOxaideResearchSkills(skills, managedOxaide),
+    [managedOxaide, skills],
+  );
   const lowerSearch = search.toLowerCase();
   const isSearching = search.trim().length > 0;
 
   const searchMatchedSkills = useMemo(() => {
     if (!isSearching) return [];
-    return skills.filter(
+    return visibleSkills.filter(
       (s) =>
         s.name.toLowerCase().includes(lowerSearch) ||
         s.description.toLowerCase().includes(lowerSearch) ||
+        researchMethodLabel(s.name).toLowerCase().includes(lowerSearch) ||
+        researchMethodDescription(s.name).toLowerCase().includes(lowerSearch) ||
         (s.category ?? "").toLowerCase().includes(lowerSearch),
     );
-  }, [skills, isSearching, lowerSearch]);
+  }, [visibleSkills, isSearching, lowerSearch]);
+
+  const marketCoverage = useMemo(
+    () => filterOxaideMarketCoverage(isSearching ? search : ""),
+    [isSearching, search],
+  );
 
   const activeSkills = useMemo(() => {
     if (isSearching) return [];
     if (!activeCategory)
-      return [...skills].sort((a, b) => a.name.localeCompare(b.name));
-    return skills
+      return [...visibleSkills].sort((a, b) => a.name.localeCompare(b.name));
+    return visibleSkills
       .filter((s) =>
         activeCategory === "__none__"
           ? !s.category
           : s.category === activeCategory,
       )
       .sort((a, b) => a.name.localeCompare(b.name));
-  }, [skills, activeCategory, isSearching]);
+  }, [visibleSkills, activeCategory, isSearching]);
 
   const allCategories = useMemo(() => {
     const cats = new Map<string, number>();
-    for (const s of skills) {
+    for (const s of visibleSkills) {
       const key = s.category || "__none__";
       cats.set(key, (cats.get(key) || 0) + 1);
     }
@@ -305,9 +328,9 @@ export default function SkillsPage() {
         name: prettyCategory(key === "__none__" ? null : key, t.common.general),
         count,
       }));
-  }, [skills, t]);
+  }, [visibleSkills, t]);
 
-  const enabledCount = skills.filter((s) => s.enabled).length;
+  const enabledCount = visibleSkills.filter((s) => s.enabled).length;
 
   useLayoutEffect(() => {
     if (loading) {
@@ -319,7 +342,7 @@ export default function SkillsPage() {
       <span className="flex items-center gap-2 whitespace-nowrap text-xs text-muted-foreground">
         {t.skills.enabledOf
           .replace("{enabled}", String(enabledCount))
-          .replace("{total}", String(skills.length))}
+          .replace("{total}", String(visibleSkills.length))}
       </span>,
     );
     setEnd(
@@ -354,7 +377,7 @@ export default function SkillsPage() {
     search,
     setAfterTitle,
     setEnd,
-    skills.length,
+    visibleSkills.length,
     t,
   ]);
 
@@ -373,6 +396,85 @@ export default function SkillsPage() {
     return (
       <div className="flex items-center justify-center py-24">
         <Spinner className="text-2xl text-primary" />
+      </div>
+    );
+  }
+
+  if (managedOxaide) {
+    const displayedSkills = isSearching ? searchMatchedSkills : activeSkills;
+    const hasMatches = displayedSkills.length > 0 || marketCoverage.length > 0;
+    return (
+      <div className="flex flex-col gap-4">
+        <Toast toast={toast} />
+        <Card className="rounded-none">
+          <CardHeader className="px-4 py-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <CardTitle className="flex items-center gap-2 text-sm">
+                  <Package className="h-4 w-4" />
+                  Managed research methods
+                </CardTitle>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Evidence-led workflows preloaded in every Oxaide research session.
+                </p>
+              </div>
+              <Badge tone="success" className="text-xs">
+                {visibleSkills.length} ready
+              </Badge>
+            </div>
+          </CardHeader>
+          <CardContent className="px-4 pb-4">
+            {displayedSkills.length === 0 ? (
+              isSearching && hasMatches ? null : (
+                <p className="py-8 text-center text-sm text-muted-foreground">
+                  {isSearching ? t.skills.noSkillsMatch : t.skills.noSkills}
+                </p>
+              )
+            ) : (
+              <div className="grid gap-1 md:grid-cols-2">
+                {displayedSkills.map((skill) => (
+                  <ResearchSkillRow
+                    key={skill.name}
+                    skill={skill}
+                    noDescriptionLabel={t.skills.noDescription}
+                  />
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+        {(marketCoverage.length > 0 || !isSearching) && (
+          <Card className="rounded-none">
+            <CardHeader className="px-4 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <CardTitle className="flex items-center gap-2 text-sm">
+                    <Globe className="h-4 w-4" />
+                    Markets covered
+                  </CardTitle>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Multi-asset research across traditional, digital and event-driven markets.
+                  </p>
+                </div>
+                <Badge tone="secondary" className="text-xs">
+                  multi-asset
+                </Badge>
+              </div>
+            </CardHeader>
+            <CardContent className="px-4 pb-4">
+              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                {marketCoverage.map((market) => (
+                  <MarketCoverageCard key={market.id} market={market} />
+                ))}
+              </div>
+              <p className="mt-3 border-t border-border pt-3 text-xs leading-relaxed text-muted-foreground">
+                Coverage depth depends on the public, connected or user-supplied data available
+                for the question. Oxaide provides research support, not investment advice or trade
+                execution.
+              </p>
+            </CardContent>
+          </Card>
+        )}
       </div>
     );
   }
@@ -773,6 +875,64 @@ function SkillRow({
       >
         <Pencil />
       </Button>
+    </div>
+  );
+}
+
+function ResearchSkillRow({
+  skill,
+  noDescriptionLabel,
+}: Pick<SkillRowProps, "skill" | "noDescriptionLabel">) {
+  return (
+    <div className="flex items-start gap-3 px-3 py-3 transition-colors hover:bg-muted/40">
+      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
+      <div className="min-w-0 flex-1">
+        <span className="text-sm font-medium text-foreground">
+          {researchMethodLabel(skill.name)}
+        </span>
+        <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+          {skill.description
+            ? researchMethodDescription(skill.name)
+            : noDescriptionLabel}
+        </p>
+        <Badge tone="secondary" className="mt-2 font-mono-ui text-[0.65rem] sm:hidden">
+          {skill.name}
+        </Badge>
+      </div>
+      <Badge tone="secondary" className="hidden font-mono-ui text-[0.65rem] sm:inline-flex">
+        {skill.name}
+      </Badge>
+    </div>
+  );
+}
+
+const MARKET_COVERAGE_ICONS: Record<
+  string,
+  React.ComponentType<{ className?: string }>
+> = {
+  commodities: Blocks,
+  crypto: Cpu,
+  equities: FileText,
+  ficc: ShieldCheck,
+  "fx-macro": Globe,
+  "prediction-markets": Sparkles,
+};
+
+function MarketCoverageCard({
+  market,
+}: {
+  market: ReturnType<typeof filterOxaideMarketCoverage>[number];
+}) {
+  const Icon = MARKET_COVERAGE_ICONS[market.id] ?? Globe;
+  return (
+    <div className="border border-border bg-muted/15 px-3 py-3">
+      <div className="flex items-center gap-2">
+        <Icon className="h-4 w-4 shrink-0 text-emerald-400" />
+        <span className="text-sm font-medium text-foreground">{market.name}</span>
+      </div>
+      <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
+        {market.description}
+      </p>
     </div>
   );
 }

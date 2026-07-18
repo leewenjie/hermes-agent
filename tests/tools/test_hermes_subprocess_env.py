@@ -209,3 +209,40 @@ class TestInternalDynamicSecrets:
         assert {
             "GATEWAY_RELAY_ID", "GATEWAY_RELAY_SECRET", "GATEWAY_RELAY_DELIVERY_KEY",
         } <= _ALWAYS_STRIP_KEYS
+
+
+class TestManagedRuntimeSecrets:
+    """Oxaide launch/usage/share and dashboard credentials are unconditional."""
+
+    def test_hosted_control_plane_secret_is_managed(self):
+        from tools.environments.local import _HERMES_MANAGED_RUNTIME_SECRET_KEYS
+
+        assert "HERMES_HOSTED_RUNTIME_SHARED_SECRET" in _HERMES_MANAGED_RUNTIME_SECRET_KEYS
+
+    def test_stripped_with_and_without_provider_inheritance(self):
+        from tools.environments.local import _HERMES_MANAGED_RUNTIME_SECRET_KEYS
+
+        sample = {
+            key: f"synthetic-{key}" for key in _HERMES_MANAGED_RUNTIME_SECRET_KEYS
+        }
+        for inherit in (False, True):
+            result = _build(
+                {**_PROVIDER_SAMPLE, **sample},
+                inherit_credentials=inherit,
+            )
+            leaked = _HERMES_MANAGED_RUNTIME_SECRET_KEYS & result.keys()
+            assert not leaked, (
+                "Managed runtime secrets leaked with "
+                f"inherit_credentials={inherit}: {sorted(leaked)}"
+            )
+
+    def test_non_secret_managed_metadata_is_preserved(self):
+        result = _build({
+            "HERMES_OXAIDE_WORKSPACE_ID": "workspace-123",
+            "HERMES_OXAIDE_USER_ID": "user-456",
+            "HERMES_OXAIDE_MANAGED_RUNTIME": "1",
+        })
+
+        assert result["HERMES_OXAIDE_WORKSPACE_ID"] == "workspace-123"
+        assert result["HERMES_OXAIDE_USER_ID"] == "user-456"
+        assert result["HERMES_OXAIDE_MANAGED_RUNTIME"] == "1"

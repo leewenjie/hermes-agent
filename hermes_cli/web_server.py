@@ -324,6 +324,7 @@ app.add_middleware(
 from hermes_cli.dashboard_auth.public_paths import (
     PUBLIC_API_PATHS as _PUBLIC_API_PATHS,
 )
+from hermes_cli import hosted_runtime_bridge
 
 
 def _has_valid_session_token(request: Request) -> bool:
@@ -350,7 +351,7 @@ def _has_valid_session_token(request: Request) -> bool:
 # links opened by the OS shell or a new browser tab where the session header
 # can't be set. Kept narrow — same query-token tradeoff as the /api/pty WS.
 _QUERY_TOKEN_API_PATHS: frozenset[str] = frozenset({"/api/files/download"})
-_HOSTED_RUNTIME_API_PREFIX = "/api/hosted/runtime"
+_HOSTED_RUNTIME_API_PREFIX = hosted_runtime_bridge.API_PREFIX
 
 
 def _has_valid_query_token(request: Request, path: str) -> bool:
@@ -593,7 +594,9 @@ async def auth_middleware(request: Request, call_next):
     if getattr(request.app.state, "auth_required", False):
         return await call_next(request)
     path = request.url.path
-    if path == _HOSTED_RUNTIME_API_PREFIX or path.startswith(_HOSTED_RUNTIME_API_PREFIX + "/"):
+    if hosted_runtime_bridge.matches_path(path):
+        if not hosted_runtime_bridge.enabled():
+            return JSONResponse(status_code=404, content={"detail": "Not found"})
         return await call_next(request)
     if path.startswith("/api/") and path not in _PUBLIC_API_PATHS:
         if not _has_valid_session_token(request) and not _has_valid_query_token(request, path):
@@ -646,6 +649,25 @@ async def security_headers_middleware(request: Request, call_next):
     return response
 
 
+_OXAIDE_RESEARCH_SKILLS = frozenset({
+    "investment-research",
+    "market-return-analysis",
+    "polymarket",
+    "stocks",
+})
+
+_OXAIDE_RESEARCH_TOOLSETS = frozenset({
+    "clarify",
+    "delegation",
+    "file",
+    "memory",
+    "session_search",
+    "terminal",
+    "todo",
+    "vision",
+    "web",
+})
+
 _OXAIDE_RESEARCH_STATIC_API_METHODS = frozenset({
     ("GET", "/api/auth/providers"),
     ("GET", "/api/auth/me"),
@@ -666,17 +688,6 @@ _OXAIDE_RESEARCH_STATIC_API_METHODS = frozenset({
     ("POST", "/api/files/mkdir"),
     ("POST", "/api/chat/image-upload"),
     ("GET", "/api/skills"),
-    ("POST", "/api/skills"),
-    ("PUT", "/api/skills/toggle"),
-    ("GET", "/api/skills/content"),
-    ("PUT", "/api/skills/content"),
-    ("GET", "/api/skills/hub/search"),
-    ("GET", "/api/skills/hub/sources"),
-    ("GET", "/api/skills/hub/preview"),
-    ("GET", "/api/skills/hub/scan"),
-    ("POST", "/api/skills/hub/install"),
-    ("POST", "/api/skills/hub/uninstall"),
-    ("POST", "/api/skills/hub/update"),
     ("GET", "/api/tools/toolsets"),
     ("GET", "/api/research-shares"),
     ("POST", "/api/research-shares"),
@@ -693,18 +704,6 @@ def _oxaide_research_api_allowed(method: str, path: str) -> bool:
         method = "GET"
     if (method, path) in _OXAIDE_RESEARCH_STATIC_API_METHODS:
         return True
-
-    toolset_match = re.fullmatch(
-        r"/api/tools/toolsets/[^/]+(?:/(config|provider|env|post-setup))?",
-        path,
-    )
-    if toolset_match is not None:
-        suffix = toolset_match.group(1)
-        if suffix == "config":
-            return method == "GET"
-        if suffix == "post-setup":
-            return method == "POST"
-        return method == "PUT"
 
     match = re.fullmatch(
         r"/api/sessions/([^/]+)(?:/(messages|latest-descendant|export))?",
@@ -726,8 +725,8 @@ async def oxaide_research_boundary_middleware(request: Request, call_next):
         _dashboard_branding_settings().get("product") == "oxaide"
         and path.startswith("/api/")
         and not (
-            path == _HOSTED_RUNTIME_API_PREFIX
-            or path.startswith(_HOSTED_RUNTIME_API_PREFIX + "/")
+            hosted_runtime_bridge.enabled()
+            and hosted_runtime_bridge.matches_path(path)
         )
     ):
         if request.query_params.get("profile"):
@@ -856,6 +855,7 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
 # Categories with fewer fields get merged into "general" to avoid tab sprawl.
 _CATEGORY_MERGE: Dict[str, str] = {
     "privacy": "security",
+    "hosted_runtime_bridge": "security",
     "context": "agent",
     "skills": "agent",
     "cron": "agent",
@@ -1102,6 +1102,8 @@ def _hosted_runtime_authorized(request: Request) -> bool:
 
 
 def _require_hosted_runtime_secret(request: Request) -> None:
+    if not hosted_runtime_bridge.enabled():
+        raise HTTPException(status_code=404, detail="Not found")
     if not _hosted_runtime_authorized(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -14257,6 +14259,8 @@ async def get_skills(profile: Optional[str] = None):
         # the user may edit/delete from the UI.
         bundled_names = _read_bundled_manifest_names()
         hub_names = _read_hub_installed_names()
+    if _dashboard_branding_settings().get("product") == "oxaide":
+        skills = [s for s in skills if s.get("name") in _OXAIDE_RESEARCH_SKILLS]
     for s in skills:
         s["enabled"] = s["name"] not in disabled
         s["usage"] = activity_count(usage.get(s["name"], {}))
@@ -14380,6 +14384,11 @@ async def get_toolsets(profile: Optional[str] = None):
         )
     result = []
     for name, label, desc in _get_effective_configurable_toolsets():
+        if (
+            _dashboard_branding_settings().get("product") == "oxaide"
+            and name not in _OXAIDE_RESEARCH_TOOLSETS
+        ):
+            continue
         try:
             tools = sorted(set(resolve_toolset(name)))
         except Exception:

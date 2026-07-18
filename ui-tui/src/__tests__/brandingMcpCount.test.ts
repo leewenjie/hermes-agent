@@ -126,7 +126,12 @@ describe('Oxaide hosted banner privacy', () => {
         ...baseInfo([]),
         capability_preview: true,
         cwd: '/opt/hermes',
-        preloaded_skills: ['investment-research', 'market-return-analysis', 'stocks'],
+        preloaded_skills: [
+          'investment-research',
+          'market-return-analysis',
+          'polymarket',
+          'stocks'
+        ],
         release_date: '2026.7.2',
         version: '0.18.2'
       },
@@ -143,6 +148,7 @@ describe('Oxaide hosted banner privacy', () => {
     expect(frame).toContain('Research methods')
     expect(frame).toContain('Thesis and evidence review')
     expect(frame).toContain('Return and risk analysis')
+    expect(frame).toContain('Prediction-market research')
     expect(frame).toContain('Market data and quote provenance')
     expect(frame).not.toContain('investment-research')
     expect(frame).not.toContain('configured tools')

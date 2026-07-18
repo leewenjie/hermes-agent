@@ -13,6 +13,7 @@ from tui_gateway import server
 from tui_gateway.oxaide_turns import (
     OxaideTurnClient,
     OxaideTurnDenied,
+    OxaideTurnError,
 )
 from tui_gateway.transport import bind_transport, reset_transport
 
@@ -270,6 +271,122 @@ def test_same_event_id_authorizes_and_completes_once_without_content(monkeypatch
     }
 
 
+def test_heartbeat_renews_same_event_until_completion(monkeypatch):
+    monkeypatch.setenv("HERMES_OXAIDE_USAGE_SIGNING_SECRET", "test-usage-signing-secret-at-least-32-bytes")
+    monkeypatch.setenv(
+        "OXAIDE_TURN_ENDPOINT",
+        "https://oxaide.test/api/agents/billing/usage/record",
+    )
+    monkeypatch.setattr("tui_gateway.oxaide_turns._HEARTBEAT_INTERVAL_SECONDS", 0.01)
+    heartbeat_seen = threading.Event()
+    payloads = []
+
+    def urlopen(request, timeout):
+        payload = json.loads(request.data)
+        payloads.append(payload)
+        if payload["phase"] == "heartbeat":
+            heartbeat_seen.set()
+        code = {
+            "authorize": "turn_authorized",
+            "heartbeat": "turn_lease_renewed",
+            "complete": "turn_completed",
+        }[payload["phase"]]
+        return _Response(
+            {
+                "ok": True,
+                "phase": payload["phase"],
+                "code": code,
+                "workspace_id": "workspace-a",
+            }
+        )
+
+    monkeypatch.setattr("tui_gateway.oxaide_turns.urllib.request.urlopen", urlopen)
+    turn = OxaideTurnClient(dict(_CONTEXT_A)).authorize(
+        on_lease_lost=lambda _code: pytest.fail("healthy heartbeat lost its lease")
+    )
+    assert heartbeat_seen.wait(timeout=1)
+    turn.complete()
+
+    phases = [payload["phase"] for payload in payloads]
+    assert phases[0] == "authorize"
+    assert "heartbeat" in phases
+    assert phases[-1] == "complete"
+    assert {payload["hermes_event_id"] for payload in payloads} == {turn.event_id}
+
+
+def test_heartbeat_failure_fails_closed(monkeypatch):
+    monkeypatch.setenv("HERMES_OXAIDE_USAGE_SIGNING_SECRET", "test-usage-signing-secret-at-least-32-bytes")
+    monkeypatch.setenv(
+        "OXAIDE_TURN_ENDPOINT",
+        "https://oxaide.test/api/agents/billing/usage/record",
+    )
+    monkeypatch.setattr("tui_gateway.oxaide_turns._HEARTBEAT_INTERVAL_SECONDS", 0.01)
+    lease_lost = threading.Event()
+    lost_codes = []
+
+    def urlopen(request, timeout):
+        payload = json.loads(request.data)
+        if payload["phase"] == "authorize":
+            return _Response(
+                {
+                    "ok": True,
+                    "phase": "authorize",
+                    "code": "turn_authorized",
+                    "workspace_id": "workspace-a",
+                }
+            )
+        return _Response(
+            {
+                "ok": False,
+                "phase": "heartbeat",
+                "code": "turn_reservation_not_active",
+                "workspace_id": "workspace-a",
+            }
+        )
+
+    def on_lease_lost(code):
+        lost_codes.append(code)
+        lease_lost.set()
+
+    monkeypatch.setattr("tui_gateway.oxaide_turns.urllib.request.urlopen", urlopen)
+    OxaideTurnClient(dict(_CONTEXT_A)).authorize(on_lease_lost=on_lease_lost)
+
+    assert lease_lost.wait(timeout=1)
+    assert lost_codes == ["turn_reservation_not_active"]
+
+
+def test_lease_loss_interrupts_physical_agent_work_and_schedules_one_hard_stop(
+    monkeypatch,
+):
+    class _Agent:
+        def __init__(self):
+            self.interrupted = 0
+
+        def interrupt(self):
+            self.interrupted += 1
+
+    agent = _Agent()
+    session = {"agent": agent, "history_lock": threading.Lock()}
+    scheduled = []
+    monkeypatch.setattr(
+        server,
+        "_schedule_oxaide_runtime_hard_stop",
+        lambda code: scheduled.append(code),
+    )
+
+    server._cancel_oxaide_turn_after_lease_loss(
+        session, "turn_reservation_binding_fenced"
+    )
+    server._cancel_oxaide_turn_after_lease_loss(
+        session, "turn_reservation_binding_fenced"
+    )
+
+    assert session["_turn_cancel_requested"] is True
+    assert session["_oxaide_lease_lost"] == "turn_reservation_binding_fenced"
+    assert agent.interrupted == 2
+    assert scheduled == ["turn_reservation_binding_fenced"]
+
+
 def test_established_runtime_session_outlives_launch_token(monkeypatch):
     monkeypatch.setenv("HERMES_OXAIDE_USAGE_SIGNING_SECRET", "test-usage-signing-secret-at-least-32-bytes")
     monkeypatch.setenv(
@@ -460,3 +577,74 @@ def test_completion_delivery_failure_is_durable_and_non_raising(monkeypatch, tmp
         "hermes_event_id",
         "completed_at",
     }
+
+
+def test_terminal_settlement_failure_moves_record_to_dead_letter(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv(
+        "HERMES_OXAIDE_USAGE_SIGNING_SECRET",
+        "test-usage-signing-secret-at-least-32-bytes",
+    )
+    client = OxaideTurnClient(dict(_CONTEXT_A))
+    monkeypatch.setattr(
+        client,
+        "_request_payload",
+        lambda _payload: (_ for _ in ()).throw(
+            OxaideTurnError(
+                "turn_event_not_reusable",
+                code="turn_event_not_reusable",
+            )
+        ),
+    )
+
+    client.settle("release", "terminal-event-123")
+
+    outbox = tmp_path / "oxaide-turn-outbox"
+    assert list(outbox.glob("*.json")) == []
+    dead_letters = list((outbox / "dead-letter").glob("*.release.json"))
+    assert len(dead_letters) == 1
+    reason = json.loads(
+        (outbox / "dead-letter" / f"{dead_letters[0].name}.reason.json").read_text()
+    )
+    assert reason["reason"] == "turn_event_not_reusable"
+    assert reason["dead_lettered_at"]
+
+
+def test_outbox_filters_workspace_before_batch_limit(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv(
+        "HERMES_OXAIDE_USAGE_SIGNING_SECRET",
+        "test-usage-signing-secret-at-least-32-bytes",
+    )
+    outbox = tmp_path / "oxaide-turn-outbox"
+    outbox.mkdir()
+    for index in range(25):
+        (outbox / f"00-other-{index:02}.json").write_text(
+            json.dumps(
+                {
+                    "phase": "release",
+                    "workspace_id": "workspace-b",
+                    "runtime_session_id": "runtime-b",
+                    "hermes_event_id": f"other-{index}",
+                }
+            )
+        )
+    target = outbox / "zz-current.json"
+    target.write_text(
+        json.dumps(
+            {
+                "phase": "release",
+                "workspace_id": "workspace-a",
+                "runtime_session_id": "runtime-a",
+                "hermes_event_id": "current-event",
+            }
+        )
+    )
+    delivered = []
+    client = OxaideTurnClient(dict(_CONTEXT_A))
+    monkeypatch.setattr(client, "_request_payload", lambda payload: delivered.append(payload))
+
+    client.flush_outbox()
+
+    assert [payload["hermes_event_id"] for payload in delivered] == ["current-event"]
+    assert not target.exists()

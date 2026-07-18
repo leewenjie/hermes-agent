@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   customerRuntimeLabel,
+  filterOxaideMarketCoverage,
+  filterOxaideResearchSkills,
   filterOxaideManagedRoutes,
   isOxaideManagedDashboard,
   OXAIDE_MANAGED_PATHS,
   OXAIDE_RESEARCH_ENGINE_LABEL,
+  OXAIDE_RESEARCH_SKILLS,
 } from "./managed-dashboard";
 
 describe("managed Oxaide dashboard policy", () => {
@@ -37,6 +40,45 @@ describe("managed Oxaide dashboard policy", () => {
     expect(OXAIDE_MANAGED_PATHS.has("/skills")).toBe(true);
     expect(OXAIDE_MANAGED_PATHS.has("/models")).toBe(false);
     expect(OXAIDE_MANAGED_PATHS.has("/chat")).toBe(true);
+  });
+
+  it("keeps only the managed research skill bundle", () => {
+    const skills = [
+      { name: "stocks" },
+      { name: "investment-research" },
+      { name: "market-return-analysis" },
+      { name: "polymarket" },
+      { name: "github" },
+      { name: "skill-creator" },
+    ];
+
+    expect(filterOxaideResearchSkills(skills, true).map((skill) => skill.name)).toEqual([
+      "stocks",
+      "investment-research",
+      "market-return-analysis",
+      "polymarket",
+    ]);
+    expect(filterOxaideResearchSkills(skills, false)).toBe(skills);
+    expect(OXAIDE_RESEARCH_SKILLS.has("github")).toBe(false);
+  });
+
+  it("finds multi-asset coverage using customer market language", () => {
+    expect(filterOxaideMarketCoverage("FICC").map((market) => market.id)).toEqual([
+      "ficc",
+    ]);
+    expect(filterOxaideMarketCoverage("bonds").map((market) => market.id)).toEqual([
+      "ficc",
+    ]);
+    expect(filterOxaideMarketCoverage("bitcoin").map((market) => market.id)).toEqual([
+      "crypto",
+    ]);
+    expect(filterOxaideMarketCoverage("crypto").map((market) => market.id)).toEqual([
+      "crypto",
+    ]);
+    expect(filterOxaideMarketCoverage("prediction").map((market) => market.id)).toEqual([
+      "prediction-markets",
+    ]);
+    expect(filterOxaideMarketCoverage("")).toHaveLength(6);
   });
 
   it("detects the injected Oxaide product shell", () => {

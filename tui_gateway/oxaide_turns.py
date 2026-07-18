@@ -15,6 +15,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -27,8 +28,19 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_ENDPOINT = "https://oxaide.com/api/agents/billing/usage/record"
 _TIMEOUT_SECONDS = 5.0
+_HEARTBEAT_INTERVAL_SECONDS = 30.0
+_TERMINAL_SETTLEMENT_CODES = {
+    "runtime_session_not_authorized",
+    "turn_already_completed",
+    "turn_event_not_reusable",
+    "turn_event_runtime_mismatch",
+    "turn_reservation_binding_fenced",
+    "turn_reservation_not_active",
+    "turn_reservation_not_found",
+}
 _EXPECTED_CODES = {
     "authorize": "turn_authorized",
+    "heartbeat": "turn_lease_renewed",
     "complete": "turn_completed",
     "release": "turn_released",
 }
@@ -37,13 +49,17 @@ _EXPECTED_CODES = {
 class OxaideTurnError(RuntimeError):
     """The Oxaide turn contract could not be satisfied."""
 
+    def __init__(self, message: str, *, code: str = "") -> None:
+        self.code = code
+        super().__init__(message)
+
 
 class OxaideTurnDenied(OxaideTurnError):
     """Oxaide explicitly denied authorization for a turn."""
 
     def __init__(self, code: str) -> None:
         self.code = code or "turn_authorization_denied"
-        super().__init__(self.code)
+        super().__init__(self.code, code=self.code)
 
 
 @dataclass(frozen=True)
@@ -52,9 +68,11 @@ class OxaideTurn:
     event_id: str
 
     def complete(self, details: dict[str, Any] | None = None) -> None:
+        self.client.stop_heartbeat()
         self.client.settle("complete", self.event_id, details=details)
 
     def release(self) -> None:
+        self.client.stop_heartbeat()
         self.client.settle("release", self.event_id)
 
 
@@ -100,8 +118,12 @@ class OxaideTurnClient:
             or lowered_secret.startswith("__replace_with_")
         ):
             raise OxaideTurnError("Oxaide turn authorization is not configured")
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread: threading.Thread | None = None
+        self._state_lock = threading.Lock()
+        self._settlement_started = False
 
-    def authorize(self) -> OxaideTurn:
+    def authorize(self, on_lease_lost=None) -> OxaideTurn:
         # ``expires_at`` limits the one-time browser launch exchange. Once the
         # authenticated PTY is established, the durable runtime session in
         # Oxaide is the authority for subsequent turns. Reapplying the launch
@@ -109,7 +131,48 @@ class OxaideTurnClient:
         self.flush_outbox()
         event_id = uuid.uuid4().hex
         self._request("authorize", event_id)
+        if on_lease_lost is not None:
+            self._start_heartbeat(event_id, on_lease_lost)
         return OxaideTurn(client=self, event_id=event_id)
+
+    def _start_heartbeat(self, event_id: str, on_lease_lost) -> None:
+        if self._heartbeat_thread is not None:
+            raise OxaideTurnError("Oxaide turn heartbeat already started")
+
+        def heartbeat_loop() -> None:
+            while not self._heartbeat_stop.wait(_HEARTBEAT_INTERVAL_SECONDS):
+                try:
+                    self._request("heartbeat", event_id)
+                except OxaideTurnError as exc:
+                    with self._state_lock:
+                        if self._settlement_started:
+                            return
+                    self._heartbeat_stop.set()
+                    logger.error(
+                        "Oxaide turn lease lost event=%s error=%s",
+                        event_id[:12],
+                        exc,
+                    )
+                    try:
+                        on_lease_lost(str(exc) or "turn_lease_renewal_failed")
+                    except Exception:
+                        logger.exception("Oxaide turn lease-loss callback failed")
+                    return
+
+        self._heartbeat_thread = threading.Thread(
+            target=heartbeat_loop,
+            name=f"oxaide-turn-heartbeat-{event_id[:8]}",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
+
+    def stop_heartbeat(self) -> None:
+        with self._state_lock:
+            self._settlement_started = True
+        self._heartbeat_stop.set()
+        thread = self._heartbeat_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=_TIMEOUT_SECONDS + 1.0)
 
     def settle(
         self,
@@ -131,6 +194,9 @@ class OxaideTurnClient:
         try:
             self._request_payload(payload)
         except OxaideTurnError as exc:
+            if pending is not None and self._is_terminal_settlement_error(exc):
+                self._dead_letter(pending, str(exc))
+                return
             logger.warning(
                 "Oxaide turn %s delivery deferred event=%s error=%s",
                 phase,
@@ -150,17 +216,26 @@ class OxaideTurnClient:
         outbox = self._outbox_dir()
         if not outbox.is_dir():
             return
-        for pending in sorted(outbox.glob("*.json"))[:20]:
+        attempted = 0
+        for pending in sorted(outbox.glob("*.json")):
             try:
                 payload = json.loads(pending.read_text(encoding="utf-8"))
                 if not isinstance(payload, dict):
                     raise ValueError("outbox payload is not an object")
                 if payload.get("workspace_id") != self.workspace_id:
                     continue
+                if attempted >= 20:
+                    break
+                attempted += 1
                 self._request_payload(payload)
                 pending.unlink(missing_ok=True)
-            except Exception:
+            except OxaideTurnError as exc:
+                if self._is_terminal_settlement_error(exc):
+                    self._dead_letter(pending, str(exc))
+                    continue
                 logger.debug("Oxaide turn outbox retry deferred", exc_info=True)
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                self._dead_letter(pending, f"invalid_outbox_record:{type(exc).__name__}")
 
     def _payload(
         self,
@@ -238,7 +313,10 @@ class OxaideTurnClient:
         if status < 200 or status >= 300 or response.get("ok") is not True:
             if phase == "authorize":
                 raise OxaideTurnDenied(code)
-            raise OxaideTurnError(code or f"Oxaide turn endpoint returned HTTP {status}")
+            raise OxaideTurnError(
+                code or f"Oxaide turn endpoint returned HTTP {status}",
+                code=code,
+            )
         if response.get("phase") != phase:
             raise OxaideTurnError("Oxaide turn response phase mismatch")
         if code != _EXPECTED_CODES[phase]:
@@ -249,6 +327,44 @@ class OxaideTurnClient:
 
     def _outbox_dir(self) -> Path:
         return get_hermes_home() / "oxaide-turn-outbox"
+
+    @staticmethod
+    def _is_terminal_settlement_error(error: OxaideTurnError) -> bool:
+        return error.code in _TERMINAL_SETTLEMENT_CODES
+
+    def _dead_letter(self, pending: Path, reason: str) -> None:
+        dead_letters = self._outbox_dir() / "dead-letter"
+        try:
+            dead_letters.mkdir(parents=True, exist_ok=True)
+            os.chmod(dead_letters, 0o700)
+            target = dead_letters / pending.name
+            os.replace(pending, target)
+            metadata = dead_letters / f"{pending.name}.reason.json"
+            metadata.write_text(
+                json.dumps(
+                    {
+                        "dead_lettered_at": datetime.now(timezone.utc).isoformat(
+                            timespec="seconds"
+                        ),
+                        "reason": reason[:500],
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            os.chmod(metadata, 0o600)
+            logger.warning(
+                "Oxaide turn settlement dead-lettered file=%s reason=%s",
+                pending.name,
+                reason,
+            )
+        except OSError:
+            logger.warning(
+                "Oxaide turn dead-letter write failed file=%s",
+                pending.name,
+                exc_info=True,
+            )
 
     def _write_outbox(self, payload: dict[str, Any]) -> Path:
         outbox = self._outbox_dir()

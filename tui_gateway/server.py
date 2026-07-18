@@ -2679,7 +2679,7 @@ _OXAIDE_APPROVED_TOOLSETS = frozenset(
     }
 )
 _OXAIDE_REQUIRED_SKILLS = frozenset(
-    {"investment-research", "market-return-analysis", "stocks"}
+    {"investment-research", "market-return-analysis", "polymarket", "stocks"}
 )
 _OXAIDE_RESEARCH_COMMANDS = {
     "help": "Show research actions",
@@ -2902,6 +2902,32 @@ def _load_enabled_toolsets() -> list[str] | None:
                 flush=True,
             )
         return None
+
+
+def _validate_oxaide_agent_tools(agent) -> None:
+    """Reject managed agent schemas outside the static deployment policy."""
+    if not _is_oxaide_tenant_runtime():
+        return
+
+    from toolsets import resolve_toolset
+
+    approved: set[str] = set()
+    for toolset in _OXAIDE_APPROVED_TOOLSETS:
+        approved.update(resolve_toolset(toolset, include_registry=False))
+
+    resolved = {
+        str(tool.get("function", {}).get("name") or "").strip()
+        for tool in (getattr(agent, "tools", None) or [])
+        if isinstance(tool, dict)
+    }
+    resolved.discard("")
+    rejected = sorted(resolved - approved)
+    if rejected:
+        raise RuntimeError(
+            "Invalid Oxaide tenant resolved tool policy (unapproved: "
+            + ", ".join(rejected)
+            + ")"
+        )
 
 
 def _session_tool_progress_mode(sid: str) -> str:
@@ -4696,6 +4722,11 @@ def _make_agent(
     service_tier_override: str | None = None,
     platform_override: str | None = None,
 ):
+    if _is_oxaide_tenant_runtime():
+        # run_agent imports model_tools, whose import-time discovery loads
+        # plugins unless safe mode is already active.
+        os.environ["HERMES_SAFE_MODE"] = "1"
+
     from run_agent import AIAgent
 
     # MCP tool discovery runs in a background daemon thread at startup so a
@@ -4816,7 +4847,7 @@ def _make_agent(
             "target_model": model or None,
         })
     _pr = _load_provider_routing()
-    return AIAgent(
+    agent = AIAgent(
         model=model,
         max_iterations=_cfg_max_turns(cfg, 90),
         max_tokens=_OXAIDE_MAX_OUTPUT_TOKENS if _is_oxaide_tenant_runtime() else None,
@@ -4865,6 +4896,8 @@ def _make_agent(
         fallback_model=[] if _is_oxaide_tenant_runtime() else _load_fallback_model(),
         **_agent_cbs(sid),
     )
+    _validate_oxaide_agent_tools(agent)
+    return agent
 
 
 def _init_session(
@@ -5476,9 +5509,63 @@ def _authorize_oxaide_user_turn(session: dict):
         return None
     from tui_gateway.oxaide_turns import OxaideTurnClient
 
-    turn = OxaideTurnClient(dict(context)).authorize()
+    turn = OxaideTurnClient(dict(context)).authorize(
+        on_lease_lost=lambda code: _cancel_oxaide_turn_after_lease_loss(
+            session, code
+        )
+    )
     session["_oxaide_agent_authorized"] = True
     return turn
+
+
+_OXAIDE_LEASE_LOSS_HARD_STOP_SECONDS = 30.0
+
+
+def _schedule_oxaide_runtime_hard_stop(code: str) -> None:
+    """Exit PID 1 before a lost 90-second lease can be reused by the host."""
+    def hard_stop() -> None:
+        threading.Event().wait(_OXAIDE_LEASE_LOSS_HARD_STOP_SECONDS)
+        logger.critical(
+            "Oxaide lease loss requires tenant runtime restart: %s",
+            code or "turn_lease_renewal_failed",
+        )
+        # The hardened Oxaide Python process is PID 1 in a dedicated tenant
+        # container. Exiting it tears down the complete PID namespace, including
+        # blocked tools and descendants, and Docker's restart policy replaces it.
+        os._exit(70)
+
+    threading.Thread(
+        target=hard_stop,
+        name="oxaide-lease-loss-hard-stop",
+        daemon=True,
+    ).start()
+
+
+def _cancel_oxaide_turn_after_lease_loss(session: dict, code: str) -> None:
+    """Interrupt physical work when its host-capacity lease is no longer held."""
+    should_schedule_hard_stop = False
+    lock = session.get("history_lock")
+    if lock is not None:
+        with lock:
+            session["_turn_cancel_requested"] = True
+            session["_oxaide_lease_lost"] = str(code or "turn_lease_renewal_failed")
+            if not session.get("_oxaide_hard_stop_scheduled"):
+                session["_oxaide_hard_stop_scheduled"] = True
+                should_schedule_hard_stop = True
+    else:
+        session["_turn_cancel_requested"] = True
+        session["_oxaide_lease_lost"] = str(code or "turn_lease_renewal_failed")
+        if not session.get("_oxaide_hard_stop_scheduled"):
+            session["_oxaide_hard_stop_scheduled"] = True
+            should_schedule_hard_stop = True
+    agent = session.get("agent")
+    if agent is not None:
+        try:
+            agent.interrupt()
+        except Exception:
+            logger.warning("Oxaide lease-loss interrupt failed", exc_info=True)
+    if should_schedule_hard_stop:
+        _schedule_oxaide_runtime_hard_stop(code)
 
 
 def _is_oxaide_loopback_development() -> bool:
@@ -8307,14 +8394,14 @@ def _(rid, params: dict) -> dict:
     if err:
         return err
     history = list(session.get("history", []))
-    db = _get_db()
-    if db is not None and session.get("session_key"):
-        try:
-            history = db.get_messages_as_conversation(
-                session["session_key"], include_ancestors=True
-            )
-        except Exception:
-            pass
+    with _session_db(session) as db:
+        if db is not None and session.get("session_key"):
+            try:
+                history = db.get_messages_as_conversation(
+                    session["session_key"], include_ancestors=True
+                )
+            except Exception:
+                pass
     return _ok(
         rid,
         {

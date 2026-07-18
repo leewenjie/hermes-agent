@@ -761,3 +761,32 @@ class TestHermesInternalDynamicSecrets:
         assert "GATEWAY_RELAY_SECRET" in _HERMES_PROVIDER_ENV_BLOCKLIST
         assert "GATEWAY_RELAY_DELIVERY_KEY" in _HERMES_PROVIDER_ENV_BLOCKLIST
         assert "GATEWAY_RELAY_ID" in _HERMES_PROVIDER_ENV_BLOCKLIST
+
+
+class TestManagedRuntimeSecrets:
+    """Managed control-plane credentials never reach terminal children."""
+
+    def test_managed_secrets_stripped_but_metadata_preserved(self):
+        from tools.environments.local import _HERMES_MANAGED_RUNTIME_SECRET_KEYS
+
+        runtime_env = {
+            **{key: f"synthetic-{key}" for key in _HERMES_MANAGED_RUNTIME_SECRET_KEYS},
+            "HERMES_OXAIDE_WORKSPACE_ID": "workspace-123",
+            "HERMES_OXAIDE_USER_ID": "user-456",
+            "HERMES_OXAIDE_MANAGED_RUNTIME": "1",
+        }
+        result = _run_with_env(extra_os_env=runtime_env)
+
+        assert not (_HERMES_MANAGED_RUNTIME_SECRET_KEYS & result.keys())
+        assert result["HERMES_OXAIDE_WORKSPACE_ID"] == "workspace-123"
+        assert result["HERMES_OXAIDE_USER_ID"] == "user-456"
+        assert result["HERMES_OXAIDE_MANAGED_RUNTIME"] == "1"
+
+    def test_force_prefix_cannot_restore_managed_secret(self):
+        secret = "HERMES_OXAIDE_USAGE_SIGNING_SECRET"
+        result = _run_with_env(self_env={
+            f"{_HERMES_PROVIDER_ENV_FORCE_PREFIX}{secret}": "synthetic-secret",
+        })
+
+        assert secret not in result
+        assert f"{_HERMES_PROVIDER_ENV_FORCE_PREFIX}{secret}" not in result

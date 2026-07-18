@@ -78,7 +78,11 @@ describe("chat sidebar event helpers", () => {
     expect(researchMethodLabel("stocks")).toBe(
       "Market data and quote provenance",
     );
+    expect(researchMethodLabel("polymarket")).toBe(
+      "Prediction-market research",
+    );
     expect(researchMethodDescription("stocks")).toContain("timestamped quotes");
+    expect(researchMethodDescription("polymarket")).toContain("event probabilities");
   });
 
   it("groups internal toolsets into useful customer capabilities", () => {

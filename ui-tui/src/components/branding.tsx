@@ -163,6 +163,7 @@ const TOOLSETS_MAX = 8
 const OXAIDE_RESEARCH_METHODS = [
   'Thesis and evidence review',
   'Return and risk analysis',
+  'Prediction-market research',
   'Market data and quote provenance'
 ]
 

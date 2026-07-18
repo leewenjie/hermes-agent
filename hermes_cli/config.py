@@ -2066,6 +2066,13 @@ DEFAULT_CONFIG = {
         "public_url": "",
     },
 
+    # Legacy, process-local hosted-runtime scaffold. This is not connected to
+    # the durable runtime fleet and must be explicitly enabled by deployments
+    # that still depend on the compatibility API.
+    "hosted_runtime_bridge": {
+        "enabled": False,
+    },
+
     # Privacy settings
     "privacy": {
         "redact_pii": False,  # When True, hash user IDs and strip phone numbers from LLM context

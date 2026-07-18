@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import builtins
+import contextlib
 import threading
 
 import pytest
@@ -35,6 +37,44 @@ def test_oxaide_tool_policy_rejects_missing_or_unapproved_entries(monkeypatch, o
         server._load_enabled_toolsets()
 
 
+def test_oxaide_resolved_tool_policy_rejects_registry_overlay(oxaide_runtime):
+    class Agent:
+        tools = [
+            {"type": "function", "function": {"name": "web_search"}},
+            {"type": "function", "function": {"name": "plugin_overlay"}},
+        ]
+
+    with pytest.raises(RuntimeError, match="unapproved: plugin_overlay"):
+        server._validate_oxaide_agent_tools(Agent())
+
+
+def test_oxaide_resolved_tool_policy_accepts_static_bundle(oxaide_runtime):
+    class Agent:
+        tools = [
+            {"type": "function", "function": {"name": "web_search"}},
+            {"type": "function", "function": {"name": "read_file"}},
+        ]
+
+    server._validate_oxaide_agent_tools(Agent())
+
+
+def test_oxaide_safe_mode_precedes_run_agent_import(monkeypatch, oxaide_runtime):
+    sentinel = RuntimeError("run-agent-import-probed")
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "run_agent":
+            assert server.os.environ.get("HERMES_SAFE_MODE") == "1"
+            raise sentinel
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.delenv("HERMES_SAFE_MODE", raising=False)
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    with pytest.raises(RuntimeError, match="run-agent-import-probed"):
+        server._make_agent("sid", "session-key")
+
+
 def test_oxaide_skill_policy_requires_fixed_research_bundle(monkeypatch, oxaide_runtime):
     expected = sorted(server._OXAIDE_REQUIRED_SKILLS)
     monkeypatch.delenv("HERMES_TUI_SKILLS", raising=False)
@@ -65,7 +105,12 @@ def test_session_info_reports_successfully_preloaded_skills(monkeypatch):
     monkeypatch.setattr(server, "_get_usage", lambda _agent: {})
     monkeypatch.setattr(server, "_probe_credentials", lambda _agent: "")
 
-    loaded = ["investment-research", "market-return-analysis", "stocks"]
+    loaded = [
+        "investment-research",
+        "market-return-analysis",
+        "polymarket",
+        "stocks",
+    ]
     info = server._session_info(
         Agent(),
         {"session_key": "session-1", "preloaded_skills": loaded},
@@ -387,6 +432,67 @@ def test_oxaide_session_rpc_rows_hide_runtime_metadata(monkeypatch, oxaide_runti
     }
     assert payload["session_id"] == "runtime-1"
     assert payload["session_key"] == "stored-1"
+
+
+def test_oxaide_session_resume_ignores_profile_spoofing(monkeypatch, oxaide_runtime):
+    profile_args = []
+
+    class DB:
+        def get_session(self, _session_id):
+            return None
+
+        def get_session_by_title(self, _title):
+            return None
+
+    monkeypatch.setattr(server, "_transport_trusted_context", lambda: True)
+    monkeypatch.setattr(
+        server,
+        "_profile_home",
+        lambda profile: profile_args.append(profile) or None,
+    )
+    monkeypatch.setattr(server, "_get_db", lambda: DB())
+
+    response = server._methods["session.resume"](
+        "rid",
+        {"session_id": "missing", "profile": "sibling-profile"},
+    )
+
+    assert response["error"]["message"] == "session not found"
+    assert profile_args == [None]
+
+
+def test_session_history_uses_session_profile_db(monkeypatch):
+    session = {
+        "history": [{"role": "user", "content": "stale"}],
+        "session_key": "stored-1",
+        "profile_home": "/profiles/work",
+    }
+
+    class DB:
+        def get_messages_as_conversation(self, session_id, include_ancestors=False):
+            assert session_id == "stored-1"
+            assert include_ancestors is True
+            return [{"role": "assistant", "content": "profile-owned history"}]
+
+    @contextlib.contextmanager
+    def session_db(candidate):
+        assert candidate is session
+        yield DB()
+
+    monkeypatch.setattr(server, "_sess_nowait", lambda _params, _rid: (session, None))
+    monkeypatch.setattr(server, "_session_db", session_db)
+    monkeypatch.setattr(
+        server,
+        "_get_db",
+        lambda: pytest.fail("session.history must not use the launch-profile DB"),
+    )
+
+    response = server._methods["session.history"]("rid", {"session_id": "live-1"})
+
+    assert response["result"] == {
+        "count": 1,
+        "messages": [{"role": "assistant", "text": "profile-owned history"}],
+    }
 
 
 def test_oxaide_session_info_events_are_projected(monkeypatch, oxaide_runtime):

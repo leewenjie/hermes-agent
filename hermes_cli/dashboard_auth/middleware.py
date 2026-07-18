@@ -32,6 +32,7 @@ from hermes_cli.dashboard_auth.cookies import (
     set_sso_attempt_cookie,
 )
 from hermes_cli.dashboard_auth.public_paths import PUBLIC_API_PATHS
+from hermes_cli import hosted_runtime_bridge
 
 _log = logging.getLogger(__name__)
 
@@ -56,9 +57,6 @@ _GATE_PUBLIC_PREFIXES: tuple[str, ...] = (
     "/fonts/",
     "/fonts-terminal/",
 )
-
-_HOSTED_RUNTIME_API_PREFIX = "/api/hosted/runtime"
-
 
 def _path_is_public(path: str) -> bool:
     """True if ``path`` bypasses the OAuth auth gate.
@@ -286,9 +284,9 @@ async def gated_auth_middleware(
     # authentication. Let requests reach that guard just as the legacy
     # dashboard middleware does; otherwise gated public dashboards return a
     # cookie-auth 401 before X-Hermes-Hosted-Secret can be evaluated.
-    if path == _HOSTED_RUNTIME_API_PREFIX or path.startswith(
-        _HOSTED_RUNTIME_API_PREFIX + "/"
-    ):
+    if hosted_runtime_bridge.matches_path(path):
+        if not hosted_runtime_bridge.enabled():
+            return JSONResponse(status_code=404, content={"detail": "Not found"})
         return await call_next(request)
 
     if _path_is_public(path):

@@ -157,7 +157,9 @@ Response:
 }
 ```
 
-`t` is Unix timestamp, `p` is price (probability).
+`t` is a Unix timestamp and `p` is the observed contract price. If shown as a
+percentage, label it a timestamped market-implied likelihood rather than an
+objective probability.
 
 Note: Very new markets may return empty history.
 

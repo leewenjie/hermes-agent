@@ -1417,6 +1417,16 @@ class TestWebServerEndpoints:
 
         assert self.client.get("/api/skills").status_code == 200
         assert self.client.get("/api/tools/toolsets").status_code == 200
+        for method, path in (
+            ("POST", "/api/skills"),
+            ("PUT", "/api/skills/toggle"),
+            ("GET", "/api/skills/content?name=stocks"),
+            ("GET", "/api/skills/hub/search?q=stocks"),
+            ("POST", "/api/skills/hub/install"),
+            ("PUT", "/api/tools/toolsets/web"),
+            ("GET", "/api/tools/toolsets/web/config"),
+        ):
+            assert self.client.request(method, path).status_code == 404
         assert self.client.get("/api/sessions").status_code == 200
         assert self.client.get("/api/sessions?profile=worker").status_code == 404
         assert self.client.get("/api/status?profile=worker").status_code == 404
@@ -4767,6 +4777,52 @@ class TestNewEndpoints:
             },
         ]
 
+    def test_oxaide_skills_list_only_returns_managed_research_bundle(self, monkeypatch):
+        import tools.skills_tool as skills_tool
+        import hermes_cli.skills_config as skills_config
+        import hermes_cli.web_server as web_server
+
+        monkeypatch.setattr(
+            skills_tool,
+            "_find_all_skills",
+            lambda *, skip_disabled=False: [
+                {"name": "stocks", "description": "quotes", "category": "research"},
+                {
+                    "name": "investment-research",
+                    "description": "evidence",
+                    "category": "research",
+                },
+                {
+                    "name": "market-return-analysis",
+                    "description": "returns",
+                    "category": "research",
+                },
+                {
+                    "name": "polymarket",
+                    "description": "prediction markets",
+                    "category": "research",
+                },
+                {"name": "github", "description": "code", "category": "developer"},
+            ],
+        )
+        monkeypatch.setattr(skills_config, "get_disabled_skills", lambda config: set())
+        monkeypatch.setattr(web_server, "load_config", lambda: {})
+        monkeypatch.setattr(
+            web_server,
+            "_dashboard_branding_settings",
+            lambda: {"product": "oxaide"},
+        )
+
+        resp = self.client.get("/api/skills")
+
+        assert resp.status_code == 200
+        assert {skill["name"] for skill in resp.json()} == {
+            "investment-research",
+            "market-return-analysis",
+            "polymarket",
+            "stocks",
+        }
+
     def test_toolsets_list(self):
         resp = self.client.get("/api/tools/toolsets")
         assert resp.status_code == 200
@@ -6863,8 +6919,12 @@ class TestPtyWebSocket:
         monkeypatch.setenv("HERMES_OXAIDE_WORKSPACE_ID", "workspace-1")
         monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", "a" * 48)
         monkeypatch.delenv("HERMES_INTERNAL_TUI_SKIN", raising=False)
-        self.ws_module.app.state.bound_host = "127.0.0.1"
-        self.ws_module.app.state.auth_required = False
+        monkeypatch.setattr(
+            self.ws_module.app.state, "bound_host", "127.0.0.1", raising=False
+        )
+        monkeypatch.setattr(
+            self.ws_module.app.state, "auth_required", False, raising=False
+        )
 
         _argv, _cwd, env = self.ws_module._resolve_chat_argv()
 
@@ -6882,8 +6942,12 @@ class TestPtyWebSocket:
         monkeypatch.setenv("HERMES_OXAIDE_WORKSPACE_ID", "workspace-1")
         monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", "a" * 48)
         monkeypatch.delenv("HERMES_INTERNAL_OXAIDE_LOOPBACK_DEV", raising=False)
-        self.ws_module.app.state.bound_host = "0.0.0.0"
-        self.ws_module.app.state.auth_required = True
+        monkeypatch.setattr(
+            self.ws_module.app.state, "bound_host", "0.0.0.0", raising=False
+        )
+        monkeypatch.setattr(
+            self.ws_module.app.state, "auth_required", True, raising=False
+        )
 
         _argv, _cwd, env = self.ws_module._resolve_chat_argv()
 
