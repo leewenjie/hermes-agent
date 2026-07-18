@@ -2321,9 +2321,9 @@ def test_ensure_session_db_row_persists_explicit_cwd(monkeypatch, tmp_path):
     created = []
 
     class _FakeDB:
-        def create_session(self, key, source=None, model=None, model_config=None, parent_session_id=None, cwd=None):
+        def create_session(self, key, source=None, model=None, model_config=None, user_id=None, parent_session_id=None, cwd=None):
             created.append(
-                {"key": key, "source": source, "model": model, "model_config": model_config, "cwd": cwd}
+                {"key": key, "source": source, "model": model, "model_config": model_config, "user_id": user_id, "cwd": cwd}
             )
 
     monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
@@ -2332,7 +2332,7 @@ def test_ensure_session_db_row_persists_explicit_cwd(monkeypatch, tmp_path):
     server._ensure_session_db_row({"session_key": "k1", "cwd": str(tmp_path), "explicit_cwd": True})
 
     assert created == [
-        {"key": "k1", "source": "tui", "model": "test-model", "model_config": None, "cwd": str(tmp_path)}
+        {"key": "k1", "source": "tui", "model": "test-model", "model_config": None, "user_id": None, "cwd": str(tmp_path)}
     ]
 
 
@@ -2340,9 +2340,9 @@ def test_ensure_session_db_row_persists_session_source(monkeypatch):
     created = []
 
     class _FakeDB:
-        def create_session(self, key, source=None, model=None, model_config=None, parent_session_id=None, cwd=None):
+        def create_session(self, key, source=None, model=None, model_config=None, user_id=None, parent_session_id=None, cwd=None):
             created.append(
-                {"key": key, "source": source, "model": model, "model_config": model_config, "cwd": cwd}
+                {"key": key, "source": source, "model": model, "model_config": model_config, "user_id": user_id, "cwd": cwd}
             )
 
     monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
@@ -2351,7 +2351,7 @@ def test_ensure_session_db_row_persists_session_source(monkeypatch):
     server._ensure_session_db_row({"session_key": "k1", "source": "tool"})
 
     assert created == [
-        {"key": "k1", "source": "tool", "model": "test-model", "model_config": None, "cwd": None}
+        {"key": "k1", "source": "tool", "model": "test-model", "model_config": None, "user_id": None, "cwd": None}
     ]
 
 
@@ -2361,9 +2361,9 @@ def test_ensure_session_db_row_defaults_to_no_workspace(monkeypatch, tmp_path):
     created = []
 
     class _FakeDB:
-        def create_session(self, key, source=None, model=None, model_config=None, parent_session_id=None, cwd=None):
+        def create_session(self, key, source=None, model=None, model_config=None, user_id=None, parent_session_id=None, cwd=None):
             created.append(
-                {"key": key, "source": source, "model": model, "model_config": model_config, "cwd": cwd}
+                {"key": key, "source": source, "model": model, "model_config": model_config, "user_id": user_id, "cwd": cwd}
             )
 
     monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
@@ -2372,7 +2372,7 @@ def test_ensure_session_db_row_defaults_to_no_workspace(monkeypatch, tmp_path):
     server._ensure_session_db_row({"session_key": "k1", "cwd": str(tmp_path)})
 
     assert created == [
-        {"key": "k1", "source": "tui", "model": "test-model", "model_config": None, "cwd": None}
+        {"key": "k1", "source": "tui", "model": "test-model", "model_config": None, "user_id": None, "cwd": None}
     ]
 
 
@@ -2388,7 +2388,7 @@ def test_ensure_session_db_row_persists_session_model_override(monkeypatch):
     created = []
 
     class _FakeDB:
-        def create_session(self, key, source=None, model=None, model_config=None, parent_session_id=None, cwd=None):
+        def create_session(self, key, source=None, model=None, model_config=None, user_id=None, parent_session_id=None, cwd=None):
             created.append(
                 {"key": key, "model": model, "model_config": model_config, "cwd": cwd}
             )
@@ -2420,7 +2420,7 @@ def test_ensure_session_db_row_no_override_uses_global(monkeypatch):
     created = []
 
     class _FakeDB:
-        def create_session(self, key, source=None, model=None, model_config=None, parent_session_id=None, cwd=None):
+        def create_session(self, key, source=None, model=None, model_config=None, user_id=None, parent_session_id=None, cwd=None):
             created.append({"model": model, "model_config": model_config})
 
     monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())

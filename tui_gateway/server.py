@@ -1695,6 +1695,16 @@ def _register_session_cwd(session: dict | None) -> None:
         pass
 
 
+def _trusted_session_user_id(session: dict | None) -> str:
+    """Return the server-authenticated owner for a managed runtime session."""
+    if not session:
+        return ""
+    context = session.get("trusted_launch_context")
+    if not isinstance(context, dict):
+        return ""
+    return str(context.get("user_id") or "").strip()
+
+
 def _ensure_session_db_row(session: dict) -> None:
     """Idempotently persist the session's DB row on first real activity.
 
@@ -1790,6 +1800,7 @@ def _ensure_session_db_row(session: dict) -> None:
             source=_session_source(session),
             model=row_model,
             model_config=model_config or None,
+            user_id=_trusted_session_user_id(session) or None,
             parent_session_id=parent_session_id,
             cwd=_session_cwd(session) if session.get("explicit_cwd") else None,
         )
@@ -2032,14 +2043,17 @@ def _set_session_context(
         # it instead of falling back to the gateway launch dir.
         resolved = cwd if cwd is not None else _cwd_for_session_key(session_key)
         source = _resolve_session_platform()
+        user_id = ""
         with _sessions_lock:
             for sess in list(_sessions.values()):
                 if sess.get("session_key") == session_key:
                     source = _session_source(sess)
+                    user_id = _trusted_session_user_id(sess)
                     break
         return set_session_vars(
             session_key=session_key,
             source=source,
+            user_id=user_id,
             cwd=resolved,
             ui_session_id=ui_session_id,
         )
@@ -8644,6 +8658,7 @@ def _(rid, params: dict) -> dict:
             # end_reason heuristic never matches it — the marker is the only
             # thing that surfaces TUI branches. See issue #20856.
             model_config={"_branched_from": old_key},
+            user_id=_trusted_session_user_id(session) or None,
             parent_session_id=old_key,
             cwd=_session_cwd(session),
         )

@@ -599,13 +599,15 @@ class AIAgent:
             return
         source = _session_source_for_agent(self.platform)
         try:
+            from gateway.session_context import get_session_env
+
             self._session_db.create_session(
                 session_id=self.session_id,
                 source=source,
                 model=self.model,
                 model_config=self._session_init_model_config,
                 system_prompt=self._cached_system_prompt,
-                user_id=None,
+                user_id=get_session_env("HERMES_SESSION_USER_ID") or None,
                 parent_session_id=self._parent_session_id,
                 cwd=_launch_cwd_for_session(source),
             )

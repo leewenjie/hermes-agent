@@ -800,11 +800,14 @@ def compress_context(
                         pass
                     agent._session_db_created = False
                     try:
+                        from gateway.session_context import get_session_env
+
                         agent._session_db.create_session(
                             session_id=agent.session_id,
                             source=agent.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
                             model=agent.model,
                             model_config=agent._session_init_model_config,
+                            user_id=get_session_env("HERMES_SESSION_USER_ID") or None,
                             parent_session_id=old_session_id,
                         )
                     except Exception as _cs_err:
