@@ -244,6 +244,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     session: ChatSessionIdentity | null;
   }>({ scope: "", session: null });
   const [shareOpen, setShareOpen] = useState(false);
+  const [sharingEnabled, setSharingEnabled] = useState(false);
   const { t } = useI18n();
   const managedOxaide = isOxaideManagedDashboard();
   const closeMobilePanel = useCallback(() => setMobilePanelOpenRaw(false), []);
@@ -391,13 +392,28 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    void api
+      .getStatus()
+      .then((status) => {
+        if (!cancelled) setSharingEnabled(Boolean(status.research_sharing_enabled));
+      })
+      .catch(() => {
+        if (!cancelled) setSharingEnabled(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     // When hidden (non-chat tab) we must not register the header button —
     // another page owns the header's end slot at that point.
     if (!isActive) {
       setEnd(null);
       return;
     }
-    const shareAction = managedOxaide && currentResearchSession ? (
+    const shareAction = managedOxaide && sharingEnabled && currentResearchSession ? (
       <Button
         outlined
         size="sm"
@@ -435,7 +451,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       ) : null,
     );
     return () => setEnd(null);
-  }, [currentResearchSession, isActive, managedOxaide, narrow, mobilePanelOpen, modelToolsLabel, setEnd]);
+  }, [currentResearchSession, isActive, managedOxaide, sharingEnabled, narrow, mobilePanelOpen, modelToolsLabel, setEnd]);
 
   const handleCopyLast = () => {
     const ws = wsRef.current;

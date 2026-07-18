@@ -16,6 +16,8 @@ import mimetypes
 import os
 from pathlib import Path
 import re
+import secrets
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -29,6 +31,7 @@ from hermes_constants import get_hermes_home
 
 _SCHEMA_VERSION = "research-share.v1"
 _DEFAULT_ENDPOINT = "https://oxaide.com/api/agents/research-shares"
+_LOCAL_STORE_LOCK = threading.Lock()
 _MAX_MESSAGES = 100
 _MAX_MESSAGE_CHARS = 20_000
 _MAX_ARTIFACT_BYTES = 1536 * 1024
@@ -140,6 +143,10 @@ def _load_artifact(raw_path: str, used_names: set[str]) -> dict[str, Any] | None
     mime_type = _ALLOWED_ARTIFACTS.get(target.suffix.lower())
     if not mime_type:
         return None
+    try:
+        validated_stat = target.stat()
+    except OSError:
+        return None
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(source, flags)
@@ -147,6 +154,11 @@ def _load_artifact(raw_path: str, used_names: set[str]) -> dict[str, Any] | None
         return None
     try:
         stat_result = os.fstat(fd)
+        if (
+            stat_result.st_dev != validated_stat.st_dev
+            or stat_result.st_ino != validated_stat.st_ino
+        ):
+            return None
         if not __import__("stat").S_ISREG(stat_result.st_mode):
             return None
         if stat_result.st_size <= 0 or stat_result.st_size > _MAX_ARTIFACT_BYTES:
@@ -303,6 +315,97 @@ def publish_research_share(*, workspace_id: str, user_id: str, runtime_key: str,
         "snapshot": preview["snapshot"],
     }
     return _send(payload)
+
+
+def _local_snapshot_store_path() -> Path:
+    return get_hermes_home() / "oxaide-research-share-dev-snapshots.json"
+
+
+def _read_local_snapshots() -> list[dict[str, Any]]:
+    path = _local_snapshot_store_path()
+    if not path.is_file():
+        return []
+    try:
+        rows = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _write_local_snapshots(rows: list[dict[str, Any]]) -> None:
+    path = _local_snapshot_store_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temporary.write_text(json.dumps(rows, separators=(",", ":")), encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
+def publish_local_research_share(*, session_id: str, preview: dict[str, Any],
+                                 expires_in_days: int, base_url: str) -> dict[str, Any]:
+    """Persist a development-only snapshot without contacting Oxaide."""
+    token = secrets.token_urlsafe(32)
+    token_sha256 = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    share_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+    expires_at = datetime.fromtimestamp(
+        now.timestamp() + expires_in_days * 86400,
+        tz=timezone.utc,
+    ).isoformat(timespec="seconds")
+    row = {
+        "share_id": share_id,
+        "session_id": session_id,
+        "token_sha256": token_sha256,
+        "published_at": now.isoformat(timespec="seconds"),
+        "expires_at": expires_at,
+        "title": preview["title"],
+        "description": preview.get("description"),
+        "snapshot": preview["snapshot"],
+    }
+    with _LOCAL_STORE_LOCK:
+        rows = _read_local_snapshots()
+        rows.append(row)
+        _write_local_snapshots(rows)
+    return {
+        "ok": True,
+        "share_id": share_id,
+        "public_url": f"{base_url.rstrip('/')}/r/{token}",
+        "expires_at": expires_at,
+    }
+
+
+def load_local_research_share(token: str) -> dict[str, Any] | None:
+    """Resolve an unexpired local snapshot by its opaque bearer token."""
+    if not token or len(token) > 128:
+        return None
+    token_sha256 = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    now = datetime.now(timezone.utc)
+    with _LOCAL_STORE_LOCK:
+        rows = _read_local_snapshots()
+    for row in rows:
+        if not hmac.compare_digest(str(row.get("token_sha256") or ""), token_sha256):
+            continue
+        try:
+            expires_at = datetime.fromisoformat(
+                str(row.get("expires_at") or "").replace("Z", "+00:00")
+            )
+        except ValueError:
+            return None
+        return row if expires_at > now else None
+    return None
+
+
+def revoke_local_research_share(share_id: str) -> dict[str, Any]:
+    """Erase a local development snapshot immediately."""
+    with _LOCAL_STORE_LOCK:
+        rows = _read_local_snapshots()
+        kept = [row for row in rows if row.get("share_id") != share_id]
+        if len(kept) == len(rows):
+            raise ResearchShareError("Local research share was not found")
+        _write_local_snapshots(kept)
+    return {"ok": True, "share_id": share_id, "revoked": True}
 
 
 def _share_store_path() -> Path:

@@ -5,6 +5,7 @@ import {
   filterOxaideMarketCoverage,
   filterOxaideResearchSkills,
   filterOxaideManagedRoutes,
+  getOxaideManagedPaths,
   isOxaideManagedDashboard,
   OXAIDE_MANAGED_PATHS,
   OXAIDE_RESEARCH_ENGINE_LABEL,
@@ -18,6 +19,7 @@ describe("managed Oxaide dashboard policy", () => {
       "/chat": "chat",
       "/sessions": "sessions",
       "/files": "files",
+      "/scheduled-research": "scheduled research",
       "/docs": "docs",
       "/skills": "skills",
       "/models": "models",
@@ -30,6 +32,7 @@ describe("managed Oxaide dashboard policy", () => {
       "/chat",
       "/sessions",
       "/files",
+      "/scheduled-research",
       "/docs",
       "/skills",
     ]);
@@ -39,7 +42,24 @@ describe("managed Oxaide dashboard policy", () => {
   it("exposes skills without exposing model routes", () => {
     expect(OXAIDE_MANAGED_PATHS.has("/skills")).toBe(true);
     expect(OXAIDE_MANAGED_PATHS.has("/models")).toBe(false);
+    expect(OXAIDE_MANAGED_PATHS.has("/cron")).toBe(false);
+    expect(OXAIDE_MANAGED_PATHS.has("/scheduled-research")).toBe(true);
     expect(OXAIDE_MANAGED_PATHS.has("/chat")).toBe(true);
+  });
+
+  it("removes scheduled research when the runtime capability is disabled", () => {
+    const routes = {
+      "/": "root",
+      "/sessions": "sessions",
+      "/scheduled-research": "scheduled research",
+    };
+
+    expect(Object.keys(filterOxaideManagedRoutes(routes, true, false))).toEqual([
+      "/",
+      "/sessions",
+    ]);
+    expect(getOxaideManagedPaths(false).has("/scheduled-research")).toBe(false);
+    expect(getOxaideManagedPaths(true).has("/scheduled-research")).toBe(true);
   });
 
   it("keeps only the managed research skill bundle", () => {

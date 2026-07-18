@@ -14,6 +14,7 @@ const oxaideBranding: DashboardBranding = {
   accountUrl: "https://oxaide.com/app",
   billingUrl: "https://oxaide.com/console/billing",
   docsUrl: "https://oxaide.com/docs",
+  scheduledResearchEnabled: false,
 };
 
 const status: StatusResponse = {

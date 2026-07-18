@@ -117,7 +117,7 @@ export function ChatSessionList({
     void api
       .getStatus()
       .then((status) => {
-        if (!cancelled) setSharingEnabled(Boolean(status.oxaide_runtime_key));
+        if (!cancelled) setSharingEnabled(Boolean(status.research_sharing_enabled));
       })
       .catch(() => {
         if (!cancelled) setSharingEnabled(false);

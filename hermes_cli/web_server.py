@@ -692,6 +692,8 @@ _OXAIDE_RESEARCH_STATIC_API_METHODS = frozenset({
     ("GET", "/api/research-shares"),
     ("POST", "/api/research-shares"),
     ("POST", "/api/research-shares/preview"),
+    ("GET", "/api/research-schedules"),
+    ("POST", "/api/research-schedules"),
 })
 
 _OXAIDE_RESERVED_SESSION_PATH_PARTS = frozenset({
@@ -699,11 +701,30 @@ _OXAIDE_RESERVED_SESSION_PATH_PARTS = frozenset({
 })
 
 
-def _oxaide_research_api_allowed(method: str, path: str) -> bool:
+def _oxaide_research_api_allowed(
+    method: str,
+    path: str,
+    *,
+    scheduled_research_enabled: bool = True,
+) -> bool:
     if method == "HEAD":
         method = "GET"
+    if path == "/api/research-schedules" and not scheduled_research_enabled:
+        return False
     if (method, path) in _OXAIDE_RESEARCH_STATIC_API_METHODS:
         return True
+
+    schedule_match = re.fullmatch(
+        r"/api/research-schedules/([^/]+)(?:/(pause|resume))?",
+        path,
+    )
+    if schedule_match is not None:
+        if not scheduled_research_enabled:
+            return False
+        action = schedule_match.group(2)
+        if action is not None:
+            return method == "POST"
+        return method in {"PUT", "DELETE"}
 
     match = re.fullmatch(
         r"/api/sessions/([^/]+)(?:/(messages|latest-descendant|export))?",
@@ -734,7 +755,11 @@ async def oxaide_research_boundary_middleware(request: Request, call_next):
         method = request.method
         if method == "OPTIONS":
             method = request.headers.get("access-control-request-method", "GET").upper()
-        if not _oxaide_research_api_allowed(method, path):
+        if not _oxaide_research_api_allowed(
+            method,
+            path,
+            scheduled_research_enabled=_oxaide_scheduled_research_enabled(),
+        ):
             return JSONResponse(status_code=404, content={"detail": "Not found"})
     return await call_next(request)
 
@@ -3134,6 +3159,10 @@ async def get_status(profile: Optional[str] = None):
                 ).hexdigest()
         except Exception:
             pass
+
+        status["research_sharing_enabled"] = bool(
+            status.get("oxaide_runtime_key") or _local_research_share_dev_enabled()
+        )
 
         # Profile + gateway topology: which profiles exist, whether one
         # multiplexed gateway or several per-profile gateways serve them, and
@@ -10615,7 +10644,23 @@ class ResearchShareRequest(BaseModel):
     snapshot_sha256: Optional[str] = None
 
 
+def _local_research_share_dev_enabled(request: Optional[Request] = None) -> bool:
+    """True only for the explicitly marked, unauthenticated loopback runtime."""
+    if os.environ.get("HERMES_INTERNAL_OXAIDE_LOOPBACK_DEV") != "1":
+        return False
+    if _dashboard_branding_settings().get("product") != "oxaide":
+        return False
+    if getattr(app.state, "auth_required", False):
+        return False
+    bound_host = str(getattr(app.state, "bound_host", "") or "").lower()
+    if bound_host not in _LOOPBACK_HOST_VALUES:
+        return False
+    return request is None or _local_dashboard_request(request)
+
+
 def _oxaide_share_identity(request: Request) -> tuple[str, str, str]:
+    if _local_research_share_dev_enabled(request):
+        return "local-development", "local-development", "local-development"
     session = getattr(request.state, "session", None)
     if session is None or getattr(session, "provider", "") != "oxaide-demo":
         raise HTTPException(status_code=403, detail="Research sharing requires an Oxaide workspace session")
@@ -10627,7 +10672,12 @@ def _oxaide_share_identity(request: Request) -> tuple[str, str, str]:
     return workspace_id, user_id, runtime_key
 
 
-def _research_share_preview(session_id: str, user_id: str) -> tuple[str, dict[str, Any]]:
+def _research_share_preview(
+    session_id: str,
+    user_id: str,
+    *,
+    require_owner: bool = True,
+) -> tuple[str, dict[str, Any]]:
     from hermes_cli.oxaide_research_share import build_research_snapshot, snapshot_digest
 
     db = _open_session_db_for_profile(None)
@@ -10640,7 +10690,7 @@ def _research_share_preview(session_id: str, user_id: str) -> tuple[str, dict[st
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
         session_user_id = str(session.get("user_id") or "").strip()
-        if not session_user_id or session_user_id != user_id:
+        if require_owner and (not session_user_id or session_user_id != user_id):
             raise HTTPException(status_code=403, detail="Session does not belong to this user")
         messages = db.get_messages(sid)
         preview = build_research_snapshot(session, messages)
@@ -10653,10 +10703,16 @@ def _research_share_preview(session_id: str, user_id: str) -> tuple[str, dict[st
 @app.post("/api/research-shares/preview")
 async def preview_research_share(request: Request, body: ResearchShareRequest):
     _workspace_id, user_id, _runtime_key = _oxaide_share_identity(request)
+    local_dev = _local_research_share_dev_enabled(request)
     if not body.session_id:
         raise HTTPException(status_code=400, detail="session_id is required")
     try:
-        _sid, preview = await asyncio.to_thread(_research_share_preview, body.session_id, user_id)
+        _sid, preview = await asyncio.to_thread(
+            _research_share_preview,
+            body.session_id,
+            user_id,
+            require_owner=not local_dev,
+        )
     except HTTPException:
         raise
     except Exception as exc:
@@ -10680,7 +10736,12 @@ async def preview_research_share(request: Request, body: ResearchShareRequest):
 @app.get("/api/research-shares")
 async def list_research_shares(request: Request, session_id: str):
     _workspace_id, user_id, _runtime_key = _oxaide_share_identity(request)
-    sid, _preview = await asyncio.to_thread(_research_share_preview, session_id, user_id)
+    sid, _preview = await asyncio.to_thread(
+        _research_share_preview,
+        session_id,
+        user_id,
+        require_owner=not _local_research_share_dev_enabled(request),
+    )
     from hermes_cli.oxaide_research_share import list_recorded_shares
     return {"ok": True, "shares": await asyncio.to_thread(list_recorded_shares, sid)}
 
@@ -10696,16 +10757,21 @@ async def manage_research_share(request: Request, body: ResearchShareRequest):
     )
 
     workspace_id, user_id, runtime_key = _oxaide_share_identity(request)
+    local_dev = _local_research_share_dev_enabled(request)
     if body.action == "revoke":
         if not body.share_id:
             raise HTTPException(status_code=400, detail="share_id is required")
         try:
-            result = await asyncio.to_thread(
-                revoke_research_share,
-                workspace_id=workspace_id,
-                user_id=user_id,
-                share_id=body.share_id,
-            )
+            if local_dev:
+                from hermes_cli.oxaide_research_share import revoke_local_research_share
+                result = await asyncio.to_thread(revoke_local_research_share, body.share_id)
+            else:
+                result = await asyncio.to_thread(
+                    revoke_research_share,
+                    workspace_id=workspace_id,
+                    user_id=user_id,
+                    share_id=body.share_id,
+                )
             await asyncio.to_thread(remove_recorded_share, body.share_id)
             return result
         except ResearchShareError as exc:
@@ -10718,7 +10784,12 @@ async def manage_research_share(request: Request, body: ResearchShareRequest):
         raise HTTPException(status_code=400, detail="expires_in_days must be 7, 30, or 90")
 
     try:
-        sid, preview = await asyncio.to_thread(_research_share_preview, body.session_id, user_id)
+        sid, preview = await asyncio.to_thread(
+            _research_share_preview,
+            body.session_id,
+            user_id,
+            require_owner=not local_dev,
+        )
         if not body.snapshot_sha256 or not hmac.compare_digest(
             str(body.snapshot_sha256), str(preview.get("snapshot_sha256") or "")
         ):
@@ -10736,21 +10807,98 @@ async def manage_research_share(request: Request, body: ResearchShareRequest):
             if len(description) > 500:
                 raise HTTPException(status_code=400, detail="description must be at most 500 characters")
             preview["description"] = description
-        result = await asyncio.to_thread(
-            publish_research_share,
-            workspace_id=workspace_id,
-            user_id=user_id,
-            runtime_key=runtime_key,
-            session_id=sid,
-            preview=preview,
-            expires_in_days=body.expires_in_days,
-        )
+        if local_dev:
+            from hermes_cli.oxaide_research_share import publish_local_research_share
+            result = await asyncio.to_thread(
+                publish_local_research_share,
+                session_id=sid,
+                preview=preview,
+                expires_in_days=body.expires_in_days,
+                base_url=str(request.base_url),
+            )
+        else:
+            result = await asyncio.to_thread(
+                publish_research_share,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                runtime_key=runtime_key,
+                session_id=sid,
+                preview=preview,
+                expires_in_days=body.expires_in_days,
+            )
         await asyncio.to_thread(record_share, sid, result)
         return result
     except HTTPException:
         raise
     except ResearchShareError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/r/{token}")
+async def view_local_research_share(request: Request, token: str):
+    """Render an isolated read-only snapshot for loopback development."""
+    if not _local_research_share_dev_enabled(request):
+        raise HTTPException(status_code=404, detail="Not found")
+    from html import escape
+    from hermes_cli.oxaide_research_share import load_local_research_share
+
+    row = await asyncio.to_thread(load_local_research_share, token)
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+    snapshot = row.get("snapshot") if isinstance(row.get("snapshot"), dict) else {}
+    messages = snapshot.get("messages") if isinstance(snapshot.get("messages"), list) else []
+    artifacts = snapshot.get("artifacts") if isinstance(snapshot.get("artifacts"), list) else []
+    artifact_map = {
+        str(item.get("name")): item
+        for item in artifacts
+        if isinstance(item, dict) and item.get("name")
+    }
+    rendered_messages: list[str] = []
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") not in {"user", "assistant"}:
+            continue
+        role = "Question" if message["role"] == "user" else "Oxaide"
+        images: list[str] = []
+        for name in message.get("artifacts") or []:
+            artifact = artifact_map.get(str(name))
+            if not artifact:
+                continue
+            mime_type = str(artifact.get("mime_type") or "")
+            data = str(artifact.get("data_base64") or "")
+            if mime_type in {"image/png", "image/jpeg", "image/webp", "image/svg+xml"} and data:
+                images.append(
+                    f'<img src="data:{escape(mime_type, quote=True)};base64,{escape(data, quote=True)}" '
+                    f'alt="{escape(str(name), quote=True)}">'
+                )
+        rendered_messages.append(
+            f'<article class="message {escape(str(message["role"]))}">'
+            f'<div class="role">{role}</div>'
+            f'<div class="content">{escape(str(message.get("content") or ""))}</div>'
+            f'{"".join(images)}</article>'
+        )
+    title = escape(str(row.get("title") or "Shared Oxaide research"))
+    description = escape(str(row.get("description") or "A read-only research conversation shared from Oxaide."))
+    page = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow">
+<title>{title}</title><style>
+:root{{color-scheme:dark}}body{{margin:0;background:#071814;color:#e8efe9;font:16px/1.65 system-ui,sans-serif}}
+main{{width:min(860px,calc(100% - 32px));margin:48px auto 96px}}header{{border-bottom:1px solid #29473e;padding-bottom:24px;margin-bottom:28px}}
+.eyebrow,.role{{color:#7fd7ad;font-size:12px;font-weight:700;letter-spacing:.12em;text-transform:uppercase}}h1{{font-size:clamp(30px,6vw,52px);line-height:1.05;margin:10px 0}}
+.description{{color:#afc2ba}}.notice{{background:#102a23;border:1px solid #31594c;padding:12px 16px;margin:22px 0}}
+.message{{border:1px solid #29473e;background:#0b211b;padding:20px;margin:14px 0}}.message.user{{background:#102720}}.content{{white-space:pre-wrap;overflow-wrap:anywhere;margin-top:8px}}
+img{{display:block;max-width:100%;height:auto;margin-top:18px;border:1px solid #31594c}}footer{{color:#78948a;font-size:13px;margin-top:32px}}
+</style></head><body><main><header><div class="eyebrow">Oxaide research share · local development</div><h1>{title}</h1><div class="description">{description}</div></header>
+<div class="notice">Frozen, unlisted, read-only snapshot. This development link is reachable only from this local dashboard.</div>
+{"".join(rendered_messages)}<footer>Shared from Oxaide · expires {escape(str(row.get("expires_at") or ""))}</footer></main></body></html>"""
+    return HTMLResponse(
+        page,
+        headers={
+            "Cache-Control": "private, no-store, max-age=0",
+            "Content-Security-Policy": "default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+            "Referrer-Policy": "no-referrer",
+            "X-Robots-Tag": "noindex, nofollow, noarchive",
+        },
+    )
 
 
 @app.delete("/api/sessions/{session_id}")
@@ -11036,6 +11184,196 @@ class CronJobCreate(BaseModel):
 
 class CronJobUpdate(BaseModel):
     updates: dict
+
+
+class ResearchScheduleMutation(BaseModel):
+    """Customer-safe recurring research input."""
+
+    name: str = ""
+    prompt: str
+    schedule: str
+
+    class Config:
+        extra = "forbid"
+
+
+_OXAIDE_RESEARCH_SCHEDULE_ORIGIN = "oxaide-scheduled-research-v1"
+
+
+def _call_cron_for_active_home(func_name: str, *args, **kwargs):
+    """Run a cron helper against this managed server's active profile only."""
+    from cron import jobs as cron_jobs
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    home = get_hermes_home().expanduser().resolve()
+    token = set_hermes_home_override(str(home))
+    try:
+        with cron_jobs.use_cron_store(home):
+            return getattr(cron_jobs, func_name)(*args, **kwargs)
+    finally:
+        reset_hermes_home_override(token)
+
+
+def _is_oxaide_research_schedule(job: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(job, dict):
+        return False
+    origin = job.get("origin")
+    return (
+        isinstance(origin, dict)
+        and origin.get("type") == _OXAIDE_RESEARCH_SCHEDULE_ORIGIN
+    )
+
+
+def _research_schedule_input(job: Dict[str, Any]) -> str:
+    schedule = job.get("schedule")
+    if not isinstance(schedule, dict):
+        return str(job.get("schedule_display") or "")
+    kind = schedule.get("kind")
+    if kind == "interval" and schedule.get("minutes") is not None:
+        return f"every {schedule['minutes']}m"
+    if kind == "cron":
+        return str(schedule.get("expr") or "")
+    if kind == "once":
+        return str(schedule.get("run_at") or "")
+    return str(schedule.get("display") or job.get("schedule_display") or "")
+
+
+def _project_research_schedule(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the narrow customer contract, excluding cron/runtime metadata."""
+    return {
+        "id": str(job.get("id") or ""),
+        "name": str(job.get("name") or ""),
+        "prompt": str(job.get("prompt") or ""),
+        "schedule": job.get("schedule") if isinstance(job.get("schedule"), dict) else {},
+        "schedule_input": _research_schedule_input(job),
+        "schedule_display": str(job.get("schedule_display") or ""),
+        "enabled": bool(job.get("enabled", True)),
+        "state": str(job.get("state") or ("scheduled" if job.get("enabled", True) else "paused")),
+        "created_at": job.get("created_at"),
+        "last_run_at": job.get("last_run_at"),
+        "next_run_at": job.get("next_run_at"),
+        "last_status": job.get("last_status"),
+    }
+
+
+def _validate_research_schedule_body(body: ResearchScheduleMutation) -> Tuple[str, str, str]:
+    name = str(body.name or "").strip()
+    prompt = str(body.prompt or "").strip()
+    schedule = str(body.schedule or "").strip()
+    if len(name) > 120:
+        raise HTTPException(status_code=400, detail="Name must be 120 characters or fewer")
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Research instructions are required")
+    if len(prompt) > 12000:
+        raise HTTPException(status_code=400, detail="Research instructions are too long")
+    if not schedule or len(schedule) > 200:
+        raise HTTPException(status_code=400, detail="A valid schedule is required")
+    return name, prompt, schedule
+
+
+def _require_research_schedule(job_id: str) -> Dict[str, Any]:
+    job = _call_cron_for_active_home("get_job", job_id)
+    if not _is_oxaide_research_schedule(job):
+        raise HTTPException(status_code=404, detail="Scheduled research not found")
+    return job
+
+
+def _list_research_schedules_sync() -> List[Dict[str, Any]]:
+    jobs = _call_cron_for_active_home("list_jobs", True)
+    managed = [job for job in jobs if _is_oxaide_research_schedule(job)]
+    managed.sort(key=lambda job: str(job.get("created_at") or ""), reverse=True)
+    return [_project_research_schedule(job) for job in managed]
+
+
+def _create_research_schedule_sync(body: ResearchScheduleMutation) -> Dict[str, Any]:
+    name, prompt, schedule = _validate_research_schedule_body(body)
+    try:
+        job = _call_cron_for_active_home(
+            "create_job",
+            prompt=prompt,
+            schedule=schedule,
+            name=name,
+            deliver="local",
+            origin={"type": _OXAIDE_RESEARCH_SCHEDULE_ORIGIN},
+            skills=sorted(_OXAIDE_RESEARCH_SKILLS),
+            enabled_toolsets=sorted(_OXAIDE_RESEARCH_TOOLSETS),
+            no_agent=False,
+            attach_to_session=False,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _project_research_schedule(job)
+
+
+def _update_research_schedule_sync(
+    job_id: str,
+    body: ResearchScheduleMutation,
+) -> Dict[str, Any]:
+    _require_research_schedule(job_id)
+    name, prompt, schedule = _validate_research_schedule_body(body)
+    try:
+        job = _call_cron_for_active_home(
+            "update_job",
+            job_id,
+            {"name": name, "prompt": prompt, "schedule": schedule},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not job:
+        raise HTTPException(status_code=404, detail="Scheduled research not found")
+    return _project_research_schedule(job)
+
+
+def _set_research_schedule_paused_sync(job_id: str, paused: bool) -> Dict[str, Any]:
+    _require_research_schedule(job_id)
+    try:
+        job = _call_cron_for_active_home("pause_job" if paused else "resume_job", job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not job:
+        raise HTTPException(status_code=404, detail="Scheduled research not found")
+    return _project_research_schedule(job)
+
+
+def _delete_research_schedule_sync(job_id: str) -> Dict[str, bool]:
+    _require_research_schedule(job_id)
+    try:
+        removed = _call_cron_for_active_home("remove_job", job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Unable to delete scheduled research") from exc
+    if not removed:
+        raise HTTPException(status_code=404, detail="Scheduled research not found")
+    return {"ok": True}
+
+
+@app.get("/api/research-schedules")
+async def list_research_schedules():
+    return await _run_cron_dashboard_io(_list_research_schedules_sync)
+
+
+@app.post("/api/research-schedules")
+async def create_research_schedule(body: ResearchScheduleMutation):
+    return await _run_cron_dashboard_io(_create_research_schedule_sync, body)
+
+
+@app.put("/api/research-schedules/{job_id}")
+async def update_research_schedule(job_id: str, body: ResearchScheduleMutation):
+    return await _run_cron_dashboard_io(_update_research_schedule_sync, job_id, body)
+
+
+@app.post("/api/research-schedules/{job_id}/pause")
+async def pause_research_schedule(job_id: str):
+    return await _run_cron_dashboard_io(_set_research_schedule_paused_sync, job_id, True)
+
+
+@app.post("/api/research-schedules/{job_id}/resume")
+async def resume_research_schedule(job_id: str):
+    return await _run_cron_dashboard_io(_set_research_schedule_paused_sync, job_id, False)
+
+
+@app.delete("/api/research-schedules/{job_id}")
+async def delete_research_schedule(job_id: str):
+    return await _run_cron_dashboard_io(_delete_research_schedule_sync, job_id)
 
 
 def _cron_optional_text(value: Any, *, strip_trailing_slash: bool = False) -> Optional[str]:
@@ -15534,7 +15872,45 @@ def _ws_auth_ok(ws: "WebSocket") -> bool:
     return _ws_auth_reason(ws)[0] is None
 
 
-def _dashboard_branding_settings() -> dict[str, str]:
+def _configured_runtime_pin(name: str) -> bool:
+    value = str(os.environ.get(name) or "").strip()
+    lowered = value.lower()
+    return bool(
+        value
+        and not lowered.startswith("replace-with-")
+        and not lowered.startswith("__replace_with_")
+    )
+
+
+def _is_oxaide_hosted_runtime() -> bool:
+    return bool(
+        _configured_runtime_pin("HERMES_OXAIDE_WORKSPACE_ID")
+        and _configured_runtime_pin("HERMES_OXAIDE_RUNTIME_KEY")
+    )
+
+
+def _oxaide_scheduled_research_enabled() -> bool:
+    """Return the managed schedule capability exposed by this runtime.
+
+    Local managed development keeps the feature available. Hosted runtimes
+    fail closed until durable scheduling and Oxaide turn settlement are wired
+    end to end; configuration cannot bypass that production safety boundary.
+    """
+    if _is_oxaide_hosted_runtime():
+        return False
+    raw_config = read_raw_config() or {}
+    dashboard = (
+        raw_config.get("dashboard")
+        if isinstance(raw_config.get("dashboard"), dict)
+        else {}
+    )
+    configured = dashboard.get("scheduled_research_enabled")
+    if isinstance(configured, bool):
+        return configured
+    return True
+
+
+def _dashboard_branding_settings() -> dict[str, Any]:
     config = load_config() or {}
     raw_config = read_raw_config() or {}
     dashboard = config.get("dashboard") if isinstance(config.get("dashboard"), dict) else {}
@@ -15545,19 +15921,7 @@ def _dashboard_branding_settings() -> dict[str, str]:
         if isinstance(raw_dashboard.get("branding"), dict)
         else {}
     )
-    def configured_pin(name: str) -> bool:
-        value = str(os.environ.get(name) or "").strip()
-        lowered = value.lower()
-        return bool(
-            value
-            and not lowered.startswith("replace-with-")
-            and not lowered.startswith("__replace_with_")
-        )
-
-    oxaide_runtime = bool(
-        configured_pin("HERMES_OXAIDE_WORKSPACE_ID")
-        and configured_pin("HERMES_OXAIDE_RUNTIME_KEY")
-    )
+    oxaide_runtime = _is_oxaide_hosted_runtime()
     product = str(raw_configured.get("product") or configured.get("product") or "").strip().lower()
     is_oxaide = oxaide_runtime or product == "oxaide"
     # load_config() deep-merges the generic Hermes branding defaults. Once a
@@ -15582,10 +15946,13 @@ def _dashboard_branding_settings() -> dict[str, str]:
         "billing_url": "https://oxaide.com/console/billing" if is_oxaide else "",
         "docs_url": "https://oxaide.com/docs" if is_oxaide else "https://hermes-agent.nousresearch.com/docs/",
     }
-    result: dict[str, str] = {}
+    result: dict[str, Any] = {}
     for key, fallback in defaults.items():
         value = str(configured_values.get(key) or fallback).strip()
         result[key] = value[:500]
+    result["scheduled_research_enabled"] = (
+        _oxaide_scheduled_research_enabled() if is_oxaide else True
+    )
     return result
 
 # Per-channel subscriber registry used by /api/pub (PTY-side gateway → dashboard)
