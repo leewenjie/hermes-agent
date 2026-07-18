@@ -123,6 +123,39 @@ def test_transport_identity_isolated_and_rpc_params_cannot_override(monkeypatch)
         server._sessions.clear()
 
 
+def test_trusted_oxaide_owner_persists_and_binds_session_context(monkeypatch):
+    created = []
+
+    class _DB:
+        def create_session(self, key, **kwargs):
+            created.append((key, kwargs))
+
+    session = {
+        "session_key": "stored-session",
+        "source": "tui",
+        "cwd": "/tmp",
+        "trusted_launch_context": dict(_CONTEXT_A),
+    }
+    server._sessions["sid"] = session
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setattr(server, "_resolve_model", lambda: "test-model")
+
+    try:
+        server._ensure_session_db_row(session)
+        assert created[0][0] == "stored-session"
+        assert created[0][1]["user_id"] == _CONTEXT_A["user_id"]
+
+        from gateway.session_context import get_session_env
+
+        tokens = server._set_session_context("stored-session")
+        try:
+            assert get_session_env("HERMES_SESSION_USER_ID") == _CONTEXT_A["user_id"]
+        finally:
+            server._clear_session_context(tokens)
+    finally:
+        server._sessions.clear()
+
+
 def test_oxaide_session_create_does_not_prebuild_agent(monkeypatch):
     builds = []
     monkeypatch.setattr(server, "_new_session_key", lambda: "stored")
