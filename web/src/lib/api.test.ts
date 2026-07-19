@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { api } from "./api";
+import { ApiError, api, fetchJSON } from "./api";
 
 const SESSION_HEADER = "X-Hermes-Session-Token";
 
@@ -45,6 +45,47 @@ describe("api.getModelOptions", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/model/options?profile=default&refresh=1&include_unconfigured=1",
       expect.objectContaining({ credentials: "include" }),
+    );
+  });
+});
+
+describe("fetchJSON errors", () => {
+  it("preserves HTTP status and structured error detail", async () => {
+    vi.stubGlobal("window", { __HERMES_AUTH_REQUIRED__: true });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async () =>
+        new Response(JSON.stringify({ detail: "Session does not belong to this user" }), {
+          headers: { "Content-Type": "application/json" },
+          status: 403,
+        }),
+      ),
+    );
+
+    const error = await fetchJSON("/api/research-shares/preview").catch(
+      (reason: unknown) => reason,
+    );
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).toMatchObject({
+      status: 403,
+      detail: "Session does not belong to this user",
+    });
+  });
+});
+
+describe("api.getStatus", () => {
+  it("forwards an abort signal to the capability probe", async () => {
+    vi.stubGlobal("window", {});
+    const fetchMock = jsonFetchMock({ research_sharing_enabled: true });
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+
+    await api.getStatus(controller.signal);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/status",
+      expect.objectContaining({ signal: controller.signal }),
     );
   });
 });

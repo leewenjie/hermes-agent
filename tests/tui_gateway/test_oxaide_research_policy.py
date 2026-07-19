@@ -389,9 +389,15 @@ def test_oxaide_session_rpc_rows_hide_runtime_metadata(monkeypatch, oxaide_runti
                 "message_count": 2,
                 "source": "desktop",
                 "model": "private-model",
+                "user_id": "user-1",
             }]
 
     monkeypatch.setattr(server, "_get_db", lambda: DB())
+    monkeypatch.setattr(
+        server,
+        "_transport_trusted_context",
+        lambda: {"user_id": "user-1"},
+    )
     listed = server._methods["session.list"]("rid", {})["result"]["sessions"]
     assert listed == [{
         "id": "stored-1",
@@ -432,6 +438,86 @@ def test_oxaide_session_rpc_rows_hide_runtime_metadata(monkeypatch, oxaide_runti
     }
     assert payload["session_id"] == "runtime-1"
     assert payload["session_key"] == "stored-1"
+
+
+def test_oxaide_session_enumeration_is_owner_scoped(monkeypatch, oxaide_runtime):
+    rows = [
+        {
+            "id": "owned",
+            "title": "Owned research",
+            "preview": "Visible",
+            "started_at": 2,
+            "message_count": 2,
+            "source": "desktop",
+            "user_id": "user-1",
+        },
+        {
+            "id": "foreign",
+            "title": "Foreign research",
+            "preview": "Private",
+            "started_at": 3,
+            "message_count": 3,
+            "source": "desktop",
+            "user_id": "user-2",
+        },
+        {
+            "id": "ownerless",
+            "title": "Unclaimed research",
+            "preview": "Private",
+            "started_at": 1,
+            "message_count": 1,
+            "source": "desktop",
+            "user_id": "",
+        },
+    ]
+
+    class DB:
+        def list_sessions_rich(self, **_kwargs):
+            return rows
+
+    monkeypatch.setattr(server, "_get_db", lambda: DB())
+    monkeypatch.setattr(
+        server,
+        "_transport_trusted_context",
+        lambda: {"user_id": "user-1"},
+    )
+
+    listed = server._methods["session.list"]("rid", {})["result"]["sessions"]
+    assert [row["id"] for row in listed] == ["owned"]
+
+    recent = server._methods["session.most_recent"]("rid", {})["result"]
+    assert recent["session_id"] == "owned"
+
+
+def test_oxaide_active_sessions_are_owner_scoped(monkeypatch, oxaide_runtime):
+    def live_session(user_id):
+        return {
+            "agent": None,
+            "created_at": 1,
+            "history": [],
+            "history_lock": threading.RLock(),
+            "last_active": 2,
+            "session_key": f"stored-{user_id}",
+            "trusted_launch_context": {"user_id": user_id},
+        }
+
+    monkeypatch.setattr(
+        server,
+        "_transport_trusted_context",
+        lambda: {"user_id": "user-1"},
+    )
+    monkeypatch.setattr(
+        server,
+        "_sessions",
+        {
+            "runtime-owned": live_session("user-1"),
+            "runtime-foreign": live_session("user-2"),
+        },
+    )
+    monkeypatch.setattr(server, "_session_live_title", lambda *_args: "Research")
+
+    active = server._methods["session.active_list"]("rid", {})["result"]["sessions"]
+    assert [row["id"] for row in active] == ["runtime-owned"]
 
 
 def test_oxaide_session_resume_ignores_profile_spoofing(monkeypatch, oxaide_runtime):

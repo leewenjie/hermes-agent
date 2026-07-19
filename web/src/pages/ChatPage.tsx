@@ -244,7 +244,9 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     session: ChatSessionIdentity | null;
   }>({ scope: "", session: null });
   const [shareOpen, setShareOpen] = useState(false);
-  const [sharingEnabled, setSharingEnabled] = useState(false);
+  const [sharingAvailability, setSharingAvailability] = useState<
+    "loading" | "available" | "unavailable" | "error"
+  >("loading");
   const { t } = useI18n();
   const managedOxaide = isOxaideManagedDashboard();
   const closeMobilePanel = useCallback(() => setMobilePanelOpenRaw(false), []);
@@ -393,16 +395,31 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => {
+      if (!cancelled) setSharingAvailability("error");
+      controller.abort();
+    }, 8_000);
     void api
-      .getStatus()
+      .getStatus(controller.signal)
       .then((status) => {
-        if (!cancelled) setSharingEnabled(Boolean(status.research_sharing_enabled));
+        if (!cancelled) {
+          window.clearTimeout(timeout);
+          setSharingAvailability(
+            status.research_sharing_enabled ? "available" : "unavailable",
+          );
+        }
       })
       .catch(() => {
-        if (!cancelled) setSharingEnabled(false);
+        if (!cancelled) {
+          window.clearTimeout(timeout);
+          setSharingAvailability("error");
+        }
       });
     return () => {
       cancelled = true;
+      window.clearTimeout(timeout);
+      controller.abort();
     };
   }, []);
 
@@ -413,15 +430,23 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       setEnd(null);
       return;
     }
-    const shareAction = managedOxaide && sharingEnabled && currentResearchSession ? (
+    const shareAction = managedOxaide &&
+      currentResearchSession &&
+      sharingAvailability !== "unavailable" ? (
       <Button
         outlined
         size="sm"
         onClick={() => setShareOpen(true)}
+        disabled={sharingAvailability === "loading"}
+        title={
+          sharingAvailability === "error"
+            ? "Sharing availability could not be checked. Click to try anyway."
+            : undefined
+        }
         prefix={<Share2 className="h-3.5 w-3.5" />}
         className="shrink-0 normal-case tracking-normal"
       >
-        Share result
+        {sharingAvailability === "loading" ? "Checking sharing…" : "Share result"}
       </Button>
     ) : null;
     const detailsAction = narrow ? (
@@ -451,7 +476,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       ) : null,
     );
     return () => setEnd(null);
-  }, [currentResearchSession, isActive, managedOxaide, sharingEnabled, narrow, mobilePanelOpen, modelToolsLabel, setEnd]);
+  }, [currentResearchSession, isActive, managedOxaide, sharingAvailability, narrow, mobilePanelOpen, modelToolsLabel, setEnd]);
 
   const handleCopyLast = () => {
     const ws = wsRef.current;

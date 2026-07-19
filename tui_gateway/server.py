@@ -1705,6 +1705,37 @@ def _trusted_session_user_id(session: dict | None) -> str:
     return str(context.get("user_id") or "").strip()
 
 
+class _SessionOwnershipMismatch(RuntimeError):
+    """A trusted caller attempted to attach to another user's session."""
+
+
+def _reconcile_trusted_session_owner(db, session_id: str, row: dict, user_id: str) -> dict:
+    """Bind an ownerless durable row to its authenticated owner, never transfer it."""
+    trusted_user_id = str(user_id or "").strip()
+    if not trusted_user_id:
+        return row
+
+    stored_user_id = str(row.get("user_id") or "").strip()
+    if stored_user_id and stored_user_id != trusted_user_id:
+        raise _SessionOwnershipMismatch("Session does not belong to this user")
+
+    if not stored_user_id:
+        db.create_session(
+            session_id,
+            source=str(row.get("source") or "tui"),
+            model=row.get("model"),
+            user_id=trusted_user_id,
+        )
+        repaired = db.get_session(session_id)
+        if not repaired:
+            raise RuntimeError("session ownership repair could not be verified")
+        row = repaired
+
+    if str(row.get("user_id") or "").strip() != trusted_user_id:
+        raise _SessionOwnershipMismatch("Session does not belong to this user")
+    return row
+
+
 def _ensure_session_db_row(session: dict) -> None:
     """Idempotently persist the session's DB row on first real activity.
 
@@ -4923,6 +4954,7 @@ def _init_session(
     cwd: str | None = None,
     session_db=None,
     source: str | None = None,
+    trusted_launch_context: dict | None = None,
 ):
     now = time.time()
     with _sessions_lock:
@@ -4953,7 +4985,11 @@ def _init_session(
             # Pin async event emissions to whichever transport created the
             # session (stdio for Ink, JSON-RPC WS for the dashboard sidebar).
             "transport": current_transport() or _stdio_transport,
-            "trusted_launch_context": _transport_trusted_context(),
+            "trusted_launch_context": (
+                dict(trusted_launch_context)
+                if isinstance(trusted_launch_context, dict)
+                else _transport_trusted_context()
+            ),
         }
     db = session_db if session_db is not None else _get_db()
     if db is not None:
@@ -5517,6 +5553,22 @@ def _transport_trusted_context() -> dict:
     return dict(context) if context else {}
 
 
+def _transport_trusted_user_id() -> str:
+    """Return the authenticated caller identity held by the active transport."""
+    return str(_transport_trusted_context().get("user_id") or "").strip()
+
+
+def _oxaide_row_visible_to_transport(row: dict) -> bool:
+    """Fail closed when projecting durable session metadata in managed mode."""
+    if not _is_oxaide_tenant_runtime():
+        return True
+    trusted_user_id = _transport_trusted_user_id()
+    return bool(
+        trusted_user_id
+        and str(row.get("user_id") or "").strip() == trusted_user_id
+    )
+
+
 def _authorize_oxaide_user_turn(session: dict):
     context = session.get("trusted_launch_context")
     if not context:
@@ -5871,7 +5923,10 @@ def _(rid, params: dict) -> dict:
         rows = [
             s
             for s in db.list_sessions_rich(source=None, limit=fetch_limit, order_by_last_active=True, compact_rows=True)
-            if (s.get("source") or "").strip().lower() not in deny
+            if (
+                (s.get("source") or "").strip().lower() not in deny
+                and _oxaide_row_visible_to_transport(s)
+            )
         ][:limit]
         return _ok(
             rid,
@@ -5924,7 +5979,7 @@ def _(rid, params: dict) -> dict:
         rows = db.list_sessions_rich(source=None, limit=200, order_by_last_active=True, compact_rows=True)
         for row in rows:
             src = (row.get("source") or "").strip().lower()
-            if src in deny:
+            if src in deny or not _oxaide_row_visible_to_transport(row):
                 continue
             return _ok(
                 rid,
@@ -6056,13 +6111,22 @@ def _deferred_session_record(
 
 
 def _claim_or_reuse_live(
-    sid: str, session_key: str, record: dict, lease
+    sid: str,
+    session_key: str,
+    record: dict,
+    lease,
+    *,
+    expected_user_id: str | None = None,
 ) -> tuple[str, dict] | None:
     """Register ``record`` as the live session for ``session_key`` under the
     resume lock, or — if a concurrent resume already won — release ``lease`` and
     return the winner for the caller to reuse."""
     with _session_resume_lock:
-        live = _find_live_session_by_key(session_key)
+        if _live_session_identity_conflict(session_key, expected_user_id):
+            if lease is not None:
+                lease.release()
+            raise _SessionOwnershipMismatch("Session does not belong to this user")
+        live = _find_live_session_by_key(session_key, expected_user_id=expected_user_id)
         if live is not None:
             if lease is not None:
                 lease.release()
@@ -6154,6 +6218,15 @@ def _(rid, params: dict) -> dict:
             target = tip
             found = db.get_session(target) or found
 
+    trusted_user_id = str(trusted_context.get("user_id") or "").strip()
+    try:
+        found = _reconcile_trusted_session_owner(db, target, found, trusted_user_id)
+    except _SessionOwnershipMismatch as e:
+        return _err(rid, 4030, str(e))
+    except Exception as e:
+        return _err(rid, 5000, f"resume ownership verification failed: {e}")
+    expected_user_id = trusted_user_id or None
+
     profile_resume_cwd = str(found.get("cwd") or "").strip() or _profile_configured_cwd(
         profile_home
     )
@@ -6177,7 +6250,9 @@ def _(rid, params: dict) -> dict:
 
     # Fast path: if the session is already live, reuse it under the lock.
     with _session_resume_lock:
-        live = _find_live_session_by_key(target)
+        if _live_session_identity_conflict(target, expected_user_id):
+            return _err(rid, 4030, "Session does not belong to this user")
+        live = _find_live_session_by_key(target, expected_user_id=expected_user_id)
         if live is not None:
             return _ok(rid, _reuse_live_payload(*live))
 
@@ -6217,7 +6292,13 @@ def _(rid, params: dict) -> dict:
             profile_home=profile_home,
             lazy=True,
         )
-        if (live := _claim_or_reuse_live(sid, target, record, lease)) is not None:
+        try:
+            live = _claim_or_reuse_live(
+                sid, target, record, lease, expected_user_id=expected_user_id
+            )
+        except _SessionOwnershipMismatch as e:
+            return _err(rid, 4030, str(e))
+        if live is not None:
             return _ok(rid, _reuse_live_payload(*live))
         # A delegated child mid-run emits no session events of its own — report
         # its liveness from the relay registry so the window shows a busy turn.
@@ -6299,7 +6380,13 @@ def _(rid, params: dict) -> dict:
             model_override=overrides.get("model_override"),
             resume_runtime_overrides=overrides or None,
         )
-        if (live := _claim_or_reuse_live(sid, target, record, lease)) is not None:
+        try:
+            live = _claim_or_reuse_live(
+                sid, target, record, lease, expected_user_id=expected_user_id
+            )
+        except _SessionOwnershipMismatch as e:
+            return _err(rid, 4030, str(e))
+        if live is not None:
             return _ok(rid, _reuse_live_payload(*live))
 
         _schedule_agent_build(sid)
@@ -6393,7 +6480,16 @@ def _(rid, params: dict) -> dict:
     # live session while we were building. Re-check under the lock; if it won,
     # discard our just-built agent and reuse theirs (no worker/poller wired yet).
     with _session_resume_lock:
-        live = _find_live_session_by_key(target)
+        if _live_session_identity_conflict(target, expected_user_id):
+            try:
+                if hasattr(agent, "close"):
+                    agent.close()
+            except Exception:
+                pass
+            if lease is not None:
+                lease.release()
+            return _err(rid, 4030, "Session does not belong to this user")
+        live = _find_live_session_by_key(target, expected_user_id=expected_user_id)
         if live is not None:
             try:
                 if hasattr(agent, "close"):
@@ -6428,6 +6524,7 @@ def _(rid, params: dict) -> dict:
                     cwd=profile_resume_cwd,
                     session_db=db,
                     source=source,
+                    trusted_launch_context=trusted_context,
                 )
             finally:
                 if init_home_token is not None:
@@ -6575,13 +6672,37 @@ def _session_lookup_key(session: dict, *, fallback: str = "") -> str:
     )
 
 
-def _find_live_session_by_key(session_key: str) -> tuple[str, dict] | None:
+def _find_live_session_by_key(
+    session_key: str, *, expected_user_id: str | None = None
+) -> tuple[str, dict] | None:
     for sid, session in list(_sessions.items()):
         if session.get("_finalized"):
             continue
-        if _session_lookup_key(session, fallback=sid) == session_key:
-            return sid, session
+        if _session_lookup_key(session, fallback=sid) != session_key:
+            continue
+        if (
+            expected_user_id is not None
+            and _trusted_session_user_id(session) != expected_user_id
+        ):
+            continue
+        return sid, session
     return None
+
+
+def _live_session_identity_conflict(
+    session_key: str, expected_user_id: str | None
+) -> bool:
+    """Return whether this durable key is live under another trusted owner."""
+    if expected_user_id is None:
+        return False
+    for sid, session in list(_sessions.items()):
+        if session.get("_finalized"):
+            continue
+        if _session_lookup_key(session, fallback=sid) != session_key:
+            continue
+        if _trusted_session_user_id(session) != expected_user_id:
+            return True
+    return False
 
 
 def _fallback_session_info(session: dict) -> dict:
@@ -6676,7 +6797,17 @@ def _(rid, params: dict) -> dict:
     rows = [
         _session_live_item(sid, session, current)
         for sid, session in snapshot
-        if not session.get("_finalized")
+        if (
+            not session.get("_finalized")
+            and (
+                not _is_oxaide_tenant_runtime()
+                or (
+                    _transport_trusted_user_id()
+                    and _trusted_session_user_id(session)
+                    == _transport_trusted_user_id()
+                )
+            )
+        )
     ]
     return _ok(rid, {"sessions": rows})
 
