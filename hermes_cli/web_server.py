@@ -207,6 +207,10 @@ async def _lifespan(app: "FastAPI"):
     # Reap idle/dead keep-alive PTY sessions in the background (30-min TTL).
     pty_reaper_task = asyncio.create_task(run_reaper(PTY_REGISTRY))
 
+    if os.environ.get("HERMES_OXAIDE_SCHEDULED_RESEARCH_SIGNING_SECRET"):
+        from hermes_cli.oxaide_scheduled_research import resume_pending_occurrences
+        resume_pending_occurrences()
+
     try:
         yield
     finally:
@@ -622,6 +626,17 @@ async def _token_auth_seam(request: Request, call_next):
 
 
 @app.middleware("http")
+async def scheduled_research_machine_auth_seam(request: Request, call_next):
+    """Let the exact HMAC-protected occurrence route bypass browser auth."""
+    if (
+        request.method == "POST"
+        and request.url.path == "/api/research-schedules/occurrences"
+    ):
+        request.state.token_authenticated = True
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def security_headers_middleware(request: Request, call_next):
     """Attach conservative browser security headers to every HTTP response."""
     response = await call_next(request)
@@ -694,6 +709,7 @@ _OXAIDE_RESEARCH_STATIC_API_METHODS = frozenset({
     ("POST", "/api/research-shares/preview"),
     ("GET", "/api/research-schedules"),
     ("POST", "/api/research-schedules"),
+    ("GET", "/api/research-schedules/occurrences"),
 })
 
 _OXAIDE_RESERVED_SESSION_PATH_PARTS = frozenset({
@@ -745,6 +761,7 @@ async def oxaide_research_boundary_middleware(request: Request, call_next):
     if (
         _dashboard_branding_settings().get("product") == "oxaide"
         and path.startswith("/api/")
+        and path != "/api/research-schedules/occurrences"
         and not (
             hosted_runtime_bridge.enabled()
             and hosted_runtime_bridge.matches_path(path)
@@ -11192,6 +11209,14 @@ class ResearchScheduleMutation(BaseModel):
     name: str = ""
     prompt: str
     schedule: str
+    request_id: Optional[str] = None
+
+    class Config:
+        extra = "forbid"
+
+
+class ResearchScheduleAction(BaseModel):
+    request_id: Optional[str] = None
 
     class Config:
         extra = "forbid"
@@ -11346,33 +11371,223 @@ def _delete_research_schedule_sync(job_id: str) -> Dict[str, bool]:
     return {"ok": True}
 
 
+def _hosted_research_user_id(request: Request) -> str:
+    session = getattr(request.state, "session", None)
+    user_id = str(getattr(session, "user_id", "") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return user_id
+
+
+def _hosted_schedule_control_sync(
+    user_id: str,
+    action: str,
+    *,
+    job_id: Optional[str] = None,
+    body: Optional[ResearchScheduleMutation] = None,
+    request_id: Optional[str] = None,
+) -> Any:
+    from hermes_cli.oxaide_scheduled_research_control import (
+        ScheduledResearchControlError,
+        build_mutation,
+        next_resume_at,
+        request_control,
+    )
+
+    try:
+        if action == "list":
+            return request_control(user_id, "list")
+        if action == "list_occurrences":
+            return request_control(user_id, action)
+        schedules = request_control(user_id, "list")
+        current = next(
+            (item for item in schedules if str(item.get("id") or "") == job_id),
+            None,
+        )
+        if action != "create" and current is None:
+            raise HTTPException(status_code=404, detail="Scheduled research not found")
+        if action == "create":
+            assert body is not None
+            if not body.request_id:
+                raise HTTPException(status_code=400, detail="Stable request ID is required")
+            name, prompt, schedule_input = _validate_research_schedule_body(body)
+            return request_control(
+                user_id,
+                "create",
+                request_id=body.request_id,
+                mutation=build_mutation(name, prompt, schedule_input),
+            )
+        expected_revision = int(current.get("revision") or 0)
+        if action == "update":
+            assert body is not None
+            if not body.request_id:
+                raise HTTPException(status_code=400, detail="Stable request ID is required")
+            name, prompt, schedule_input = _validate_research_schedule_body(body)
+            return request_control(
+                user_id,
+                "update",
+                request_id=body.request_id,
+                schedule_id=job_id,
+                expected_revision=expected_revision,
+                mutation=build_mutation(name, prompt, schedule_input),
+            )
+        fields: Dict[str, Any] = {
+            "schedule_id": job_id,
+            "expected_revision": expected_revision,
+        }
+        if action == "resume":
+            fields["next_run_at"] = next_resume_at(current.get("schedule") or {})
+        if not request_id:
+            raise HTTPException(status_code=400, detail="Stable request ID is required")
+        return request_control(user_id, action, request_id=request_id, **fields)
+    except ScheduledResearchControlError as exc:
+        status = 409 if exc.status == 409 else exc.status
+        raise HTTPException(status_code=status, detail=exc.code) from exc
+
+
 @app.get("/api/research-schedules")
-async def list_research_schedules():
+async def list_research_schedules(request: Request):
+    if _is_oxaide_hosted_runtime():
+        return await run_in_threadpool(
+            _hosted_schedule_control_sync,
+            _hosted_research_user_id(request),
+            "list",
+        )
     return await _run_cron_dashboard_io(_list_research_schedules_sync)
 
 
+@app.get("/api/research-schedules/occurrences")
+async def list_research_schedule_occurrences(request: Request):
+    if not _is_oxaide_hosted_runtime():
+        return {"occurrences": [], "next_cursor": None}
+    return await run_in_threadpool(
+        _hosted_schedule_control_sync,
+        _hosted_research_user_id(request),
+        "list_occurrences",
+    )
+
+
+@app.post("/api/research-schedules/occurrences", status_code=202)
+async def accept_research_schedule_occurrence(request: Request):
+    from hermes_cli.oxaide_scheduled_research import (
+        InvalidOccurrenceDispatch,
+        accept_occurrence,
+        authorize_occurrence,
+        parse_occurrence_dispatch,
+        parse_occurrence_start,
+        verify_occurrence_dispatch,
+    )
+    from hermes_state import ScheduledResearchOccurrenceConflict
+
+    raw_body = await request.body()
+    timestamp = request.headers.get("x-oxaide-scheduled-research-timestamp", "")
+    signature = request.headers.get("x-oxaide-scheduled-research-signature", "")
+    if not verify_occurrence_dispatch(raw_body, timestamp, signature):
+        return JSONResponse(
+            status_code=401,
+            content={"ok": False, "code": "scheduled_research_signature_invalid"},
+        )
+    try:
+        try:
+            untrusted = json.loads(raw_body)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            untrusted = None
+        is_start = isinstance(untrusted, dict) and untrusted.get("command") == "start"
+        payload = parse_occurrence_start(raw_body) if is_start else parse_occurrence_dispatch(raw_body)
+        replayed = authorize_occurrence(payload) if is_start else accept_occurrence(payload, raw_body)
+    except InvalidOccurrenceDispatch as exc:
+        return JSONResponse(
+            status_code=422,
+            content={"ok": False, "code": str(exc)},
+        )
+    except ScheduledResearchOccurrenceConflict:
+        return JSONResponse(
+            status_code=409,
+            content={"ok": False, "code": "scheduled_research_occurrence_reused"},
+        )
+    response = {
+        "ok": True,
+        "occurrence_id": payload["occurrence_id"],
+        "runtime_session_id": payload["runtime_session_id"],
+        "replayed": replayed,
+    }
+    response["started" if is_start else "accepted"] = True
+    return response
+
+
 @app.post("/api/research-schedules")
-async def create_research_schedule(body: ResearchScheduleMutation):
+async def create_research_schedule(request: Request, body: ResearchScheduleMutation):
+    if _is_oxaide_hosted_runtime():
+        return await run_in_threadpool(
+            _hosted_schedule_control_sync,
+            _hosted_research_user_id(request),
+            "create",
+            body=body,
+        )
     return await _run_cron_dashboard_io(_create_research_schedule_sync, body)
 
 
 @app.put("/api/research-schedules/{job_id}")
-async def update_research_schedule(job_id: str, body: ResearchScheduleMutation):
+async def update_research_schedule(request: Request, job_id: str, body: ResearchScheduleMutation):
+    if _is_oxaide_hosted_runtime():
+        return await run_in_threadpool(
+            _hosted_schedule_control_sync,
+            _hosted_research_user_id(request),
+            "update",
+            job_id=job_id,
+            body=body,
+        )
     return await _run_cron_dashboard_io(_update_research_schedule_sync, job_id, body)
 
 
 @app.post("/api/research-schedules/{job_id}/pause")
-async def pause_research_schedule(job_id: str):
+async def pause_research_schedule(
+    request: Request,
+    job_id: str,
+    body: Optional[ResearchScheduleAction] = None,
+):
+    if _is_oxaide_hosted_runtime():
+        return await run_in_threadpool(
+            _hosted_schedule_control_sync,
+            _hosted_research_user_id(request),
+            "pause",
+            job_id=job_id,
+            request_id=body.request_id if body else None,
+        )
     return await _run_cron_dashboard_io(_set_research_schedule_paused_sync, job_id, True)
 
 
 @app.post("/api/research-schedules/{job_id}/resume")
-async def resume_research_schedule(job_id: str):
+async def resume_research_schedule(
+    request: Request,
+    job_id: str,
+    body: Optional[ResearchScheduleAction] = None,
+):
+    if _is_oxaide_hosted_runtime():
+        return await run_in_threadpool(
+            _hosted_schedule_control_sync,
+            _hosted_research_user_id(request),
+            "resume",
+            job_id=job_id,
+            request_id=body.request_id if body else None,
+        )
     return await _run_cron_dashboard_io(_set_research_schedule_paused_sync, job_id, False)
 
 
 @app.delete("/api/research-schedules/{job_id}")
-async def delete_research_schedule(job_id: str):
+async def delete_research_schedule(
+    request: Request,
+    job_id: str,
+    body: Optional[ResearchScheduleAction] = None,
+):
+    if _is_oxaide_hosted_runtime():
+        return await run_in_threadpool(
+            _hosted_schedule_control_sync,
+            _hosted_research_user_id(request),
+            "delete",
+            job_id=job_id,
+            request_id=body.request_id if body else None,
+        )
     return await _run_cron_dashboard_io(_delete_research_schedule_sync, job_id)
 
 
@@ -15893,11 +16108,14 @@ def _oxaide_scheduled_research_enabled() -> bool:
     """Return the managed schedule capability exposed by this runtime.
 
     Local managed development keeps the feature available. Hosted runtimes
-    fail closed until durable scheduling and Oxaide turn settlement are wired
-    end to end; configuration cannot bypass that production safety boundary.
+    expose it only when durable control/dispatch signing and usage settlement
+    are configured; partial deployments remain fail-closed.
     """
     if _is_oxaide_hosted_runtime():
-        return False
+        from hermes_cli.oxaide_scheduled_research_control import enabled
+        return enabled() and _configured_runtime_pin(
+            "HERMES_OXAIDE_USAGE_SIGNING_SECRET"
+        )
     raw_config = read_raw_config() or {}
     dashboard = (
         raw_config.get("dashboard")

@@ -191,6 +191,29 @@ class TestShouldExclude:
 # ---------------------------------------------------------------------------
 
 class TestBackup:
+    def test_sqlite_online_backup_failure_never_raw_copies_wal_database(
+        self, tmp_path, monkeypatch
+    ):
+        import hermes_cli.backup as backup_mod
+
+        src = tmp_path / "state.db"
+        dst = tmp_path / "snapshot.db"
+        src.write_bytes(b"live-main-file")
+        dst.write_bytes(b"partial-snapshot")
+        monkeypatch.setattr(
+            backup_mod.sqlite3,
+            "connect",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("backup failed")),
+        )
+        monkeypatch.setattr(
+            backup_mod.shutil,
+            "copy2",
+            lambda *_args, **_kwargs: pytest.fail("unsafe raw copy attempted"),
+        )
+
+        assert backup_mod._safe_copy_db(src, dst) is False
+        assert not dst.exists()
+
     def test_creates_zip(self, tmp_path, monkeypatch):
         """Backup creates a valid zip containing expected files."""
         hermes_home = tmp_path / ".hermes"

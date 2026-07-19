@@ -32,7 +32,7 @@ except ImportError:
     except ImportError:
         msvcrt = None
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 # Add parent directory to path for imports BEFORE repo-level imports.
 # Without this, standalone invocations (e.g. after `hermes update` reloads
@@ -2483,7 +2483,10 @@ def _guard_job_credential_exfil(job: dict) -> None:
 
 
 def run_job(
-    job: dict, *, defer_agent_teardown: Optional[list] = None
+    job: dict,
+    *,
+    defer_agent_teardown: Optional[list] = None,
+    cancel_requested: Optional[Callable[[], bool]] = None,
 ) -> tuple[bool, str, str, Optional[str]]:
     """
     Execute a single cron job.
@@ -2675,6 +2678,10 @@ def run_job(
         logger.info("Job '%s': script produced no output, skipping AI call.", job_name)
         return True, "", SILENT_MARKER, None
     origin = _resolve_origin(job)
+    _is_oxaide_managed_occurrence = (
+        isinstance(origin, dict)
+        and origin.get("type") == "oxaide-scheduled-research-v1"
+    )
     _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
 
     logger.info("Running job '%s' (ID: %s)", job_name, job_id)
@@ -2807,7 +2814,12 @@ def run_job(
         # value is intentionally re-read from storage every tick so a
         # ``cronjob action=update model=...`` after a failed run takes effect
         # on the next tick — there is no in-memory cache.
-        model = job.get("model") or os.getenv("HERMES_MODEL") or ""
+        if _is_oxaide_managed_occurrence:
+            model = os.getenv("HERMES_OXAIDE_MODEL", "").strip()
+            if not model:
+                raise RuntimeError("Managed Scheduled Research model is not configured")
+        else:
+            model = job.get("model") or os.getenv("HERMES_MODEL") or ""
 
         # Load config.yaml for model, reasoning, prefill, toolsets, provider routing
         _cfg = {}
@@ -2830,7 +2842,7 @@ def run_job(
                 # Coerce null/missing to {} so a falsy default never
                 # clobbers an already-resolved env value with ``None``.
                 _model_cfg = _cfg.get("model") or {}
-                if not job.get("model"):
+                if not job.get("model") and not _is_oxaide_managed_occurrence:
                     if isinstance(_model_cfg, str):
                         model = _model_cfg
                     elif isinstance(_model_cfg, dict):
@@ -2896,7 +2908,9 @@ def run_job(
                     prefill_messages = None
 
         # Max iterations
-        max_iterations = _cfg.get("agent", {}).get("max_turns") or _cfg.get("max_turns") or 90
+        max_iterations = 16 if _is_oxaide_managed_occurrence else (
+            _cfg.get("agent", {}).get("max_turns") or _cfg.get("max_turns") or 90
+        )
 
         # Provider routing
         pr = _cfg.get("provider_routing") or {}
@@ -2921,13 +2935,18 @@ def run_job(
             # no explicit provider is requested. Passing the env var here short-
             # circuits that precedence and can resurrect old providers (for
             # example DeepSeek) for cron jobs that do not pin provider/model.
+            managed_provider = os.getenv("HERMES_OXAIDE_PROVIDER", "").strip()
+            if _is_oxaide_managed_occurrence and not managed_provider:
+                raise RuntimeError("Managed Scheduled Research provider is not configured")
             runtime_kwargs = {
-                "requested": job.get("provider"),
+                "requested": managed_provider if _is_oxaide_managed_occurrence else job.get("provider"),
             }
             if job.get("base_url"):
                 runtime_kwargs["explicit_base_url"] = job.get("base_url")
             runtime = resolve_runtime_provider(**runtime_kwargs)
         except AuthError as auth_exc:
+            if _is_oxaide_managed_occurrence:
+                raise RuntimeError(format_runtime_provider_error(auth_exc)) from auth_exc
             # Primary provider auth failed — try fallback chain before giving up.
             logger.warning("Job '%s': primary auth failed (%s), trying fallback", job_id, auth_exc)
             fb_list = get_fallback_chain(_cfg)
@@ -3029,19 +3048,20 @@ def run_job(
         # ticks short-circuit on already-connected servers inside
         # register_mcp_servers(). Non-fatal on failure: a broken MCP server
         # shouldn't kill an otherwise-working cron job. See #4219.
-        try:
-            from tools.mcp_tool import discover_mcp_tools
-            _mcp_tools = discover_mcp_tools()
-            if _mcp_tools:
-                logger.info(
-                    "Job '%s': %d MCP tool(s) available",
-                    job_id, len(_mcp_tools),
+        if not _is_oxaide_managed_occurrence:
+            try:
+                from tools.mcp_tool import discover_mcp_tools
+                _mcp_tools = discover_mcp_tools()
+                if _mcp_tools:
+                    logger.info(
+                        "Job '%s': %d MCP tool(s) available",
+                        job_id, len(_mcp_tools),
+                    )
+            except Exception as _mcp_exc:
+                logger.warning(
+                    "Job '%s': MCP initialization failed (non-fatal): %s",
+                    job_id, _mcp_exc,
                 )
-        except Exception as _mcp_exc:
-            logger.warning(
-                "Job '%s': MCP initialization failed (non-fatal): %s",
-                job_id, _mcp_exc,
-            )
 
         agent = AIAgent(
             model=model,
@@ -3075,6 +3095,11 @@ def run_job(
             session_id=_cron_session_id,
             session_db=_session_db,
         )
+
+        if cancel_requested is not None and cancel_requested():
+            if hasattr(agent, "interrupt"):
+                agent.interrupt("Managed scheduled research authorization was revoked")
+            raise RuntimeError("managed_scheduled_research_cancelled")
         
         # Run the agent with an *inactivity*-based timeout: the job can run
         # for hours if it's actively calling tools / receiving stream tokens,
@@ -3151,9 +3176,27 @@ def run_job(
                         if done:
                             result = _cron_future.result()
                             break
+                        if cancel_requested is not None and cancel_requested():
+                            if hasattr(agent, "interrupt"):
+                                agent.interrupt(
+                                    "Managed scheduled research authorization was revoked"
+                                )
+                            raise RuntimeError("managed_scheduled_research_cancelled")
                         _heartbeat_run_claim_if_due()
                 else:
-                    result = _cron_future.result()
+                    while True:
+                        done, _ = concurrent.futures.wait(
+                            {_cron_future}, timeout=_POLL_INTERVAL,
+                        )
+                        if done:
+                            result = _cron_future.result()
+                            break
+                        if cancel_requested is not None and cancel_requested():
+                            if hasattr(agent, "interrupt"):
+                                agent.interrupt(
+                                    "Managed scheduled research authorization was revoked"
+                                )
+                            raise RuntimeError("managed_scheduled_research_cancelled")
             else:
                 result = None
                 while True:
@@ -3163,6 +3206,12 @@ def run_job(
                     if done:
                         result = _cron_future.result()
                         break
+                    if cancel_requested is not None and cancel_requested():
+                        if hasattr(agent, "interrupt"):
+                            agent.interrupt(
+                                "Managed scheduled research authorization was revoked"
+                            )
+                        raise RuntimeError("managed_scheduled_research_cancelled")
                     _heartbeat_run_claim_if_due()
                     # Agent still running — check inactivity.
                     _idle_secs = 0.0

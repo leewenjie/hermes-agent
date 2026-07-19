@@ -256,8 +256,9 @@ def _should_skip_backup_file(abs_path: Path, rel_path: Path, out_path: Path) -> 
 def _safe_copy_db(src: Path, dst: Path) -> bool:
     """Copy a SQLite database safely using the backup() API.
 
-    Handles WAL mode — produces a consistent snapshot even while
-    the DB is being written to.  Falls back to raw copy on failure.
+    Handles WAL mode and produces a consistent snapshot while the database is
+    live. A failed online backup must fail closed: copying only the main file
+    can silently omit committed WAL data.
     """
     try:
         conn = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
@@ -267,13 +268,12 @@ def _safe_copy_db(src: Path, dst: Path) -> bool:
         conn.close()
         return True
     except Exception as exc:
-        logger.warning("SQLite safe copy failed for %s: %s", src, exc)
+        logger.error("SQLite online backup failed for %s: %s", src, exc)
         try:
-            shutil.copy2(src, dst)
-            return True
-        except Exception as exc2:
-            logger.error("Raw copy also failed for %s: %s", src, exc2)
-            return False
+            dst.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not remove incomplete SQLite backup %s", dst)
+        return False
 
 
 # ---------------------------------------------------------------------------

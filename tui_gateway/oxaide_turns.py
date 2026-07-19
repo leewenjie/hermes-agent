@@ -80,6 +80,9 @@ class OxaideTurnClient:
     """Strict stdlib HTTP client for one trusted Oxaide runtime identity."""
 
     def __init__(self, trusted_context: dict[str, Any]) -> None:
+        self.context_kind = str(
+            trusted_context.get("context_kind") or "browser_launch"
+        ).strip()
         self.workspace_id = str(trusted_context.get("workspace_id") or "").strip()
         self.runtime_session_id = str(
             trusted_context.get("runtime_session_id") or ""
@@ -92,15 +95,17 @@ class OxaideTurnClient:
         except (TypeError, ValueError):
             self.expires_at = 0
 
-        if not all(
-            (
-                self.workspace_id,
-                self.runtime_session_id,
-                self.runtime_key,
-                self.user_id,
-                self.jti,
-                self.expires_at,
-            )
+        required_identity = all((
+            self.workspace_id,
+            self.runtime_session_id,
+            self.runtime_key,
+            self.user_id,
+        ))
+        browser_context_complete = bool(self.jti and self.expires_at)
+        if (
+            not required_identity
+            or self.context_kind not in {"browser_launch", "scheduled_research"}
+            or (self.context_kind == "browser_launch" and not browser_context_complete)
         ):
             raise OxaideTurnError("trusted Oxaide launch context is incomplete")
 
@@ -123,17 +128,36 @@ class OxaideTurnClient:
         self._state_lock = threading.Lock()
         self._settlement_started = False
 
-    def authorize(self, on_lease_lost=None) -> OxaideTurn:
+    @classmethod
+    def from_scheduled_occurrence(
+        cls,
+        *,
+        workspace_id: str,
+        user_id: str,
+        runtime_key: str,
+        runtime_session_id: str,
+    ) -> "OxaideTurnClient":
+        return cls({
+            "context_kind": "scheduled_research",
+            "workspace_id": workspace_id,
+            "user_id": user_id,
+            "runtime_key": runtime_key,
+            "runtime_session_id": runtime_session_id,
+        })
+
+    def authorize(self, on_lease_lost=None, *, event_id: str | None = None) -> OxaideTurn:
         # ``expires_at`` limits the one-time browser launch exchange. Once the
         # authenticated PTY is established, the durable runtime session in
         # Oxaide is the authority for subsequent turns. Reapplying the launch
         # TTL here would break a valid research desk after a few minutes.
         self.flush_outbox()
-        event_id = uuid.uuid4().hex
-        self._request("authorize", event_id)
+        effective_event_id = str(event_id or uuid.uuid4().hex).strip()
+        if not effective_event_id or len(effective_event_id) > 200:
+            raise OxaideTurnError("invalid Oxaide turn event identity")
+        self._request("authorize", effective_event_id)
         if on_lease_lost is not None:
-            self._start_heartbeat(event_id, on_lease_lost)
-        return OxaideTurn(client=self, event_id=event_id)
+            self._start_heartbeat(effective_event_id, on_lease_lost)
+        return OxaideTurn(client=self, event_id=effective_event_id)
 
     def _start_heartbeat(self, event_id: str, on_lease_lost) -> None:
         if self._heartbeat_thread is not None:

@@ -197,6 +197,22 @@ def test_hosted_schedule_gate_cannot_be_bypassed_by_config(
     assert client.get("/api/research-schedules").status_code == 404
 
 
+def test_hosted_schedule_capability_is_enabled_only_with_complete_runtime_configuration(
+    managed_schedule_client,
+    monkeypatch,
+):
+    client, _hermes_home = managed_schedule_client
+    monkeypatch.setenv("HERMES_OXAIDE_WORKSPACE_ID", "workspace-123")
+    monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", "runtimekey1234567890abcd")
+    monkeypatch.setenv("HERMES_OXAIDE_SCHEDULED_RESEARCH_SIGNING_SECRET", "s" * 43)
+    monkeypatch.setenv("HERMES_OXAIDE_USAGE_SIGNING_SECRET", "u" * 43)
+    from hermes_cli import oxaide_scheduled_research_control as control
+    monkeypatch.setattr(control, "request_control", lambda *_args, **_kwargs: [])
+
+    assert web_server._oxaide_scheduled_research_enabled() is True
+    assert client.get("/api/research-schedules").status_code != 404
+
+
 def test_local_schedule_capability_can_be_disabled(
     managed_schedule_client,
 ):
@@ -208,3 +224,57 @@ def test_local_schedule_capability_can_be_disabled(
 
     assert web_server._oxaide_scheduled_research_enabled() is False
     assert client.get("/api/research-schedules").status_code == 404
+
+
+def test_hosted_schedule_control_proxies_create_and_revision_fenced_update(monkeypatch):
+    from hermes_cli import oxaide_scheduled_research_control as control
+
+    calls = []
+    schedules = [{
+        "id": "00000000-0000-4000-8000-000000000001",
+        "revision": 3,
+        "schedule": {"kind": "interval", "minutes": 60, "display": "Every hour"},
+    }]
+
+    def fake_request(user_id, action, **fields):
+        calls.append((user_id, action, fields))
+        if action == "list":
+            return schedules
+        return {"id": schedules[0]["id"], "revision": 4, **fields}
+
+    monkeypatch.setattr(control, "request_control", fake_request)
+    body = web_server.ResearchScheduleMutation(
+        name="Market review",
+        prompt="Review overnight markets.",
+        schedule="every 1h",
+        request_id="00000000-0000-4000-8000-000000000099",
+    )
+
+    created = web_server._hosted_schedule_control_sync(
+        "user-1", "create", body=body
+    )
+    assert created["mutation"]["schedule"]["kind"] == "interval"
+    assert calls[-1][1] == "create"
+    assert calls[-1][2]["request_id"] == body.request_id
+
+    updated = web_server._hosted_schedule_control_sync(
+        "user-1", "update", job_id=schedules[0]["id"], body=body
+    )
+    assert updated["expected_revision"] == 3
+    assert calls[-1][2]["schedule_id"] == schedules[0]["id"]
+    assert calls[-1][2]["request_id"] == body.request_id
+
+
+def test_hosted_schedule_mutation_requires_stable_request_id(monkeypatch):
+    from hermes_cli import oxaide_scheduled_research_control as control
+
+    monkeypatch.setattr(control, "request_control", lambda *_args, **_kwargs: [])
+    body = web_server.ResearchScheduleMutation(
+        name="Market review",
+        prompt="Review overnight markets.",
+        schedule="every 1h",
+    )
+
+    with pytest.raises(web_server.HTTPException) as exc_info:
+        web_server._hosted_schedule_control_sync("user-1", "create", body=body)
+    assert exc_info.value.status_code == 400
