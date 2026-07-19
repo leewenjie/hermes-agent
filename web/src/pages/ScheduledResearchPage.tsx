@@ -8,6 +8,7 @@ import {
   RefreshCw,
   ShieldCheck,
   Trash2,
+  FileText,
 } from "lucide-react";
 import { Badge } from "@nous-research/ui/ui/components/badge";
 import { Button } from "@nous-research/ui/ui/components/button";
@@ -20,7 +21,7 @@ import { H2 } from "@nous-research/ui/ui/components/typography/h2";
 import { useToast } from "@nous-research/ui/hooks/use-toast";
 import { ScheduleBuilder } from "@/components/ScheduleBuilder";
 import { usePageHeader } from "@/contexts/usePageHeader";
-import { api, type ResearchSchedule } from "@/lib/api";
+import { api, type ResearchSchedule, type ResearchScheduleOccurrence } from "@/lib/api";
 import {
   buildScheduleString,
   DEFAULT_SCHEDULE_STATE,
@@ -63,11 +64,13 @@ function readableSchedule(schedule: ResearchSchedule): string {
 
 export default function ScheduledResearchPage() {
   const [schedules, setSchedules] = useState<ResearchSchedule[]>([]);
+  const [occurrences, setOccurrences] = useState<ResearchScheduleOccurrence[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [workingId, setWorkingId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState(EMPTY_FORM);
+  const [pendingMutation, setPendingMutation] = useState<{ fingerprint: string; requestId: string } | null>(null);
   const [scheduleState, setScheduleState] = useState<ScheduleBuilderState>({
     ...DEFAULT_SCHEDULE_STATE,
     intervalValue: 1,
@@ -88,7 +91,12 @@ export default function ScheduledResearchPage() {
 
   const load = useCallback(async () => {
     try {
-      setSchedules(await api.getResearchSchedules());
+      const [scheduleItems, history] = await Promise.all([
+        api.getResearchSchedules(),
+        api.getResearchScheduleOccurrences(),
+      ]);
+      setSchedules(scheduleItems);
+      setOccurrences(history.occurrences);
     } catch (error) {
       showToast(`Could not load scheduled research: ${error}`, "error");
     } finally {
@@ -97,8 +105,28 @@ export default function ScheduledResearchPage() {
   }, [showToast]);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    let active = true;
+
+    void Promise.all([api.getResearchSchedules(), api.getResearchScheduleOccurrences()])
+      .then(([items, history]) => {
+        if (active) {
+          setSchedules(items);
+          setOccurrences(history.occurrences);
+        }
+      })
+      .catch((error) => {
+        if (active) {
+          showToast(`Could not load scheduled research: ${error}`, "error");
+        }
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [showToast]);
 
   const resetForm = useCallback(() => {
     setEditingId(null);
@@ -125,10 +153,16 @@ export default function ScheduledResearchPage() {
     }
     setSaving(true);
     try {
+      const fingerprint = JSON.stringify({ editingId, name: form.name.trim(), prompt, schedule: scheduleValue });
+      const requestId = pendingMutation?.fingerprint === fingerprint
+        ? pendingMutation.requestId
+        : crypto.randomUUID();
+      setPendingMutation({ fingerprint, requestId });
       const payload = {
         name: form.name.trim(),
         prompt,
         schedule: scheduleValue,
+        request_id: requestId,
       };
       if (editingId) {
         await api.updateResearchSchedule(editingId, payload);
@@ -138,20 +172,27 @@ export default function ScheduledResearchPage() {
         showToast("Research schedule created", "success");
       }
       resetForm();
+      setPendingMutation(null);
       await load();
     } catch (error) {
       showToast(`Could not save schedule: ${error}`, "error");
     } finally {
       setSaving(false);
     }
-  }, [editingId, form, load, resetForm, scheduleValue, showToast]);
+  }, [editingId, form, load, pendingMutation, resetForm, scheduleValue, showToast]);
 
   const toggle = useCallback(
     async (item: ResearchSchedule) => {
       setWorkingId(item.id);
       try {
-        if (item.enabled) await api.pauseResearchSchedule(item.id);
-        else await api.resumeResearchSchedule(item.id);
+        const fingerprint = `${item.enabled ? "pause" : "resume"}:${item.id}`;
+        const requestId = pendingMutation?.fingerprint === fingerprint
+          ? pendingMutation.requestId
+          : crypto.randomUUID();
+        setPendingMutation({ fingerprint, requestId });
+        if (item.enabled) await api.pauseResearchSchedule(item.id, requestId);
+        else await api.resumeResearchSchedule(item.id, requestId);
+        setPendingMutation(null);
         showToast(item.enabled ? "Research paused" : "Research resumed", "success");
         await load();
       } catch (error) {
@@ -160,7 +201,7 @@ export default function ScheduledResearchPage() {
         setWorkingId(null);
       }
     },
-    [load, showToast],
+    [load, pendingMutation, showToast],
   );
 
   const remove = useCallback(
@@ -168,7 +209,13 @@ export default function ScheduledResearchPage() {
       if (!window.confirm(`Delete “${item.name || "Untitled research"}”?`)) return;
       setWorkingId(item.id);
       try {
-        await api.deleteResearchSchedule(item.id);
+        const fingerprint = `delete:${item.id}`;
+        const requestId = pendingMutation?.fingerprint === fingerprint
+          ? pendingMutation.requestId
+          : crypto.randomUUID();
+        setPendingMutation({ fingerprint, requestId });
+        await api.deleteResearchSchedule(item.id, requestId);
+        setPendingMutation(null);
         if (editingId === item.id) resetForm();
         showToast("Research schedule deleted", "success");
         await load();
@@ -178,7 +225,7 @@ export default function ScheduledResearchPage() {
         setWorkingId(null);
       }
     },
-    [editingId, load, resetForm, showToast],
+    [editingId, load, pendingMutation, resetForm, showToast],
   );
 
   return (
@@ -315,6 +362,45 @@ export default function ScheduledResearchPage() {
                 </Card>
               );
             })}
+          </div>
+        )}
+      </section>
+
+      <section className="grid gap-3">
+        <div>
+          <h3 className="text-base font-semibold">Recent results</h3>
+          <p className="text-sm text-muted-foreground">Authoritative execution history from your managed workspace.</p>
+        </div>
+        {occurrences.length === 0 ? (
+          <Card><CardContent className="py-8 text-sm text-muted-foreground">No scheduled runs yet.</CardContent></Card>
+        ) : (
+          <div className="grid gap-2">
+            {occurrences.map((occurrence) => (
+              <Card key={occurrence.id}>
+                <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-medium">{occurrence.name || "Scheduled research"}</p>
+                      <Badge>{occurrence.status}</Badge>
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Scheduled for {formatTimestamp(occurrence.nominal_fire_at)}
+                      {occurrence.error_message ? ` · ${occurrence.error_message}` : ""}
+                    </p>
+                  </div>
+                  {occurrence.result_artifact_ref ? (
+                    <Button
+                      outlined
+                      size="sm"
+                      prefix={<FileText />}
+                      onClick={() => window.location.assign(`/files?path=${encodeURIComponent(occurrence.result_artifact_ref || "")}`)}
+                    >
+                      Open result
+                    </Button>
+                  ) : null}
+                </CardContent>
+              </Card>
+            ))}
           </div>
         )}
       </section>

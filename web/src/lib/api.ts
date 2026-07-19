@@ -665,6 +665,8 @@ export const api = {
   // Managed Oxaide recurring research (intentionally not profile-scoped).
   getResearchSchedules: () =>
     fetchJSON<ResearchSchedule[]>("/api/research-schedules"),
+  getResearchScheduleOccurrences: () =>
+    fetchJSON<ResearchScheduleOccurrencesResponse>("/api/research-schedules/occurrences"),
   createResearchSchedule: (schedule: ResearchScheduleMutation) =>
     fetchJSON<ResearchSchedule>("/api/research-schedules", {
       method: "POST",
@@ -677,12 +679,24 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(schedule),
     }),
-  pauseResearchSchedule: (id: string) =>
-    fetchJSON<ResearchSchedule>(`/api/research-schedules/${encodeURIComponent(id)}/pause`, { method: "POST" }),
-  resumeResearchSchedule: (id: string) =>
-    fetchJSON<ResearchSchedule>(`/api/research-schedules/${encodeURIComponent(id)}/resume`, { method: "POST" }),
-  deleteResearchSchedule: (id: string) =>
-    fetchJSON<{ ok: boolean }>(`/api/research-schedules/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  pauseResearchSchedule: (id: string, requestId: string) =>
+    fetchJSON<ResearchSchedule>(`/api/research-schedules/${encodeURIComponent(id)}/pause`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request_id: requestId }),
+    }),
+  resumeResearchSchedule: (id: string, requestId: string) =>
+    fetchJSON<ResearchSchedule>(`/api/research-schedules/${encodeURIComponent(id)}/resume`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request_id: requestId }),
+    }),
+  deleteResearchSchedule: (id: string, requestId: string) =>
+    fetchJSON<{ ok: boolean }>(`/api/research-schedules/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request_id: requestId }),
+    }),
 
   // Automation Blueprints — parameterized automation blueprints
   getAutomationBlueprints: () =>
@@ -2231,6 +2245,29 @@ export interface ResearchScheduleMutation {
   name: string;
   prompt: string;
   schedule: string;
+  request_id: string;
+}
+
+export interface ResearchScheduleOccurrence {
+  id: string;
+  schedule_id: string;
+  schedule_revision: number;
+  nominal_fire_at: string;
+  name: string;
+  status: string;
+  accepted_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  result_artifact_ref?: string | null;
+  result_session_id?: string | null;
+  created_at: string;
+}
+
+export interface ResearchScheduleOccurrencesResponse {
+  occurrences: ResearchScheduleOccurrence[];
+  next_cursor: { created_at: string; id: string } | null;
 }
 
 export interface ResearchSchedule {
