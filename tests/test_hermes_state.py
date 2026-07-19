@@ -129,6 +129,25 @@ class TestSessionLifecycle:
         assert session["model"] == "real-model"
         assert session["source"] == "cli"
 
+    @pytest.mark.parametrize(
+        ("stored_owner", "incoming_owner", "expected_owner"),
+        [
+            (None, "user-a", "user-a"),
+            ("   ", "user-a", "user-a"),
+            ("user-a", "user-a", "user-a"),
+            ("user-a", "user-b", "user-a"),
+            (None, "   ", None),
+        ],
+    )
+    def test_create_session_only_fills_missing_owner(
+        self, db, stored_owner, incoming_owner, expected_owner
+    ):
+        """Trusted enrichment may claim ownerless rows, never transfer ownership."""
+        db.create_session("owned", source="tui", user_id=stored_owner)
+        db.create_session("owned", source="tui", user_id=incoming_owner)
+
+        assert db.get_session("owned")["user_id"] == expected_owner
+
     def test_update_session_cwd_persists_git_branch(self, db):
         db.create_session(session_id="s1", source="cli")
         db.update_session_cwd("s1", "/work/repo", git_branch="pets-feature")
@@ -5648,6 +5667,30 @@ def test_gateway_metadata_display_name_origin_round_trip(db):
     row = db.get_session("gw-meta")
     assert row["display_name"] == "Alice"
     assert row["origin_json"] is not None
+
+
+def test_record_gateway_session_peer_only_fills_missing_owner(db):
+    db.create_session("gw-owned", "telegram", user_id="owner-a")
+    db.record_gateway_session_peer(
+        "gw-owned",
+        source="telegram",
+        user_id="owner-b",
+        session_key="agent:main:telegram:dm:c1",
+        chat_id="c1",
+        chat_type="dm",
+    )
+    assert db.get_session("gw-owned")["user_id"] == "owner-a"
+
+    db.create_session("gw-ownerless", "telegram")
+    db.record_gateway_session_peer(
+        "gw-ownerless",
+        source="telegram",
+        user_id="owner-a",
+        session_key="agent:main:telegram:dm:c2",
+        chat_id="c2",
+        chat_type="dm",
+    )
+    assert db.get_session("gw-ownerless")["user_id"] == "owner-a"
 
 
 def test_set_expiry_finalized_round_trip(db):

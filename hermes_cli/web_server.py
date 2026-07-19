@@ -4677,6 +4677,7 @@ def _managed_session_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, 
 
 @app.get("/api/sessions")
 def get_sessions(
+    request: Request,
     limit: int = 20,
     offset: int = 0,
     min_messages: int = 0,
@@ -4722,6 +4723,11 @@ def get_sessions(
         profile_name, _ = _cron_profile_home(profile)
     try:
         managed_oxaide = _dashboard_branding_settings().get("product") == "oxaide"
+        managed_user_id = (
+            _oxaide_session_read_user_id(request, profile=profile)
+            if managed_oxaide
+            else None
+        )
         db = _open_session_db_for_profile(profile, read_only=True)
         try:
             min_message_count = max(0, min_messages)
@@ -4746,6 +4752,7 @@ def get_sessions(
                 # rows, skip the system_prompt blob inside SQLite too (pairs
                 # with the API-level _strip_session_list_rows below).
                 compact_rows=managed_oxaide or not full,
+                user_id=managed_user_id,
             )
             total = db.session_count(
                 source=source or None,
@@ -4755,6 +4762,7 @@ def get_sessions(
                 include_archived=include_archived,
                 archived_only=archived_only,
                 exclude_children=True,
+                user_id=managed_user_id,
             )
             now = time.time()
             for s in sessions:
@@ -4921,7 +4929,12 @@ def get_profiles_sessions(
 
 
 @app.get("/api/sessions/search")
-async def search_sessions(q: str = "", limit: int = 20, profile: Optional[str] = None):
+async def search_sessions(
+    request: Request,
+    q: str = "",
+    limit: int = 20,
+    profile: Optional[str] = None,
+):
     """Search sessions by ID plus full-text message content using FTS5.
 
     Direct session-id matches are surfaced first, then FTS message-content
@@ -4936,6 +4949,11 @@ async def search_sessions(q: str = "", limit: int = 20, profile: Optional[str] =
         return {"results": []}
     try:
         managed_oxaide = _dashboard_branding_settings().get("product") == "oxaide"
+        managed_user_id = (
+            _oxaide_session_read_user_id(request, profile=profile)
+            if managed_oxaide
+            else None
+        )
         db = _open_session_db_for_profile(profile, read_only=True)
         try:
             safe_limit = max(1, min(int(limit or 20), 100))
@@ -5030,6 +5048,8 @@ async def search_sessions(q: str = "", limit: int = 20, profile: Optional[str] =
                     row = db.get_session(tip) or {}
                 except Exception:
                     row = {}
+                if managed_oxaide and row.get("user_id") != managed_user_id:
+                    return
                 started_at = row.get("started_at") or payload.get("session_started") or 0
                 last_active = row.get("last_active") or started_at
                 ended_at = row.get("ended_at")
@@ -10579,13 +10599,18 @@ def _open_session_db_for_profile(
 
 
 @app.get("/api/sessions/{session_id}")
-async def get_session_detail(session_id: str, profile: Optional[str] = None):
+async def get_session_detail(
+    request: Request,
+    session_id: str,
+    profile: Optional[str] = None,
+):
     db = _open_session_db_for_profile(profile, read_only=True)
     try:
         sid = db.resolve_session_id(session_id)
         session = db.get_session(sid) if sid else None
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
+        _require_oxaide_session_owner(request, session, profile=profile)
         if profile:
             session["profile"] = _cron_profile_home(profile)[0]
         return (
@@ -10600,6 +10625,7 @@ async def get_session_detail(session_id: str, profile: Optional[str] = None):
 
 @app.get("/api/sessions/{session_id}/latest-descendant")
 async def get_session_latest_descendant(
+    request: Request,
     session_id: str,
     profile: Optional[str] = None,
 ):
@@ -10608,6 +10634,11 @@ async def get_session_latest_descendant(
         latest, path = _session_latest_descendant(session_id, db)
         if not latest:
             raise HTTPException(status_code=404, detail="Session not found")
+        for path_session_id in path:
+            session = db.get_session(path_session_id)
+            if not session:
+                raise HTTPException(status_code=404, detail="Session not found")
+            _require_oxaide_session_owner(request, session, profile=profile)
         return {
             "requested_session_id": path[0] if path else session_id,
             "session_id": latest,
@@ -10619,6 +10650,7 @@ async def get_session_latest_descendant(
 
 @app.get("/api/sessions/{session_id}/messages")
 async def get_session_messages(
+    request: Request,
     session_id: str,
     profile: Optional[str] = None,
     limit: Optional[int] = 500,
@@ -10630,6 +10662,10 @@ async def get_session_messages(
         if not sid:
             raise HTTPException(status_code=404, detail="Session not found")
         sid = db.resolve_resume_session_id(sid)
+        session = db.get_session(sid)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        _require_oxaide_session_owner(request, session, profile=profile)
         if limit is None or limit < 1 or limit > 500:
             raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
         if offset < 0:
@@ -10687,6 +10723,45 @@ def _oxaide_share_identity(request: Request) -> tuple[str, str, str]:
     if not workspace_id or not user_id or not runtime_key:
         raise HTTPException(status_code=403, detail="Oxaide workspace identity is incomplete")
     return workspace_id, user_id, runtime_key
+
+
+def _require_oxaide_session_owner(
+    request: Request,
+    session: dict[str, Any],
+    *,
+    profile: Optional[str] = None,
+) -> None:
+    """Fail closed for managed transcript reads without weakening local mode."""
+    if _dashboard_branding_settings().get("product") != "oxaide":
+        return
+    if profile:
+        raise HTTPException(
+            status_code=403,
+            detail="Profile session access is unavailable in an Oxaide workspace",
+        )
+    if _local_research_share_dev_enabled(request):
+        return
+    _workspace_id, user_id, _runtime_key = _oxaide_share_identity(request)
+    session_user_id = str(session.get("user_id") or "").strip()
+    if not session_user_id or session_user_id != user_id:
+        raise HTTPException(status_code=403, detail="Session does not belong to this user")
+
+
+def _oxaide_session_read_user_id(
+    request: Request,
+    *,
+    profile: Optional[str] = None,
+) -> Optional[str]:
+    """Resolve the owner filter for managed list/read APIs."""
+    if profile:
+        raise HTTPException(
+            status_code=403,
+            detail="Profile session access is unavailable in an Oxaide workspace",
+        )
+    if _local_research_share_dev_enabled(request):
+        return None
+    _workspace_id, user_id, _runtime_key = _oxaide_share_identity(request)
+    return user_id
 
 
 def _research_share_preview(
@@ -10919,7 +10994,11 @@ img{{display:block;max-width:100%;height:auto;margin-top:18px;border:1px solid #
 
 
 @app.delete("/api/sessions/{session_id}")
-async def delete_session_endpoint(session_id: str, profile: Optional[str] = None):
+async def delete_session_endpoint(
+    request: Request,
+    session_id: str,
+    profile: Optional[str] = None,
+):
     # ``profile`` deletes a session belonging to another (local) profile by
     # opening its state.db directly. Remote profiles never reach here — the
     # desktop routes their DELETE to the remote backend. Omit for current/default.
@@ -10937,6 +11016,9 @@ async def delete_session_endpoint(session_id: str, profile: Optional[str] = None
         sid = db.resolve_session_id(session_id)
         if not sid:
             return {"ok": True, "already_absent": True}
+        session = db.get_session(sid)
+        if _dashboard_branding_settings().get("product") == "oxaide":
+            _require_oxaide_session_owner(request, session, profile=profile)
         db.delete_session(sid)
         return {"ok": True}
     finally:
@@ -10952,7 +11034,11 @@ class SessionRename(BaseModel):
 
 
 @app.patch("/api/sessions/{session_id}")
-async def rename_session_endpoint(session_id: str, body: SessionRename):
+async def rename_session_endpoint(
+    request: Request,
+    session_id: str,
+    body: SessionRename,
+):
     """Update a session: rename (or clear its title) and/or archive it.
 
     ``title`` renames (empty/null clears the title); ``archived`` soft-hides or
@@ -10969,6 +11055,9 @@ async def rename_session_endpoint(session_id: str, body: SessionRename):
         sid = db.resolve_session_id(session_id)
         if not sid:
             raise HTTPException(status_code=404, detail="Session not found")
+        session = db.get_session(sid)
+        if _dashboard_branding_settings().get("product") == "oxaide":
+            _require_oxaide_session_owner(request, session, profile=body.profile)
         if body.title is None and body.archived is None:
             raise HTTPException(
                 status_code=400,
@@ -10991,13 +11080,20 @@ async def rename_session_endpoint(session_id: str, body: SessionRename):
 
 
 @app.get("/api/sessions/{session_id}/export")
-async def export_session_endpoint(session_id: str, profile: Optional[str] = None):
+async def export_session_endpoint(
+    request: Request,
+    session_id: str,
+    profile: Optional[str] = None,
+):
     """Export a single session (metadata + messages) as JSON."""
     db = _open_session_db_for_profile(profile, read_only=True)
     try:
         sid = db.resolve_session_id(session_id)
         if not sid:
             raise HTTPException(status_code=404, detail="Session not found")
+        session = db.get_session(sid)
+        if _dashboard_branding_settings().get("product") == "oxaide":
+            _require_oxaide_session_owner(request, session, profile=profile)
         data = db.export_session(sid)
         if data is None:
             raise HTTPException(status_code=404, detail="Session not found")

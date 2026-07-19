@@ -156,6 +156,90 @@ def test_trusted_oxaide_owner_persists_and_binds_session_context(monkeypatch):
         server._sessions.clear()
 
 
+def test_trusted_resume_repairs_ownerless_durable_session():
+    class _DB:
+        def __init__(self):
+            self.row = {
+                "id": "stored-session",
+                "source": "tui",
+                "model": "test-model",
+                "user_id": None,
+            }
+            self.create_calls = []
+
+        def create_session(self, session_id, **kwargs):
+            self.create_calls.append((session_id, kwargs))
+            if not str(self.row.get("user_id") or "").strip():
+                self.row["user_id"] = kwargs.get("user_id")
+
+        def get_session(self, _session_id):
+            return dict(self.row)
+
+    db = _DB()
+    repaired = server._reconcile_trusted_session_owner(
+        db, "stored-session", dict(db.row), _CONTEXT_A["user_id"]
+    )
+
+    assert repaired["user_id"] == _CONTEXT_A["user_id"]
+    assert db.create_calls == [
+        (
+            "stored-session",
+            {
+                "source": "tui",
+                "model": "test-model",
+                "user_id": _CONTEXT_A["user_id"],
+            },
+        )
+    ]
+
+
+def test_trusted_resume_accepts_matching_owner_without_rewrite():
+    class _DB:
+        def create_session(self, *_args, **_kwargs):
+            pytest.fail("matching ownership must not be rewritten")
+
+    row = {"id": "stored-session", "user_id": _CONTEXT_A["user_id"]}
+    assert (
+        server._reconcile_trusted_session_owner(
+            _DB(), "stored-session", row, _CONTEXT_A["user_id"]
+        )
+        is row
+    )
+
+
+def test_trusted_resume_rejects_established_other_owner():
+    row = {"id": "stored-session", "user_id": _CONTEXT_B["user_id"]}
+
+    with pytest.raises(
+        server._SessionOwnershipMismatch,
+        match="Session does not belong to this user",
+    ):
+        server._reconcile_trusted_session_owner(
+            object(), "stored-session", row, _CONTEXT_A["user_id"]
+        )
+
+
+def test_live_session_reuse_is_fenced_by_trusted_owner():
+    session = {
+        "agent": None,
+        "session_key": "stored-session",
+        "trusted_launch_context": dict(_CONTEXT_A),
+    }
+    server._sessions["live-a"] = session
+    try:
+        assert server._find_live_session_by_key(
+            "stored-session", expected_user_id=_CONTEXT_A["user_id"]
+        ) == ("live-a", session)
+        assert server._find_live_session_by_key(
+            "stored-session", expected_user_id=_CONTEXT_B["user_id"]
+        ) is None
+        assert server._live_session_identity_conflict(
+            "stored-session", _CONTEXT_B["user_id"]
+        ) is True
+    finally:
+        server._sessions.clear()
+
+
 def test_oxaide_session_create_does_not_prebuild_agent(monkeypatch):
     builds = []
     monkeypatch.setattr(server, "_new_session_key", lambda: "stored")

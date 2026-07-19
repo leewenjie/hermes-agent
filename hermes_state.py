@@ -2088,7 +2088,9 @@ class SessionDB:
         The ``ON CONFLICT`` upsert backfills those fields via ``COALESCE`` —
         only filling columns that are still NULL, never overwriting values an
         earlier writer already set (so a later bare call with source="unknown"
-        can't clobber a real source/model).
+        can't clobber a real source/model). ``user_id`` follows the stricter
+        ownership invariant: a non-empty incoming owner may fill a NULL/blank
+        owner, but can never replace an established owner.
 
         ``chat_id``/``thread_id`` record the messaging origin (the chat/room and
         thread the session was started in) so that gateway ``/resume`` can prove
@@ -2104,6 +2106,12 @@ class SessionDB:
                 )
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
+                       user_id = CASE
+                           WHEN TRIM(COALESCE(sessions.user_id, '')) = ''
+                            AND TRIM(COALESCE(excluded.user_id, '')) != ''
+                           THEN excluded.user_id
+                           ELSE sessions.user_id
+                       END,
                        model = COALESCE(sessions.model, excluded.model),
                        model_config = COALESCE(sessions.model_config, excluded.model_config),
                        system_prompt = COALESCE(sessions.system_prompt, excluded.system_prompt),
@@ -2163,7 +2171,14 @@ class SessionDB:
         def _do(conn):
             conn.execute(
                 """UPDATE sessions
-                   SET session_key = ?, source = ?, user_id = ?, chat_id = ?,
+                   SET session_key = ?, source = ?,
+                       user_id = CASE
+                           WHEN TRIM(COALESCE(user_id, '')) = ''
+                            AND TRIM(COALESCE(?, '')) != ''
+                           THEN ?
+                           ELSE user_id
+                       END,
+                       chat_id = ?,
                        chat_type = ?, thread_id = ?,
                        display_name = COALESCE(?, display_name),
                        origin_json = COALESCE(?, origin_json)
@@ -2171,6 +2186,7 @@ class SessionDB:
                 (
                     session_key,
                     source,
+                    user_id,
                     user_id,
                     chat_id,
                     chat_type,
@@ -3634,6 +3650,7 @@ class SessionDB:
         id_query: str = None,
         search_query: str = None,
         compact_rows: bool = False,
+        user_id: str = None,
     ) -> List[Dict[str, Any]]:
         """List sessions with preview (first user message) and last active timestamp.
 
@@ -3702,6 +3719,9 @@ class SessionDB:
             placeholders = ",".join("?" for _ in exclude_sources)
             where_clauses.append(f"s.source NOT IN ({placeholders})")
             params.extend(exclude_sources)
+        if user_id is not None:
+            where_clauses.append("s.user_id = ?")
+            params.append(user_id)
         if cwd_prefix:
             clause, clause_params = _cwd_prefix_clause(cwd_prefix)
             where_clauses.append(clause)
@@ -5554,6 +5574,7 @@ class SessionDB:
         archived_only: bool = False,
         exclude_children: bool = False,
         exclude_sources: List[str] = None,
+        user_id: str = None,
     ) -> int:
         """Count sessions, optionally filtered by source.
 
@@ -5585,6 +5606,9 @@ class SessionDB:
             placeholders = ",".join("?" for _ in exclude_sources)
             where_clauses.append(f"s.source NOT IN ({placeholders})")
             params.extend(exclude_sources)
+        if user_id is not None:
+            where_clauses.append("s.user_id = ?")
+            params.append(user_id)
         if cwd_prefix:
             clause, clause_params = _cwd_prefix_clause(cwd_prefix)
             where_clauses.append(clause)

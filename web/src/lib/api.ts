@@ -36,6 +36,20 @@ declare global {
 }
 const SESSION_HEADER = "X-Hermes-Session-Token";
 
+export class ApiError extends Error {
+  readonly status: number;
+  readonly detail: string;
+  readonly body: unknown;
+
+  constructor(status: number, detail: string, body?: unknown) {
+    super(detail ? `${status}: ${detail}` : `Request failed with status ${status}`);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+    this.body = body;
+  }
+}
+
 function setSessionHeader(headers: Headers, token: string): void {
   if (!headers.has(SESSION_HEADER)) {
     headers.set(SESSION_HEADER, token);
@@ -186,7 +200,22 @@ export async function fetchJSON<T>(
   }
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
-    throw new Error(`${res.status}: ${text}`);
+    let body: unknown = text;
+    let detail = text || res.statusText;
+    try {
+      body = JSON.parse(text);
+      if (
+        typeof body === "object" &&
+        body !== null &&
+        "detail" in body &&
+        typeof body.detail === "string"
+      ) {
+        detail = body.detail;
+      }
+    } catch {
+      // Keep the plain-text response as the actionable detail.
+    }
+    throw new ApiError(res.status, detail, body);
   }
   return res.json();
 }
@@ -318,7 +347,8 @@ function appendProfileParam(url: string, profile?: string): string {
 
 export const api = {
   buildWsUrl,
-  getStatus: () => fetchJSON<StatusResponse>("/api/status"),
+  getStatus: (signal?: AbortSignal) =>
+    fetchJSON<StatusResponse>("/api/status", { signal }),
   getMedia: (path: string) =>
     fetchJSON<{ data_url: string }>(
       `/api/media?path=${encodeURIComponent(path)}`,
@@ -435,15 +465,24 @@ export const api = {
     fetchJSON<SessionStoreStats>(appendProfileParam("/api/sessions/stats", profile)),
   exportSessionUrl: (id: string, profile = getManagementProfile()) =>
     appendProfileParam(`/api/sessions/${encodeURIComponent(id)}/export`, profile),
-  previewResearchShare: (sessionId: string, title?: string, description?: string) =>
+  previewResearchShare: (
+    sessionId: string,
+    options?: { title?: string; description?: string; signal?: AbortSignal },
+  ) =>
     fetchJSON<ResearchSharePreview>("/api/research-shares/preview", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: sessionId, title, description }),
+      body: JSON.stringify({
+        session_id: sessionId,
+        title: options?.title,
+        description: options?.description,
+      }),
+      signal: options?.signal,
     }),
-  listResearchShares: (sessionId: string) =>
+  listResearchShares: (sessionId: string, signal?: AbortSignal) =>
     fetchJSON<{ ok: true; shares: ResearchSharePublished[] }>(
       `/api/research-shares?session_id=${encodeURIComponent(sessionId)}`,
+      { signal },
     ),
   publishResearchShare: (params: {
     sessionId: string;
@@ -451,6 +490,7 @@ export const api = {
     description?: string;
     expiresInDays: 7 | 30 | 90;
     snapshotSha256: string;
+    signal?: AbortSignal;
   }) =>
     fetchJSON<ResearchSharePublished>("/api/research-shares", {
       method: "POST",
@@ -463,14 +503,16 @@ export const api = {
         expires_in_days: params.expiresInDays,
         snapshot_sha256: params.snapshotSha256,
       }),
+      signal: params.signal,
     }),
-  revokeResearchShare: (shareId: string) =>
+  revokeResearchShare: (shareId: string, signal?: AbortSignal) =>
     fetchJSON<{ ok: true; action: "revoke"; share_id: string }>(
       "/api/research-shares",
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "revoke", share_id: shareId }),
+        signal,
       },
     ),
   importSessions: (

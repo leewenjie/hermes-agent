@@ -1135,6 +1135,16 @@ class TestWebServerEndpoints:
             "_dashboard_branding_settings",
             lambda: {"product": "oxaide"},
         )
+        monkeypatch.setattr(
+            web_server,
+            "_require_oxaide_session_owner",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            web_server,
+            "_oxaide_session_read_user_id",
+            lambda *_args, **_kwargs: None,
+        )
 
         listed = self.client.get("/api/sessions?limit=20&offset=0&full=1")
         assert listed.status_code == 200
@@ -1394,6 +1404,11 @@ class TestWebServerEndpoints:
             web_server,
             "_dashboard_branding_settings",
             lambda: {"product": "oxaide"},
+        )
+        monkeypatch.setattr(
+            web_server,
+            "_oxaide_session_read_user_id",
+            lambda *_args, **_kwargs: None,
         )
 
         for method, path in (
@@ -1803,6 +1818,11 @@ class TestWebServerEndpoints:
             web_server,
             "_dashboard_branding_settings",
             lambda: {"product": "oxaide"},
+        )
+        monkeypatch.setattr(
+            web_server,
+            "_require_oxaide_session_owner",
+            lambda *_args, **_kwargs: None,
         )
 
         response = self.client.get("/api/sessions/managed-messages/messages")
