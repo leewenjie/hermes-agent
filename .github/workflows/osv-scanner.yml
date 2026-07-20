@@ -32,6 +32,9 @@ on:
 permissions:
   actions: read
   contents: read
+  # Google's reusable workflow declares this permission even when its
+  # Code Scanning upload step is disabled by upload-sarif below.
+  security-events: write
 
 jobs:
   scan:
