@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, api, fetchJSON } from "./api";
+import { ApiError, api, fetchJSON, getWsTicket } from "./api";
 
 const SESSION_HEADER = "X-Hermes-Session-Token";
 
@@ -72,6 +72,66 @@ describe("fetchJSON errors", () => {
       detail: "Session does not belong to this user",
     });
   });
+});
+
+describe("getWsTicket", () => {
+  it("mints a single-use ticket through cookie authentication", async () => {
+    vi.stubGlobal("window", { __HERMES_AUTH_REQUIRED__: true });
+    const fetchMock = jsonFetchMock({ ticket: "ticket-123", ttl_seconds: 30 });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getWsTicket()).resolves.toEqual({
+      ticket: "ticket-123",
+      ttl_seconds: 30,
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/auth/ws-ticket",
+      expect.objectContaining({
+        credentials: "include",
+        method: "POST",
+      }),
+    );
+  });
+
+  it.each(["unauthenticated", "session_expired"])(
+    "returns a %s hosted session to the login bridge",
+    async (error) => {
+      const assign = vi.fn();
+      const setItem = vi.fn();
+      vi.stubGlobal("window", {
+        __HERMES_AUTH_REQUIRED__: true,
+        location: {
+          assign,
+          pathname: "/chat",
+          search: "?workspace=research-desk",
+        },
+      });
+      vi.stubGlobal("sessionStorage", { setItem });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async () =>
+          new Response(
+            JSON.stringify({
+              error,
+              detail: "Unauthorized",
+              login_url: "/login",
+            }),
+            {
+              headers: { "Content-Type": "application/json" },
+              status: 401,
+            },
+          ),
+        ),
+      );
+
+      void getWsTicket();
+      await vi.waitFor(() => expect(assign).toHaveBeenCalledWith("/login"));
+      expect(setItem).toHaveBeenCalledWith(
+        "hermes.lastLocation",
+        "/chat?workspace=research-desk",
+      );
+    },
+  );
 });
 
 describe("api.getStatus", () => {

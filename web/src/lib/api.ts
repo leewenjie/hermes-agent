@@ -238,14 +238,9 @@ function pluginPath(name: string): string {
  * fetch a fresh ticket.
  */
 export async function getWsTicket(): Promise<{ ticket: string; ttl_seconds: number }> {
-  const res = await fetch(`${BASE}/api/auth/ws-ticket`, {
+  return fetchJSON<{ ticket: string; ttl_seconds: number }>("/api/auth/ws-ticket", {
     method: "POST",
-    credentials: "include",
   });
-  if (!res.ok) {
-    throw new Error(`/api/auth/ws-ticket: HTTP ${res.status}`);
-  }
-  return res.json();
 }
 
 /**
