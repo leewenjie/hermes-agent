@@ -23,10 +23,11 @@
  *     so the user knows the widget tried.
  */
 
-import { useEffect, useState } from "react";
-import { api, type AuthMeResponse } from "@/lib/api";
+import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { LogOut } from "lucide-react";
+
+import { useAuth } from "./auth-context";
 
 interface AuthWidgetProps {
   className?: string;
@@ -42,36 +43,7 @@ function truncateUserId(id: string): string {
 }
 
 export function AuthWidget({ className, hideLogout = false }: AuthWidgetProps) {
-  const [me, setMe] = useState<AuthMeResponse | null>(null);
-  const [hidden, setHidden] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .getAuthMe()
-      .then((data) => {
-        if (cancelled) return;
-        setMe(data);
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        // 401 from /api/auth/me means the gate isn't engaged in this
-        // process (loopback mode) — render nothing. fetchJSON throws an
-        // Error with the status code as a prefix; the global 401
-        // handler only redirects on the structured envelope, so a plain
-        // 401 from /api/auth/me with no envelope bubbles up here.
-        const msg = err instanceof Error ? err.message : String(err);
-        if (msg.startsWith("401:") || msg.startsWith("403:")) {
-          setHidden(true);
-          return;
-        }
-        setError("auth status unavailable");
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const { error, hidden, loading, me } = useAuth();
 
   if (hidden) return null;
 
@@ -88,7 +60,7 @@ export function AuthWidget({ className, hideLogout = false }: AuthWidgetProps) {
     );
   }
 
-  if (!me) {
+  if (loading || !me) {
     // Loading. Reserve the row height so the sidebar doesn't flicker
     // when the data arrives.
     return (

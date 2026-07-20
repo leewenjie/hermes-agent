@@ -136,6 +136,31 @@ async def test_same_key_reattaches_same_session():
 
 
 @pytest.mark.asyncio
+async def test_same_key_different_security_identity_replaces_child():
+    reg = make_registry()
+    b1 = FakeBridge([b"", b"", b""])
+    identity1 = ("workspace-1", "user-1", "active")
+    identity2 = ("workspace-1", "user-1", "frozen")
+    s1, _ = await reg.attach_or_spawn(
+        "tok", spawn=lambda: b1, security_identity=identity1
+    )
+    ws = FakeWS()
+    await s1.attach(ws)
+    b2 = FakeBridge([b"", b""])
+
+    s2, created = await reg.attach_or_spawn(
+        "tok", spawn=lambda: b2, security_identity=identity2
+    )
+
+    assert created is True
+    assert s2 is not s1
+    assert s2.security_identity == identity2
+    assert b1.closed is True
+    assert ws.close_code == 4409
+    await reg.close_all()
+
+
+@pytest.mark.asyncio
 async def test_reap_idle_closes_sessions_past_ttl():
     reg = make_registry(ttl=10.0)
     b = FakeBridge([b"", b""])

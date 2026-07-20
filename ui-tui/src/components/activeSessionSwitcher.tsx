@@ -1,6 +1,8 @@
 import { Box, Text, useInput, useStdout } from '@hermes/ink'
+import { useStore } from '@nanostores/react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
+import { $uiState } from '../app/uiStore.js'
 import { sessionScopedModelArg } from '../domain/slash.js'
 import type { GatewayClient } from '../gatewayClient.js'
 import type {
@@ -306,6 +308,7 @@ export function ActiveSessionSwitcher({
   onSelect,
   t
 }: ActiveSessionSwitcherProps) {
+  const frozen = useStore($uiState).accessState === 'frozen'
   const managedOxaide = t.brand.org === 'Oxaide'
   const [items, setItems] = useState<SessionActiveItem[]>([])
   const [history, setHistory] = useState<SessionListItem[]>([])
@@ -460,6 +463,10 @@ export function ActiveSessionSwitcher({
 
   const submitDraft = useCallback(
     (value: string) => {
+      if (frozen) {
+        return
+      }
+
       const prompt = value.trim()
 
       if (!prompt) {
@@ -469,10 +476,14 @@ export function ActiveSessionSwitcher({
       setDraft('')
       onNewPrompt(prompt, managedOxaide ? undefined : draftModel || undefined)
     },
-    [draftModel, managedOxaide, onNewPrompt]
+    [draftModel, frozen, managedOxaide, onNewPrompt]
   )
 
   const closeSelected = useCallback(async () => {
+    if (frozen) {
+      return
+    }
+
     const target = items[sel - 1]
 
     if (!target || rowKind(sel) !== 'live' || closingId) {
@@ -507,10 +518,14 @@ export function ActiveSessionSwitcher({
     } finally {
       setClosingId('')
     }
-  }, [closingId, currentSessionId, history.length, items, load, onClose, onNew, onSelect, rowKind, sel])
+  }, [closingId, currentSessionId, frozen, history.length, items, load, onClose, onNew, onSelect, rowKind, sel])
 
   const performDelete = useCallback(
     (id: string) => {
+      if (frozen) {
+        return
+      }
+
       const target = history.find(h => h.id === id)
 
       if (!target || deleting) {
@@ -540,7 +555,7 @@ export function ActiveSessionSwitcher({
           setDeleting(false)
         })
     },
-    [deleting, gw, history, items.length]
+    [deleting, frozen, gw, history, items.length]
   )
 
   const handleRowClick = useCallback(
@@ -563,9 +578,11 @@ export function ActiveSessionSwitcher({
         return
       }
 
-      setSel(0)
+      if (!frozen) {
+        setSel(0)
+      }
     },
-    [history, items, onResume, onSelect, rowKind, total]
+    [frozen, history, items, onResume, onSelect, rowKind, total]
   )
 
   const selectedKind = rowKind(sel)
@@ -599,7 +616,7 @@ export function ActiveSessionSwitcher({
     }
 
     if (isCtrl('n')) {
-      return onNew()
+      return frozen ? undefined : onNew()
     }
 
     if (isCtrl('r')) {
@@ -608,7 +625,7 @@ export function ActiveSessionSwitcher({
       return
     }
 
-    if (key.tab && !managedOxaide) {
+    if (key.tab && !managedOxaide && !frozen) {
       if (newSelected) {
         setPickingModel(true)
       }
@@ -617,7 +634,7 @@ export function ActiveSessionSwitcher({
     }
 
     if (isCtrl('d')) {
-      if (selectedKind === 'live') {
+      if (!frozen && selectedKind === 'live') {
         void closeSelected()
       }
 
@@ -626,7 +643,7 @@ export function ActiveSessionSwitcher({
 
     // `d` arms deletion on a resumable history row. (On the New row `d` is
     // captured by the prompt's TextInput, so it never reaches here.)
-    if (lower === 'd' && !key.ctrl && selectedKind === 'history') {
+    if (!frozen && lower === 'd' && !key.ctrl && selectedKind === 'history') {
       setConfirmDelete(history[sel - 1 - items.length]?.id ?? null)
 
       return
@@ -646,6 +663,10 @@ export function ActiveSessionSwitcher({
 
     if (key.return) {
       if (newSelected) {
+        if (frozen) {
+          return
+        }
+
         if (!draftHasText) {
           return onNew()
         }
@@ -722,7 +743,7 @@ export function ActiveSessionSwitcher({
 
         <Box {...fixedSessionColumnStyle()} width={11}>
           <Text bold={newSelectedRow} color={newRowMarkerColor} wrap="truncate-end">
-            new
+            {frozen ? 'read only' : 'new'}
           </Text>
         </Box>
 
@@ -740,13 +761,17 @@ export function ActiveSessionSwitcher({
 
         <Box flexGrow={1} flexShrink={1} minWidth={0}>
           <Text bold={newSelectedRow} color={newRowTextColor ?? t.color.muted} wrap="truncate-end">
-            {promptTitle}
+            {frozen ? 'Browse saved research below' : promptTitle}
           </Text>
         </Box>
       </Box>
 
       {offset > 0 && <Text color={t.color.muted}> ↑ {offset} more</Text>}
-      {!listLen && <Text color={t.color.muted}>no other sessions — Enter on +new to start one</Text>}
+      {!listLen && (
+        <Text color={t.color.muted}>
+          {frozen ? 'No saved research is available in this workspace' : 'no other sessions — Enter on +new to start one'}
+        </Text>
+      )}
 
       {visibleRows.map(i => {
         const selected = sel === i
@@ -877,19 +902,25 @@ export function ActiveSessionSwitcher({
 
       {newSelected ? (
         <>
-          <Box marginTop={1}>
-            <Text color={t.color.label}>prompt › </Text>
-            <TextInput columns={promptColumns} onChange={setDraft} onSubmit={submitDraft} value={draft} />
-          </Box>
-          <OrchestratorHintText
-            segments={
-              managedOxaide ? managedOrchestratorContextHintSegments(true) : orchestratorContextHintSegments(true)
-            }
-            t={t}
-          />
-          {!managedOxaide && <Text color={t.color.muted} wrap="truncate-end">
-            model: {draftModelDisplayLabel(draftModel)}
-          </Text>}
+          {frozen ? (
+            <Text color={t.color.muted}>Read-only · select saved research to open it</Text>
+          ) : (
+            <>
+              <Box marginTop={1}>
+                <Text color={t.color.label}>prompt › </Text>
+                <TextInput columns={promptColumns} onChange={setDraft} onSubmit={submitDraft} value={draft} />
+              </Box>
+              <OrchestratorHintText
+                segments={
+                  managedOxaide ? managedOrchestratorContextHintSegments(true) : orchestratorContextHintSegments(true)
+                }
+                t={t}
+              />
+              {!managedOxaide && <Text color={t.color.muted} wrap="truncate-end">
+                model: {draftModelDisplayLabel(draftModel)}
+              </Text>}
+            </>
+          )}
         </>
       ) : (
         <Box flexDirection="column" marginTop={1}>
@@ -904,12 +935,20 @@ export function ActiveSessionSwitcher({
             t={t}
           />
           <Text color={t.color.muted} wrap="truncate-end">
-            Select <Text color={newSessionMarkerColor(t, false)}>+new</Text> to type a prompt
+            {frozen ? (
+              'Open another saved research session, or press Esc when finished'
+            ) : (
+              <>Select <Text color={newSessionMarkerColor(t, false)}>+new</Text> to type a prompt</>
+            )}
           </Text>
         </Box>
       )}
 
-      <OrchestratorHintText segments={orchestratorGlobalHotkeyHintSegments} t={t} />
+      {frozen ? (
+        <Text color={t.color.muted}>↑↓ move · Enter open · Ctrl+R refresh · Esc close</Text>
+      ) : (
+        <OrchestratorHintText segments={orchestratorGlobalHotkeyHintSegments} t={t} />
+      )}
     </Box>
   )
 }

@@ -66,6 +66,7 @@ import { gatewayLine } from "@/lib/gateway-status";
 import { useBelowBreakpoint } from "@nous-research/ui/hooks/use-below-breakpoint";
 import { useSidebarStatus } from "@/hooks/useSidebarStatus";
 import { AuthWidget } from "@/components/AuthWidget";
+import { AuthProvider } from "@/components/AuthProvider";
 import { PageHeaderProvider } from "@/contexts/PageHeaderProvider";
 import { ProfileProvider } from "@/contexts/ProfileProvider";
 import { useProfileScope } from "@/contexts/useProfileScope";
@@ -551,6 +552,7 @@ export default function App() {
   }, []);
 
   return (
+    <AuthProvider>
     <ProfileProvider>
     <div
       data-layout-variant={layoutVariant}
@@ -854,7 +856,7 @@ export default function App() {
                       )}
                       aria-hidden={!isChatRoute}
                     >
-                      <ChatPage isActive={isChatRoute} />
+                      <ChatPage billingUrl={branding.billingUrl} isActive={isChatRoute} />
                     </div>
                   ))}
               </div>
@@ -867,6 +869,7 @@ export default function App() {
       <PluginSlot name="overlay" />
     </div>
     </ProfileProvider>
+    </AuthProvider>
   );
 }
 

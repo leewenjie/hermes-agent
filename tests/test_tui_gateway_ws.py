@@ -1,4 +1,5 @@
 import asyncio
+import json
 import threading
 import time
 
@@ -7,7 +8,7 @@ from tui_gateway import server
 from tui_gateway import ws as ws_mod
 
 
-def test_ws_startup_starts_background_mcp_discovery(monkeypatch):
+def test_active_ws_startup_starts_background_mcp_discovery(monkeypatch):
     """The desktop app and dashboard chat reach the agent through this WS
     sidecar, not through tui_gateway.entry.main() (which spawns the discovery
     thread for the stdio TUI). handle_ws must start discovery itself, otherwise
@@ -35,11 +36,79 @@ def test_ws_startup_starts_background_mcp_discovery(monkeypatch):
 
     server._sessions.clear()
     try:
-        asyncio.run(ws_mod.handle_ws(FakeWS()))
+        asyncio.run(ws_mod.handle_ws(FakeWS(), trusted_context={"access_state": "active"}))
     finally:
         server._sessions.clear()
 
     assert calls == [{"logger": ws_mod._log, "thread_name": "tui-ws-mcp-discovery"}]
+
+
+def test_ws_ready_exposes_sanitized_trusted_access_state(monkeypatch):
+    sent = []
+    discovery_calls = []
+    monkeypatch.setattr(
+        mcp_startup,
+        "start_background_mcp_discovery",
+        lambda **kw: discovery_calls.append(kw),
+    )
+
+    class FakeWS:
+        async def accept(self):
+            pass
+
+        async def send_text(self, line):
+            sent.append(json.loads(line))
+
+        async def receive_text(self):
+            raise ws_mod._WebSocketDisconnect()
+
+        async def close(self):
+            pass
+
+    asyncio.run(ws_mod.handle_ws(FakeWS(), trusted_context={"access_state": "frozen"}))
+
+    assert sent[0]["params"]["payload"]["access_state"] == "frozen"
+    assert discovery_calls == []
+
+
+def test_ws_invalid_managed_access_state_fails_closed(monkeypatch):
+    sent = []
+    received = False
+    discovery_calls = []
+    monkeypatch.setattr(
+        mcp_startup,
+        "start_background_mcp_discovery",
+        lambda **kw: discovery_calls.append(kw),
+    )
+
+    class FakeWS:
+        async def accept(self):
+            pass
+
+        async def send_text(self, line):
+            sent.append(json.loads(line))
+
+        async def receive_text(self):
+            nonlocal received
+            if not received:
+                received = True
+                return json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "prompt.submit",
+                    "params": {"text": "must not run"},
+                })
+            raise ws_mod._WebSocketDisconnect()
+
+        async def close(self):
+            pass
+
+    asyncio.run(ws_mod.handle_ws(FakeWS(), trusted_context={"access_state": "invalid"}))
+
+    assert sent[0]["params"]["payload"]["access_state"] == "frozen"
+    assert sent[1]["error"]["code"] == 4030
+    assert "access_frozen" in sent[1]["error"]["message"]
+    assert discovery_calls == []
 
 
 def _run_disconnect(monkeypatch, seed):

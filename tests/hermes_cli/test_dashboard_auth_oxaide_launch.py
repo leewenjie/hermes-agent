@@ -8,6 +8,7 @@ import json
 import time
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from hermes_cli import web_server
@@ -19,9 +20,15 @@ from hermes_cli.dashboard_auth.routes import (
     _decode_oxaide_session_token,
     _reset_oxaide_launch_tokens_for_tests,
 )
+from hermes_cli.dashboard_auth import routes as dashboard_auth_routes
 
 
-def _launch_token(secret: str, *, expires_at: int | None = None) -> str:
+def _launch_token(
+    secret: str,
+    *,
+    access_state: str | None = "active",
+    expires_at: int | None = None,
+) -> str:
     payload = {
         "sub": "oxaide-user-1",
         "user_id": "oxaide-user-1",
@@ -38,6 +45,8 @@ def _launch_token(secret: str, *, expires_at: int | None = None) -> str:
         "iat": int(time.time()),
         "exp": expires_at or int(time.time()) + 600,
     }
+    if access_state is not None:
+        payload["access_state"] = access_state
     encoded = base64.urlsafe_b64encode(
         json.dumps(payload, separators=(",", ":")).encode("utf-8")
     ).decode("ascii").rstrip("=")
@@ -101,7 +110,8 @@ def gated_app(monkeypatch):
 
 def test_signed_launch_creates_verified_dashboard_session(gated_app):
     client, secret = gated_app
-    token = _launch_token(secret)
+    launch_expires_at = int(time.time()) + 600
+    token = _launch_token(secret, expires_at=launch_expires_at)
 
     launched = client.get(
         f"/auth/oxaide-launch?token={token}&next=/chat",
@@ -119,9 +129,8 @@ def test_signed_launch_creates_verified_dashboard_session(gated_app):
         "display_name": "Oxaide User",
         "org_id": "workspace-1",
         "provider": "oxaide-demo",
-        "expires_at": pytest.approx(
-            int(time.time()) + _OXAIDE_SESSION_TTL_SECONDS, abs=3
-        ),
+        "expires_at": launch_expires_at,
+        "access_state": "active",
     }
 
     ticket = client.post("/api/auth/ws-ticket")
@@ -136,9 +145,8 @@ def test_signed_launch_creates_verified_dashboard_session(gated_app):
         "runtime_session_id": "rt_workspace_1",
         "runtime_key": "runtimekey1234567890abcd",
         "user_id": "oxaide-user-1",
-        "expires_at": pytest.approx(
-            int(time.time()) + _OXAIDE_SESSION_TTL_SECONDS, abs=3
-        ),
+        "expires_at": launch_expires_at,
+        "access_state": "active",
     }
 
     access_cookie = client.cookies.get("__Host-hermes_session_at")
@@ -148,7 +156,61 @@ def test_signed_launch_creates_verified_dashboard_session(gated_app):
     assert exchanged["workspace_id"] == "workspace-1"
     assert exchanged["runtime_key"] == "runtimekey1234567890abcd"
     assert exchanged["jti"] == session_jti
-    assert exchanged["exp"] - exchanged["iat"] == _OXAIDE_SESSION_TTL_SECONDS
+    assert exchanged["access_state"] == "active"
+    assert exchanged["exp"] == launch_expires_at
+    assert exchanged["exp"] - exchanged["iat"] <= _OXAIDE_SESSION_TTL_SECONDS
+
+
+def test_dashboard_session_cannot_outlive_signed_access_state(gated_app, monkeypatch):
+    client, secret = gated_app
+    launch_expires_at = int(time.time()) + 600
+    client.get(
+        f"/auth/oxaide-launch?token={_launch_token(secret, expires_at=launch_expires_at)}",
+        follow_redirects=False,
+    )
+    access_cookie = client.cookies.get("__Host-hermes_session_at")
+    assert access_cookie is not None
+    assert _decode_oxaide_session_token(access_cookie)["exp"] == launch_expires_at
+
+    monkeypatch.setattr(
+        dashboard_auth_routes.time,
+        "time",
+        lambda: launch_expires_at + 1,
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        _decode_oxaide_session_token(access_cookie)
+    assert exc_info.value.status_code == 401
+
+
+@pytest.mark.parametrize("access_state", [None, "", "paused", "ACTIVE"])
+def test_launch_requires_known_signed_access_state(gated_app, access_state):
+    client, secret = gated_app
+
+    response = client.get(
+        f"/auth/oxaide-launch?token={_launch_token(secret, access_state=access_state)}",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 401
+
+
+def test_frozen_launch_propagates_state_and_blocks_http_mutations(gated_app):
+    client, secret = gated_app
+    launched = client.get(
+        f"/auth/oxaide-launch?token={_launch_token(secret, access_state='frozen')}",
+        follow_redirects=False,
+    )
+
+    assert launched.status_code == 302
+    assert client.get("/api/auth/me").json()["access_state"] == "frozen"
+
+    ticket = client.post("/api/auth/ws-ticket")
+    assert ticket.status_code == 200
+    assert consume_ticket(ticket.json()["ticket"])["trusted_context"]["access_state"] == "frozen"
+
+    blocked = client.post("/api/files/mkdir", json={"path": "blocked"})
+    assert blocked.status_code == 403
+    assert blocked.json()["code"] == "access_frozen"
 
 
 def test_public_status_exposes_only_nonsecret_tenant_identity(gated_app):

@@ -580,11 +580,18 @@ def _register_command_family(
 class HermesConsoleEngine:
     """Curated line-command executor for Hermes Console."""
 
-    def __init__(self, *, output_limit: int = 20000, context: ConsoleContext = "local"):
+    def __init__(
+        self,
+        *,
+        output_limit: int = 20000,
+        context: ConsoleContext = "local",
+        read_only: bool = False,
+    ):
         if context not in ALL_CONTEXTS:
             raise ValueError(f"Unknown console context: {context}")
         self.context = context
         self.output_limit = output_limit
+        self.read_only = read_only
         self.history: list[str] = []
         self.commands: dict[tuple[str, ...], ConsoleCommand] = {}
         self._register_defaults()
@@ -614,6 +621,11 @@ class HermesConsoleEngine:
                 return builtin
 
             command, args = self._resolve_command(tokens)
+            if self.read_only and command.mutating:
+                raise ConsoleCommandError(
+                    "This workspace is frozen. Upgrade your plan to make changes "
+                    "or run new research."
+                )
             if command.mutating and not confirmed:
                 return ConsoleResult(
                     "confirm_required",

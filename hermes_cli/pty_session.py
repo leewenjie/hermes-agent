@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Optional
+from typing import Callable, Dict, Optional, Tuple
 
 WS_CLOSE_PROCESS_EXITED = 4410
 WS_CLOSE_SUPERSEDED = 4409
@@ -40,9 +40,14 @@ class RingBuffer:
 
 
 class PtySession:
-    def __init__(self, key: str, bridge, *, buffer_cap: int, read_timeout: float) -> None:
+    def __init__(self, key: str, bridge, *, buffer_cap: int, read_timeout: float,
+                 security_identity: object = None) -> None:
         self.key = key
         self.bridge = bridge
+        # Stable, server-derived authorization scope for this child process.
+        # Reauthentication metadata such as ticket/JWT ids and expiries must
+        # not be included because they change across legitimate reconnects.
+        self.security_identity = security_identity
         self.buffer = RingBuffer(buffer_cap)
         self.alive = True
         self.attached = False
@@ -104,7 +109,15 @@ class PtySession:
         self.attached = False
         self.last_detached_at = time.monotonic()
 
-    async def close(self) -> None:
+    async def close(self, *, close_ws_code: Optional[int] = None) -> None:
+        ws = self._ws
+        self._ws = None
+        self.attached = False
+        if ws is not None and close_ws_code is not None:
+            try:
+                await ws.close(code=close_ws_code)
+            except Exception:
+                pass
         if self._drain_task is not None:
             self._drain_task.cancel()
             try:
@@ -117,10 +130,6 @@ class PtySession:
             await asyncio.to_thread(self.bridge.close)
         except Exception:
             pass
-
-
-from typing import Callable, Dict, Tuple
-
 
 class RegistryFull(Exception):
     pass
@@ -144,26 +153,40 @@ class PtySessionRegistry:
         self._buffer_cap = buffer_cap
         self._read_timeout = read_timeout
         self._sessions: Dict[str, PtySession] = {}
+        self._lock = asyncio.Lock()
 
-    async def attach_or_spawn(self, key: str, *, spawn: Callable[[], object]
+    async def attach_or_spawn(self, key: str, *, spawn: Callable[[], object],
+                              security_identity: object = None
                               ) -> Tuple[PtySession, bool]:
-        await self.reap_idle()
-        existing = self._sessions.get(key)
-        if existing is not None and existing.alive:
-            return existing, False
-        if existing is not None:                       # dead remnant
-            await existing.close()
-            self._sessions.pop(key, None)
-        if len(self._sessions) >= self._max:
-            self._reap_one_idle_or_raise()
-        # PTY spawn does blocking fork/exec work — keep it off the event
-        # loop (#53227).
-        bridge = await asyncio.to_thread(spawn)
-        session = PtySession(key, bridge, buffer_cap=self._buffer_cap,
-                             read_timeout=self._read_timeout)
-        await session.start()
-        self._sessions[key] = session
-        return session, True
+        async with self._lock:
+            await self._reap_idle_unlocked(time.monotonic())
+            existing = self._sessions.get(key)
+            if existing is not None and existing.alive:
+                if existing.security_identity == security_identity:
+                    return existing, False
+                # An opaque browser attach token is not an authorization
+                # identity. Kill the old child before replacing it under the
+                # newly authenticated scope.
+                self._sessions.pop(key, None)
+                await existing.close(close_ws_code=WS_CLOSE_SUPERSEDED)
+            elif existing is not None:                 # dead remnant
+                await existing.close()
+                self._sessions.pop(key, None)
+            if len(self._sessions) >= self._max:
+                self._reap_one_idle_or_raise()
+            # PTY spawn does blocking fork/exec work — keep it off the event
+            # loop (#53227).
+            bridge = await asyncio.to_thread(spawn)
+            session = PtySession(
+                key,
+                bridge,
+                buffer_cap=self._buffer_cap,
+                read_timeout=self._read_timeout,
+                security_identity=security_identity,
+            )
+            await session.start()
+            self._sessions[key] = session
+            return session, True
 
     def detach(self, key: str, ws) -> None:
         s = self._sessions.get(key)
@@ -172,6 +195,10 @@ class PtySessionRegistry:
 
     async def reap_idle(self, now: Optional[float] = None) -> None:
         now = time.monotonic() if now is None else now
+        async with self._lock:
+            await self._reap_idle_unlocked(now)
+
+    async def _reap_idle_unlocked(self, now: float) -> None:
         doomed = [
             key for key, s in self._sessions.items()
             if (not s.alive)
@@ -191,5 +218,6 @@ class PtySessionRegistry:
         asyncio.create_task(oldest.close())
 
     async def close_all(self) -> None:
-        for key in list(self._sessions):
-            await self._sessions.pop(key).close()
+        async with self._lock:
+            for key in list(self._sessions):
+                await self._sessions.pop(key).close()

@@ -746,6 +746,33 @@ describe('createGatewayEventHandler', () => {
     expect(resumeById).not.toHaveBeenCalled()
   })
 
+  it('on frozen gateway.ready resumes retained research and never forges', async () => {
+    const appended: Msg[] = []
+    const newSession = vi.fn()
+    const resumeById = vi.fn()
+    const ctx = buildCtx(appended)
+
+    ctx.session.newSession = newSession
+    ctx.session.resumeById = resumeById
+    ctx.session.STARTUP_RESUME_ID = ''
+    ctx.gateway.rpc = vi.fn(async (method: string) => {
+      if (method === 'session.most_recent') {
+        return { session_id: 'saved-research' }
+      }
+
+      return null
+    })
+
+    createGatewayEventHandler(ctx)({
+      payload: { access_state: 'frozen' },
+      type: 'gateway.ready'
+    } as any)
+
+    await vi.waitFor(() => expect(resumeById).toHaveBeenCalledWith('saved-research'))
+    expect(newSession).not.toHaveBeenCalled()
+    expect(getUiState().accessState).toBe('frozen')
+  })
+
   it('on gateway.ready after a crash, resumes the recovered session once and skips forge', async () => {
     const appended: Msg[] = []
     const newSession = vi.fn()

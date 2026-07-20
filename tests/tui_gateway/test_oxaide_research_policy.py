@@ -313,6 +313,58 @@ def test_oxaide_dispatch_allows_read_only_pet_cells(oxaide_runtime, monkeypatch)
     assert response["result"] == {"frames": []}
 
 
+@pytest.mark.parametrize(
+    ("method_name", "params"),
+    [
+        ("session.create", {}),
+        ("prompt.submit", {"session_id": "live-1", "text": "Run research"}),
+        ("session.title", {"session_id": "live-1", "title": "Changed"}),
+        ("session.delete", {"session_id": "stored-1"}),
+        ("approval.respond", {"request_id": "approval-1", "approved": True}),
+    ],
+)
+def test_frozen_dispatch_rejects_work_and_mutations(
+    oxaide_runtime, monkeypatch, method_name, params
+):
+    monkeypatch.setattr(
+        server,
+        "_transport_trusted_context",
+        lambda: {"user_id": "user-1", "access_state": "frozen"},
+    )
+
+    response = server.handle_request({
+        "jsonrpc": "2.0",
+        "id": "rid",
+        "method": method_name,
+        "params": params,
+    })
+
+    assert response["error"]["code"] == 4030
+    assert response["error"]["message"].startswith("access_frozen:")
+
+
+def test_frozen_dispatch_keeps_history_reads(oxaide_runtime, monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "_transport_trusted_context",
+        lambda: {"user_id": "user-1", "access_state": "frozen"},
+    )
+    monkeypatch.setitem(
+        server._methods,
+        "session.status",
+        lambda rid, _params: server._ok(rid, {"status": "idle"}),
+    )
+
+    response = server.handle_request({
+        "jsonrpc": "2.0",
+        "id": "rid",
+        "method": "session.status",
+        "params": {"session_id": "live-1"},
+    })
+
+    assert response["result"] == {"status": "idle"}
+
+
 def test_oxaide_history_projection_removes_internal_messages_and_reasoning(oxaide_runtime):
     messages = server._history_to_messages([
         {"role": "system", "content": "private system prompt"},
@@ -490,7 +542,7 @@ def test_oxaide_session_enumeration_is_owner_scoped(monkeypatch, oxaide_runtime)
 
 
 def test_oxaide_active_sessions_are_owner_scoped(monkeypatch, oxaide_runtime):
-    def live_session(user_id):
+    def live_session(user_id, access_state="active"):
         return {
             "agent": None,
             "created_at": 1,
@@ -498,26 +550,63 @@ def test_oxaide_active_sessions_are_owner_scoped(monkeypatch, oxaide_runtime):
             "history_lock": threading.RLock(),
             "last_active": 2,
             "session_key": f"stored-{user_id}",
-            "trusted_launch_context": {"user_id": user_id},
+            "trusted_launch_context": {
+                "user_id": user_id,
+                "access_state": access_state,
+            },
         }
 
     monkeypatch.setattr(
         server,
         "_transport_trusted_context",
-        lambda: {"user_id": "user-1"},
+        lambda: {"user_id": "user-1", "access_state": "frozen"},
     )
     monkeypatch.setattr(
         server,
         "_sessions",
         {
-            "runtime-owned": live_session("user-1"),
-            "runtime-foreign": live_session("user-2"),
+            "runtime-owned-active": live_session("user-1", "active"),
+            "runtime-owned-frozen": live_session("user-1", "frozen"),
+            "runtime-foreign-frozen": live_session("user-2", "frozen"),
         },
     )
     monkeypatch.setattr(server, "_session_live_title", lambda *_args: "Research")
 
     active = server._methods["session.active_list"]("rid", {})["result"]["sessions"]
-    assert [row["id"] for row in active] == ["runtime-owned"]
+    assert [row["id"] for row in active] == ["runtime-owned-frozen"]
+
+
+def test_frozen_runtime_record_cannot_activate_or_read_active_record(
+    monkeypatch, oxaide_runtime
+):
+    active = {
+        "agent": object(),
+        "created_at": 1,
+        "history": [{"role": "assistant", "content": "active result"}],
+        "history_lock": threading.RLock(),
+        "last_active": 2,
+        "session_key": "stored-1",
+        "trusted_launch_context": {
+            "user_id": "user-1",
+            "access_state": "active",
+        },
+    }
+    monkeypatch.setattr(server, "_sessions", {"runtime-active": active})
+    monkeypatch.setattr(
+        server,
+        "_transport_trusted_context",
+        lambda: {"user_id": "user-1", "access_state": "frozen"},
+    )
+
+    activated = server._methods["session.activate"](
+        "rid", {"session_id": "runtime-active"}
+    )
+    history = server._methods["session.history"](
+        "rid", {"session_id": "runtime-active"}
+    )
+
+    assert activated["error"]["code"] == 4030
+    assert history["error"]["code"] == 4030
 
 
 def test_oxaide_session_resume_ignores_profile_spoofing(monkeypatch, oxaide_runtime):
@@ -545,6 +634,141 @@ def test_oxaide_session_resume_ignores_profile_spoofing(monkeypatch, oxaide_runt
 
     assert response["error"]["message"] == "session not found"
     assert profile_args == [None]
+
+
+def test_frozen_session_resume_attaches_without_reopen_or_agent_build(
+    monkeypatch, oxaide_runtime
+):
+    stored = {
+        "id": "stored-1",
+        "cwd": "/retained",
+        "user_id": "user-1",
+    }
+
+    class DB:
+        def get_session(self, session_id):
+            assert session_id == "stored-1"
+            return stored
+
+        def get_session_by_title(self, _title):
+            return None
+
+        def resolve_resume_session_id(self, session_id):
+            return session_id
+
+        def get_messages_as_conversation(self, session_id, include_ancestors=False):
+            assert session_id == "stored-1"
+            assert include_ancestors is True
+            return [{"role": "assistant", "content": "Saved result"}]
+
+        def reopen_session(self, _session_id):
+            pytest.fail("frozen resume must not reopen persisted state")
+
+    monkeypatch.setattr(
+        server,
+        "_transport_trusted_context",
+        lambda: {"user_id": "user-1", "access_state": "frozen"},
+    )
+    monkeypatch.setattr(server, "_get_db", lambda: DB())
+    monkeypatch.setattr(server, "_sessions", {})
+    monkeypatch.setattr(
+        server,
+        "_schedule_agent_build",
+        lambda *_args, **_kwargs: pytest.fail("frozen resume must not build an agent"),
+    )
+
+    response = server._methods["session.resume"](
+        "rid", {"session_id": "stored-1", "source": "tui"}
+    )
+
+    result = response["result"]
+    assert result["resumed"] == "stored-1"
+    assert result["messages"] == [{"role": "assistant", "text": "Saved result"}]
+    assert result["running"] is False
+    assert server._sessions[result["session_id"]]["agent"] is None
+
+
+def test_frozen_resume_does_not_reuse_same_owner_active_record(
+    monkeypatch, oxaide_runtime
+):
+    stored = {"id": "stored-1", "cwd": "/retained", "user_id": "user-1"}
+    active_transport = object()
+    active = {
+        "agent": object(),
+        "created_at": 1,
+        "history": [],
+        "history_lock": threading.RLock(),
+        "last_active": 2,
+        "session_key": "stored-1",
+        "transport": active_transport,
+        "trusted_launch_context": {
+            "user_id": "user-1",
+            "access_state": "active",
+        },
+    }
+
+    class DB:
+        def get_session(self, _session_id):
+            return stored
+
+        def get_session_by_title(self, _title):
+            return None
+
+        def resolve_resume_session_id(self, session_id):
+            return session_id
+
+        def get_messages_as_conversation(self, _session_id, include_ancestors=False):
+            assert include_ancestors is True
+            return [{"role": "assistant", "content": "Saved result"}]
+
+        def reopen_session(self, _session_id):
+            pytest.fail("frozen resume must not reopen persisted state")
+
+    monkeypatch.setattr(
+        server,
+        "_transport_trusted_context",
+        lambda: {"user_id": "user-1", "access_state": "frozen"},
+    )
+    monkeypatch.setattr(server, "_get_db", lambda: DB())
+    monkeypatch.setattr(server, "_sessions", {"runtime-active": active})
+
+    response = server._methods["session.resume"](
+        "rid", {"session_id": "stored-1"}
+    )
+
+    viewer_id = response["result"]["session_id"]
+    assert viewer_id != "runtime-active"
+    assert server._trusted_session_access_state(server._sessions[viewer_id]) == "frozen"
+    assert server._sessions[viewer_id]["agent"] is None
+    assert active["transport"] is active_transport
+
+
+def test_frozen_resume_refuses_ownerless_history(monkeypatch, oxaide_runtime):
+    class DB:
+        def get_session(self, _session_id):
+            return {"id": "stored-1", "user_id": ""}
+
+        def get_session_by_title(self, _title):
+            return None
+
+        def resolve_resume_session_id(self, session_id):
+            return session_id
+
+        def create_session(self, *_args, **_kwargs):
+            pytest.fail("frozen resume must not claim ownerless history")
+
+    monkeypatch.setattr(
+        server,
+        "_transport_trusted_context",
+        lambda: {"user_id": "user-1", "access_state": "frozen"},
+    )
+    monkeypatch.setattr(server, "_get_db", lambda: DB())
+
+    response = server._methods["session.resume"](
+        "rid", {"session_id": "stored-1"}
+    )
+
+    assert response["error"]["code"] == 4030
 
 
 def test_session_history_uses_session_profile_db(monkeypatch):
