@@ -416,11 +416,22 @@ class TestBlockingApprovalE2E:
 
     def setup_method(self):
         _clear_approval_state()
+        # These tests exercise the blocking gateway handshake, not smart-mode
+        # auxiliary model selection. Keep them deterministic when no auxiliary
+        # provider is configured (as in CI and fresh local checkouts).
+        self._approval_config = patch(
+            "tools.approval._get_approval_config",
+            return_value={"mode": "manual", "timeout": 60},
+        )
+        self._approval_config.start()
         os.environ.pop("HERMES_YOLO_MODE", None)
         os.environ.pop("HERMES_INTERACTIVE", None)
         os.environ.pop("HERMES_GATEWAY_SESSION", None)
         os.environ.pop("HERMES_EXEC_ASK", None)
         os.environ.pop("HERMES_SESSION_KEY", None)
+
+    def teardown_method(self):
+        self._approval_config.stop()
 
     def test_blocking_approval_approve_once(self):
         """check_all_command_guards blocks until resolve_gateway_approval is called."""
