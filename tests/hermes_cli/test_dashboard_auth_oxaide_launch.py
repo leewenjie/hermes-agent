@@ -238,7 +238,9 @@ def test_oxaide_tenant_login_redirects_to_single_customer_login(gated_app):
     )
 
     assert response.status_code == 302
-    assert response.headers["location"] == "https://oxaide.com/agents"
+    assert response.headers["location"] == (
+        "https://oxaide.com/agents?workspace=workspace-1"
+    )
     assert response.headers["cache-control"] == "no-store"
     assert response.headers["referrer-policy"] == "no-referrer"
 

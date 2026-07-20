@@ -78,6 +78,12 @@ _OXAIDE_RUNTIME_PATTERN = re.compile(r"^[a-z0-9]{20,64}$")
 _OXAIDE_ACCESS_STATES = frozenset({"active", "frozen"})
 
 
+def _oxaide_customer_login_url() -> str:
+    """Return the Oxaide entry URL scoped to this pinned tenant runtime."""
+    workspace_id, _runtime_key = _required_oxaide_runtime_identity()
+    return f"{_OXAIDE_CUSTOMER_LOGIN_URL}?{urlencode({'workspace': workspace_id})}"
+
+
 def _oxaide_access_state(payload: dict) -> str:
     value = payload.get("access_state")
     if not isinstance(value, str) or value not in _OXAIDE_ACCESS_STATES:
@@ -589,7 +595,7 @@ async def login_page(request: Request):
         and request.query_params.get("breakglass", "") != "1"
     ):
         return RedirectResponse(
-            url=_OXAIDE_CUSTOMER_LOGIN_URL,
+            url=_oxaide_customer_login_url(),
             status_code=302,
             headers={
                 "Cache-Control": "no-store",
