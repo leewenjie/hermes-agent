@@ -1,6 +1,25 @@
 import asyncio
+from types import SimpleNamespace
+
+from starlette.requests import Request
 
 from hermes_cli import web_server
+
+
+def _search_request(*, managed_user_id=None):
+    request = Request({
+        "type": "http",
+        "method": "GET",
+        "path": "/api/sessions/search",
+        "headers": [],
+    })
+    if managed_user_id is not None:
+        request.state.session = SimpleNamespace(
+            provider="oxaide-demo",
+            org_id="workspace-1",
+            user_id=managed_user_id,
+        )
+    return request
 
 
 def test_managed_session_messages_keep_safe_attachment_placeholders():
@@ -24,6 +43,24 @@ def test_managed_session_messages_keep_safe_attachment_placeholders():
         {"role": "user", "content": "Review these\n[image]\n[audio]\n[attachment]"},
         {"role": "assistant", "content": "[image]"},
     ]
+
+
+def test_managed_session_messages_redact_host_filesystem_paths():
+    messages = web_server._managed_session_messages([
+        {
+            "role": "assistant",
+            "content": (
+                "Saved /opt/hermes/workspace/report.csv, "
+                "C:\\Users\\runner\\secret.txt, and "
+                "\\\\fileserver\\private\\result.csv"
+            ),
+        },
+    ])
+
+    assert messages == [{
+        "role": "assistant",
+        "content": "Saved [research file] [research file] and [research file]",
+    }]
 
 
 class _FakeSessionDB:
@@ -50,8 +87,10 @@ class _FakeSessionDB:
             }
         ]
 
-    def search_messages(self, query, limit=20):
+    def search_messages(self, query, limit=20, role_filter=None, user_id=None):
         assert query == "20260603*"
+        assert role_filter is None
+        assert user_id is None
         return [
             {
                 "session_id": "20260603_090200_exact",
@@ -75,6 +114,7 @@ class _FakeSessionDB:
         # No compression chains in this fixture — every session is its own root.
         return {
             "id": session_id,
+            "user_id": "user-1",
             "parent_session_id": None,
             "source": "cli" if session_id.startswith("20260603") else "desktop",
             "model": "claude" if session_id.startswith("20260603") else "gpt",
@@ -99,7 +139,9 @@ class _FakeSessionDB:
 def test_desktop_session_search_merges_id_matches_before_content_matches(monkeypatch):
     monkeypatch.setattr("hermes_state.SessionDB", _FakeSessionDB)
 
-    response = asyncio.run(web_server.search_sessions(q="20260603", limit=2))
+    response = asyncio.run(
+        web_server.search_sessions(_search_request(), q="20260603", limit=2)
+    )
 
     # ID match surfaces first; the content hit on the SAME session is deduped
     # by lineage root (not double-listed); the unrelated content hit follows.
@@ -164,7 +206,9 @@ def test_managed_search_only_returns_customer_visible_messages(monkeypatch):
         def search_sessions_by_id(self, query, limit=20, include_archived=True):
             raise AssertionError("managed search must not expose direct session-id previews")
 
-        def search_messages(self, query, limit=20):
+        def search_messages(self, query, limit=20, role_filter=None, user_id=None):
+            assert role_filter == ["user", "assistant"]
+            assert user_id == "user-1"
             return [
                 {
                     "session_id": "system_session",
@@ -184,7 +228,8 @@ def test_managed_search_only_returns_customer_visible_messages(monkeypatch):
                 },
                 {
                     "session_id": "compaction_session",
-                    "snippet": "<mark>[CONTEXT SUMMARY]:</mark> hidden handoff",
+                    "snippet": "...centered hidden handoff match...",
+                    "is_internal_compaction": True,
                     "role": "assistant",
                     "source": "cli",
                     "model": "hidden-model",
@@ -192,7 +237,7 @@ def test_managed_search_only_returns_customer_visible_messages(monkeypatch):
                 },
                 {
                     "session_id": "content_session",
-                    "snippet": "customer-visible answer",
+                    "snippet": "customer-visible answer at /opt/hermes/private/result.csv",
                     "role": "assistant",
                     "source": "cli",
                     "model": "hidden-model",
@@ -206,12 +251,22 @@ def test_managed_search_only_returns_customer_visible_messages(monkeypatch):
         "_dashboard_branding_settings",
         lambda: {"product": "oxaide"},
     )
+    monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", "runtime-key")
 
-    response = asyncio.run(web_server.search_sessions(q="20260603", limit=20))
+    response = asyncio.run(
+        web_server.search_sessions(
+            _search_request(managed_user_id="user-1"),
+            q="20260603",
+            limit=20,
+        )
+    )
 
     assert len(response["results"]) == 1
     assert response["results"][0]["session_id"] == "content_session"
     assert response["results"][0]["role"] == "assistant"
+    assert response["results"][0]["snippet"] == (
+        "customer-visible answer at [research file]"
+    )
     assert set(response["results"][0]) == {"session_id", "snippet", "role", "session"}
     assert set(response["results"][0]["session"]) == {
         "id",

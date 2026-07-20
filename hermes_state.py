@@ -5167,6 +5167,7 @@ class SessionDB:
         offset: int = 0,
         sort: str = None,
         include_inactive: bool = False,
+        user_id: str = None,
     ) -> List[Dict[str, Any]]:
         """
         Full-text search across session messages using FTS5.
@@ -5248,6 +5249,9 @@ class SessionDB:
             role_placeholders = ",".join("?" for _ in role_filter)
             where_clauses.append(f"m.role IN ({role_placeholders})")
             params.extend(role_filter)
+        if user_id is not None:
+            where_clauses.append("s.user_id = ?")
+            params.append(user_id)
 
         where_sql = " AND ".join(where_clauses)
         params.extend([limit, offset])
@@ -5324,6 +5328,9 @@ class SessionDB:
                 if role_filter:
                     tri_where.append(f"m.role IN ({','.join('?' for _ in role_filter)})")
                     tri_params.extend(role_filter)
+                if user_id is not None:
+                    tri_where.append("s.user_id = ?")
+                    tri_params.append(user_id)
                 tri_sql = f"""
                     SELECT
                         m.id,
@@ -5381,6 +5388,9 @@ class SessionDB:
                 if role_filter:
                     like_where.append(f"m.role IN ({','.join('?' for _ in role_filter)})")
                     like_params.extend(role_filter)
+                if user_id is not None:
+                    like_where.append("s.user_id = ?")
+                    like_params.append(user_id)
                 like_sql = f"""
                     SELECT m.id, m.session_id, m.role,
                            substr(m.content,
@@ -5474,6 +5484,17 @@ class SessionDB:
 
         # Remove full content from result (snippet is enough, saves tokens)
         for match in matches:
+            decoded_content = self._decode_content(match.get("content"))
+            match["is_internal_compaction"] = bool(
+                isinstance(decoded_content, str)
+                and decoded_content.lstrip().startswith(
+                    (
+                        "[CONTEXT COMPACTION — REFERENCE ONLY]",
+                        "[CONTEXT COMPACTION - REFERENCE ONLY]",
+                        "[CONTEXT SUMMARY]:",
+                    )
+                )
+            )
             match.pop("content", None)
 
         return matches

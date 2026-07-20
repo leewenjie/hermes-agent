@@ -16,6 +16,8 @@ import { getUiState, patchUiState } from './uiStore.js'
 
 const DOUBLE_ENTER_MS = 450
 
+export const frozenSubmissionAllowed = (full: string) => full.trim() === '/copy'
+
 const expandSnips = (snips: PasteSnippet[]) => {
   const byLabel = new Map<string, string[]>()
 
@@ -226,6 +228,13 @@ export function useSubmission(opts: UseSubmissionOptions) {
         return
       }
 
+      if (getUiState().accessState === 'frozen' && !frozenSubmissionAllowed(full)) {
+        composerActions.clearIn()
+        sys('This workspace is read-only. Upgrade to run new research or make changes.')
+
+        return
+      }
+
       if (looksLikeSlashCommand(full)) {
         appendMessage({ kind: 'slash', role: 'system', text: full })
         composerActions.pushHistory(full)
@@ -294,7 +303,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
 
       send(full)
     },
-    [appendMessage, composerActions, composerRefs, handleBusyInput, interpolate, send, sendQueued, shellExec, slashRef]
+    [appendMessage, composerActions, composerRefs, handleBusyInput, interpolate, send, sendQueued, shellExec, slashRef, sys]
   )
 
   const submit = useCallback(

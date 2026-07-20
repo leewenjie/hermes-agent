@@ -1419,6 +1419,7 @@ export const api = {
  * truncated ``user_id`` instead.
  */
 export interface AuthMeResponse {
+  access_state: "active" | "frozen";
   user_id: string;
   email: string;
   display_name: string;

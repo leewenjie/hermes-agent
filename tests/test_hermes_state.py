@@ -1596,6 +1596,44 @@ class TestFTS5Search:
         roles = [r["role"] for r in results]
         assert all(r == "assistant" for r in roles)
 
+    def test_search_with_user_filter(self, db):
+        db.create_session(session_id="owned", source="cli", user_id="user-1")
+        db.append_message("owned", role="assistant", content="shared search needle")
+        for index in range(25):
+            session_id = f"foreign-{index}"
+            db.create_session(session_id=session_id, source="cli", user_id="user-2")
+            db.append_message(
+                session_id,
+                role="assistant",
+                content="shared search needle",
+            )
+
+        results = db.search_messages(
+            "shared search needle",
+            user_id="user-1",
+            limit=1,
+        )
+
+        assert {result["session_id"] for result in results} == {"owned"}
+
+    def test_search_classifies_compaction_from_full_content(self, db):
+        db.create_session(session_id="compaction", source="cli", user_id="user-1")
+        db.append_message(
+            "compaction",
+            role="assistant",
+            content=(
+                "[CONTEXT SUMMARY]: "
+                + "internal summary words " * 80
+                + "deeply_centered_secret"
+            ),
+        )
+
+        results = db.search_messages("deeply_centered_secret", user_id="user-1")
+
+        assert len(results) == 1
+        assert results[0]["is_internal_compaction"] is True
+        assert not results[0]["snippet"].lstrip().startswith("[CONTEXT SUMMARY]:")
+
     def test_search_returns_context(self, db):
         db.create_session(session_id="s1", source="cli")
         db.append_message("s1", role="user", content="Tell me about Kubernetes")

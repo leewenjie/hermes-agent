@@ -25,6 +25,10 @@ from hermes_constants import (
     set_hermes_home_override,
 )
 from hermes_cli.env_loader import load_hermes_dotenv
+from hermes_cli.managed_session import (
+    managed_customer_content_text as _managed_customer_content_text,
+    managed_customer_message_text as _managed_customer_message_text,
+)
 from utils import is_truthy_value
 from tools.environments.local import hermes_subprocess_env
 from agent.replay_cleanup import sanitize_replay_history
@@ -1261,6 +1265,14 @@ def handle_request(req: dict) -> dict | None:
     fn = _methods.get(method)
     if not fn:
         return _err(rid, -32601, f"unknown method: {method}")
+    if _transport_access_state() == "frozen" and not _frozen_rpc_allowed(
+        method, params
+    ):
+        return _err(
+            rid,
+            4030,
+            "access_frozen: upgrade your plan to run new research or make changes",
+        )
     return fn(rid, params)
 
 
@@ -1279,6 +1291,39 @@ _OXAIDE_RESEARCH_RPC_METHODS = frozenset({
     "credits.view", "billing.state", "billing.charge", "billing.charge_status",
     "billing.auto_reload", "billing.step_up",
 })
+
+_OXAIDE_FROZEN_RPC_METHODS = frozenset({
+    "session.list",
+    "session.most_recent",
+    "session.resume",
+    "session.active_list",
+    "session.activate",
+    "session.title",
+    "session.usage",
+    "session.status",
+    "session.history",
+    "terminal.resize",
+    "delegation.status",
+    "pet.cells",
+    "credits.view",
+    "billing.state",
+    "billing.charge_status",
+})
+
+
+def _transport_access_state() -> str:
+    context = _transport_trusted_context()
+    if not context:
+        return "active"
+    access_state = str(context.get("access_state") or "").strip()
+    return access_state if access_state in {"active", "frozen"} else "frozen"
+
+
+def _frozen_rpc_allowed(name: str, params: dict) -> bool:
+    if name not in _OXAIDE_FROZEN_RPC_METHODS:
+        return False
+    # session.title is a getter when title is absent and a mutation otherwise.
+    return name != "session.title" or "title" not in params
 
 
 def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
@@ -1342,6 +1387,10 @@ def _start_agent_build(sid: str, session: dict) -> None:
     """
     ready = session.get("agent_ready")
     if ready is None:
+        return
+    if _trusted_session_access_state(session) == "frozen":
+        # Viewer records are structurally non-executable even if a future RPC
+        # policy regression accidentally reaches an agent-building path.
         return
     if session.get("trusted_launch_context") and not session.get(
         "_oxaide_agent_authorized"
@@ -1515,7 +1564,20 @@ def _start_agent_build(sid: str, session: dict) -> None:
 
 def _sess_nowait(params, rid):
     s = _sessions.get(params.get("session_id") or "")
-    return (s, None) if s else (None, _err(rid, 4001, "session not found"))
+    if not s:
+        return (None, _err(rid, 4001, "session not found"))
+    if _is_oxaide_tenant_runtime():
+        caller = _transport_trusted_context()
+        caller_user_id = str(caller.get("user_id") or "").strip()
+        caller_access_state = str(caller.get("access_state") or "").strip()
+        if (
+            not caller_user_id
+            or caller_user_id != _trusted_session_user_id(s)
+            or caller_access_state not in {"active", "frozen"}
+            or caller_access_state != _trusted_session_access_state(s)
+        ):
+            return (None, _err(rid, 4030, "Session is not available to this access context"))
+    return (s, None)
 
 
 def _sess(params, rid):
@@ -1705,11 +1767,29 @@ def _trusted_session_user_id(session: dict | None) -> str:
     return str(context.get("user_id") or "").strip()
 
 
+def _trusted_session_access_state(session: dict | None) -> str:
+    """Return the server-authenticated access scope of a managed live record."""
+    if not session:
+        return ""
+    context = session.get("trusted_launch_context")
+    if not isinstance(context, dict):
+        return ""
+    state = str(context.get("access_state") or "").strip()
+    return state if state in {"active", "frozen"} else ""
+
+
 class _SessionOwnershipMismatch(RuntimeError):
     """A trusted caller attempted to attach to another user's session."""
 
 
-def _reconcile_trusted_session_owner(db, session_id: str, row: dict, user_id: str) -> dict:
+def _reconcile_trusted_session_owner(
+    db,
+    session_id: str,
+    row: dict,
+    user_id: str,
+    *,
+    allow_owner_claim: bool = True,
+) -> dict:
     """Bind an ownerless durable row to its authenticated owner, never transfer it."""
     trusted_user_id = str(user_id or "").strip()
     if not trusted_user_id:
@@ -1720,6 +1800,8 @@ def _reconcile_trusted_session_owner(db, session_id: str, row: dict, user_id: st
         raise _SessionOwnershipMismatch("Session does not belong to this user")
 
     if not stored_user_id:
+        if not allow_owner_claim:
+            raise _SessionOwnershipMismatch("Session does not belong to this user")
         db.create_session(
             session_id,
             source=str(row.get("source") or "tui"),
@@ -5226,60 +5308,6 @@ def _coerce_message_text(content: Any) -> str:
     return str(content)
 
 
-_COMPACTION_PREFIXES = (
-    "[CONTEXT COMPACTION — REFERENCE ONLY]",
-    "[CONTEXT COMPACTION - REFERENCE ONLY]",
-    "[CONTEXT SUMMARY]:",
-)
-_COMPACTION_END_MARKER = (
-    "--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---"
-)
-
-
-def _managed_customer_message_text(text: str) -> str:
-    if text.lstrip().startswith(_COMPACTION_PREFIXES):
-        marker_index = text.find(_COMPACTION_END_MARKER)
-        if marker_index < 0:
-            return ""
-        text = text[marker_index + len(_COMPACTION_END_MARKER) :].lstrip()
-    # Tool output can be summarized into an otherwise customer-visible
-    # assistant message. Never replay host filesystem layout to managed users.
-    text = re.sub(r"(?<![\w:])/(?:[^\s/]+/)*[^\s/]+", "[research file]", text)
-    text = re.sub(r"(?i)\b[A-Z]:\\(?:[^\s\\]+\\)*[^\s\\]+", "[research file]", text)
-    return text
-
-
-def _managed_customer_content_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        chunks = []
-        for part in content:
-            if isinstance(part, str):
-                chunks.append(part)
-            elif isinstance(part, dict):
-                kind = part.get("type")
-                if kind in {"text", "input_text", "output_text"}:
-                    chunks.append(str(part.get("text") or part.get("content") or ""))
-                elif kind in {"image_url", "input_image", "image"}:
-                    chunks.append("[image]")
-                elif kind in {"input_audio", "audio"}:
-                    chunks.append("[audio]")
-                elif kind:
-                    chunks.append("[attachment]")
-        return "\n".join(chunk for chunk in chunks if chunk)
-    if isinstance(content, dict):
-        kind = content.get("type")
-        if kind in {"text", "input_text", "output_text"}:
-            return str(content.get("text") or content.get("content") or "")
-        if kind in {"image_url", "input_image", "image"}:
-            return "[image]"
-        if kind in {"input_audio", "audio"}:
-            return "[audio]"
-        return "[attachment]"
-    return "" if content is None else str(content)
-
-
 def _history_to_messages(history: list[dict]) -> list[dict]:
     messages = []
     tool_call_args = {}
@@ -6117,6 +6145,7 @@ def _claim_or_reuse_live(
     lease,
     *,
     expected_user_id: str | None = None,
+    expected_access_state: str | None = None,
 ) -> tuple[str, dict] | None:
     """Register ``record`` as the live session for ``session_key`` under the
     resume lock, or — if a concurrent resume already won — release ``lease`` and
@@ -6126,7 +6155,11 @@ def _claim_or_reuse_live(
             if lease is not None:
                 lease.release()
             raise _SessionOwnershipMismatch("Session does not belong to this user")
-        live = _find_live_session_by_key(session_key, expected_user_id=expected_user_id)
+        live = _find_live_session_by_key(
+            session_key,
+            expected_user_id=expected_user_id,
+            expected_access_state=expected_access_state,
+        )
         if live is not None:
             if lease is not None:
                 lease.release()
@@ -6219,8 +6252,19 @@ def _(rid, params: dict) -> dict:
             found = db.get_session(target) or found
 
     trusted_user_id = str(trusted_context.get("user_id") or "").strip()
+    expected_access_state = (
+        str(trusted_context.get("access_state") or "").strip()
+        if trusted_context
+        else None
+    )
     try:
-        found = _reconcile_trusted_session_owner(db, target, found, trusted_user_id)
+        found = _reconcile_trusted_session_owner(
+            db,
+            target,
+            found,
+            trusted_user_id,
+            allow_owner_claim=expected_access_state != "frozen",
+        )
     except _SessionOwnershipMismatch as e:
         return _err(rid, 4030, str(e))
     except Exception as e:
@@ -6252,9 +6296,73 @@ def _(rid, params: dict) -> dict:
     with _session_resume_lock:
         if _live_session_identity_conflict(target, expected_user_id):
             return _err(rid, 4030, "Session does not belong to this user")
-        live = _find_live_session_by_key(target, expected_user_id=expected_user_id)
+        live = _find_live_session_by_key(
+            target,
+            expected_user_id=expected_user_id,
+            expected_access_state=expected_access_state,
+        )
         if live is not None:
             return _ok(rid, _reuse_live_payload(*live))
+
+    # A frozen workspace may attach to retained history, but attaching must not
+    # reopen the stored session, claim an execution slot, construct an agent, or
+    # schedule any work. Register only an in-memory viewer record. The central
+    # frozen RPC policy prevents this record from ever being upgraded through
+    # prompt.submit or another mutation.
+    if _transport_access_state() == "frozen":
+        sid = uuid.uuid4().hex[:8]
+        source = _resolve_session_source(
+            str(params.get("source") or "").strip() or None
+        )
+        try:
+            display_history = db.get_messages_as_conversation(
+                target, include_ancestors=True
+            )
+        except Exception as e:
+            return _err(rid, 5000, f"resume failed: {e}")
+        cwd = profile_resume_cwd or _default_session_cwd()
+        record = _deferred_session_record(
+            target,
+            cols=cols,
+            cwd=cwd,
+            history=display_history,
+            lease=None,
+            source=source,
+            close_on_disconnect=is_truthy_value(
+                params.get("close_on_disconnect", False)
+            ),
+            profile_home=profile_home,
+            lazy=True,
+        )
+        try:
+            live = _claim_or_reuse_live(
+                sid,
+                target,
+                record,
+                None,
+                expected_user_id=expected_user_id,
+                expected_access_state=expected_access_state,
+            )
+        except _SessionOwnershipMismatch as e:
+            return _err(rid, 4030, str(e))
+        if live is not None:
+            return _ok(rid, _reuse_live_payload(*live))
+        messages = _history_to_messages(display_history)
+        return _ok(
+            rid,
+            {
+                "session_id": sid,
+                "resumed": target,
+                "message_count": len(messages),
+                "messages": messages,
+                "info": _managed_session_info(_lazy_resume_info(cwd)),
+                "inflight": None,
+                "running": False,
+                "session_key": target,
+                "started_at": record["created_at"],
+                "status": "idle",
+            },
+        )
 
     # Lazy/watch resume: register the live session WITHOUT building an agent.
     # Used by the desktop's subagent windows — the child runs inside the
@@ -6294,7 +6402,12 @@ def _(rid, params: dict) -> dict:
         )
         try:
             live = _claim_or_reuse_live(
-                sid, target, record, lease, expected_user_id=expected_user_id
+                sid,
+                target,
+                record,
+                lease,
+                expected_user_id=expected_user_id,
+                expected_access_state=expected_access_state,
             )
         except _SessionOwnershipMismatch as e:
             return _err(rid, 4030, str(e))
@@ -6382,7 +6495,12 @@ def _(rid, params: dict) -> dict:
         )
         try:
             live = _claim_or_reuse_live(
-                sid, target, record, lease, expected_user_id=expected_user_id
+                sid,
+                target,
+                record,
+                lease,
+                expected_user_id=expected_user_id,
+                expected_access_state=expected_access_state,
             )
         except _SessionOwnershipMismatch as e:
             return _err(rid, 4030, str(e))
@@ -6489,7 +6607,11 @@ def _(rid, params: dict) -> dict:
             if lease is not None:
                 lease.release()
             return _err(rid, 4030, "Session does not belong to this user")
-        live = _find_live_session_by_key(target, expected_user_id=expected_user_id)
+        live = _find_live_session_by_key(
+            target,
+            expected_user_id=expected_user_id,
+            expected_access_state=expected_access_state,
+        )
         if live is not None:
             try:
                 if hasattr(agent, "close"):
@@ -6673,7 +6795,10 @@ def _session_lookup_key(session: dict, *, fallback: str = "") -> str:
 
 
 def _find_live_session_by_key(
-    session_key: str, *, expected_user_id: str | None = None
+    session_key: str,
+    *,
+    expected_user_id: str | None = None,
+    expected_access_state: str | None = None,
 ) -> tuple[str, dict] | None:
     for sid, session in list(_sessions.items()):
         if session.get("_finalized"):
@@ -6683,6 +6808,11 @@ def _find_live_session_by_key(
         if (
             expected_user_id is not None
             and _trusted_session_user_id(session) != expected_user_id
+        ):
+            continue
+        if (
+            expected_access_state is not None
+            and _trusted_session_access_state(session) != expected_access_state
         ):
             continue
         return sid, session
@@ -6805,6 +6935,8 @@ def _(rid, params: dict) -> dict:
                     _transport_trusted_user_id()
                     and _trusted_session_user_id(session)
                     == _transport_trusted_user_id()
+                    and _trusted_session_access_state(session)
+                    == _transport_access_state()
                 )
             )
         )
@@ -6889,6 +7021,18 @@ def _(rid, params: dict) -> dict:
     key = session["session_key"]
     if "title" not in params:
         fallback = session.get("pending_title") or ""
+        if _transport_access_state() == "frozen":
+            try:
+                resolved_title = db.get_session_title(key) or fallback
+            except Exception:
+                resolved_title = fallback
+            return _ok(
+                rid,
+                {
+                    "title": resolved_title,
+                    "session_key": key,
+                },
+            )
         try:
             resolved_title = db.get_session_title(key) or ""
             if fallback:

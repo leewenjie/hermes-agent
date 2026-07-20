@@ -306,7 +306,9 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
   const keepTerminalElseRunning = (s: SubagentProgress['status']) => (isTerminalStatus(s) ? s : 'running')
 
-  const handleReady = (skin?: GatewaySkin) => {
+  const handleReady = (skin?: GatewaySkin, accessState: 'active' | 'frozen' = 'active') => {
+    patchUiState({ accessState })
+
     if (skin) {
       applySkin(skin)
     }
@@ -362,6 +364,24 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
       return
     }
 
+    // Frozen workspaces may inspect retained sessions but must never forge a
+    // replacement. Resume the newest retained session when no explicit resume
+    // target was supplied; an empty history remains safely read-only.
+    if (accessState === 'frozen') {
+      patchUiState({ status: 'opening saved research…' })
+      rpc<SessionMostRecentResponse>('session.most_recent', {})
+        .then(r => {
+          if (r?.session_id) {
+            resumeById(r.session_id)
+          } else {
+            patchUiState({ status: 'read-only · no saved research' })
+          }
+        })
+        .catch(() => patchUiState({ status: 'read-only · saved research unavailable' }))
+
+      return
+    }
+
     // Opt-in: when `display.tui_auto_resume_recent` is true, look up
     // the most recent human-facing session and resume it instead of
     // forging a brand-new one.  Mirrors classic CLI's `hermes -c` /
@@ -410,7 +430,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
     switch (ev.type) {
       case 'gateway.ready':
-        handleReady(ev.payload?.skin)
+        handleReady(ev.payload?.skin, ev.payload?.access_state)
 
         return
 

@@ -53,6 +53,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from hermes_cli import __version__, __release_date__
+from hermes_cli.managed_session import (
+    COMPACTION_END_MARKER as _MANAGED_COMPACTION_END_MARKER,
+    COMPACTION_PREFIXES as _MANAGED_COMPACTION_PREFIXES,
+    managed_customer_content_text as _managed_message_text,
+    managed_customer_message_text as _managed_customer_message_text,
+    redact_managed_host_paths as _redact_managed_host_paths,
+)
 from hermes_cli.config import (
     cfg_get,
     DEFAULT_CONFIG,
@@ -581,7 +588,28 @@ async def _plugin_api_runtime_gate(request: Request, call_next):
 @app.middleware("http")
 async def _dashboard_auth_gate(request: Request, call_next):
     from hermes_cli.dashboard_auth.middleware import gated_auth_middleware
-    return await gated_auth_middleware(request, call_next)
+
+    async def enforce_frozen_access(authenticated_request: Request):
+        session = getattr(authenticated_request.state, "session", None)
+        if (
+            session is not None
+            and getattr(session, "provider", "") == "oxaide-demo"
+            and getattr(session, "access_state", "active") == "frozen"
+            and not _oxaide_frozen_http_allowed(
+                authenticated_request.method,
+                authenticated_request.url.path,
+            )
+        ):
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "detail": "This workspace is frozen. Upgrade to run new research or make changes.",
+                    "code": "access_frozen",
+                },
+            )
+        return await call_next(authenticated_request)
+
+    return await gated_auth_middleware(request, enforce_frozen_access)
 
 
 @app.middleware("http")
@@ -715,6 +743,20 @@ _OXAIDE_RESEARCH_STATIC_API_METHODS = frozenset({
 _OXAIDE_RESERVED_SESSION_PATH_PARTS = frozenset({
     "bulk-delete", "empty", "import", "prune", "search", "stats",
 })
+
+
+def _oxaide_frozen_http_allowed(method: str, path: str) -> bool:
+    """Return whether a frozen Oxaide browser session may use this route."""
+    method = method.upper()
+    if method in {"GET", "HEAD", "OPTIONS"}:
+        return True
+    if method == "POST" and path in {
+        "/api/auth/ws-ticket",
+        "/api/research-shares/preview",
+        "/auth/logout",
+    }:
+        return True
+    return False
 
 
 def _oxaide_research_api_allowed(
@@ -4587,16 +4629,6 @@ _MANAGED_SESSION_PUBLIC_FIELDS = (
     "profile",
     "is_default_profile",
 )
-_MANAGED_COMPACTION_PREFIXES = (
-    "[CONTEXT COMPACTION — REFERENCE ONLY]",
-    "[CONTEXT COMPACTION - REFERENCE ONLY]",
-    "[CONTEXT SUMMARY]:",
-)
-_MANAGED_COMPACTION_END_MARKER = (
-    "--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---"
-)
-
-
 def _strip_session_list_rows(sessions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for s in sessions:
         for key in _SESSION_LIST_HEAVY_FIELDS:
@@ -4612,57 +4644,15 @@ def _managed_session_row(session: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _managed_message_text(content: Any) -> str:
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                kind = item.get("type")
-                if kind in {"text", "input_text", "output_text"}:
-                    parts.append(str(item.get("text") or item.get("content") or ""))
-                elif kind in {"image_url", "input_image", "image"}:
-                    parts.append("[image]")
-                elif kind in {"input_audio", "audio"}:
-                    parts.append("[audio]")
-                elif kind:
-                    parts.append("[attachment]")
-        return "\n".join(part for part in parts if part)
-    if isinstance(content, dict):
-        kind = content.get("type")
-        if kind in {"text", "input_text", "output_text"}:
-            return str(content.get("text") or content.get("content") or "")
-        if kind in {"image_url", "input_image", "image"}:
-            return "[image]"
-        if kind in {"input_audio", "audio"}:
-            return "[audio]"
-        return "[attachment]"
-    return ""
-
-
 def _managed_session_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     projected = []
     for message in messages:
         role = message.get("role")
         if role not in {"user", "assistant"}:
             continue
-        content = _managed_message_text(message.get("content"))
-        if content.lstrip().startswith(
-            _MANAGED_COMPACTION_PREFIXES
-        ):
-            marker_index = content.find(_MANAGED_COMPACTION_END_MARKER)
-            if marker_index < 0:
-                continue
-            content = content[
-                marker_index + len(_MANAGED_COMPACTION_END_MARKER) :
-            ].lstrip()
-            if not content:
-                continue
+        content = _managed_customer_message_text(
+            _managed_message_text(message.get("content"))
+        )
         if not content.strip():
             continue
         safe = {
@@ -5113,31 +5103,28 @@ async def search_sessions(
             # Over-fetch so lineage dedup can still surface `limit` distinct
             # conversations even when several hits collapse onto one root.
             fetch_limit = max(safe_limit * 5, 50)
-            matches = db.search_messages(query=prefix_query, limit=fetch_limit)
-            compaction_prefixes = (
-                "[CONTEXT COMPACTION — REFERENCE ONLY]",
-                "[CONTEXT COMPACTION - REFERENCE ONLY]",
-                "[CONTEXT SUMMARY]:",
-            )
-            compaction_end_marker = (
-                "--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---"
+            matches = db.search_messages(
+                query=prefix_query,
+                limit=fetch_limit,
+                role_filter=["user", "assistant"] if managed_oxaide else None,
+                user_id=managed_user_id,
             )
 
             def managed_search_snippet(match: dict) -> Optional[str]:
-                original = str(match.get("content") or "")
+                if match.get("is_internal_compaction"):
+                    return None
                 snippet = str(match.get("snippet") or "")
                 plain_snippet = re.sub(
                     r"</?mark>", "", snippet, flags=re.IGNORECASE
                 )
-                candidate = original if original else plain_snippet
-                if not candidate.lstrip().startswith(compaction_prefixes):
-                    return snippet
+                if not plain_snippet.lstrip().startswith(_MANAGED_COMPACTION_PREFIXES):
+                    return _redact_managed_host_paths(snippet)
 
-                marker_index = candidate.find(compaction_end_marker)
+                marker_index = plain_snippet.find(_MANAGED_COMPACTION_END_MARKER)
                 if marker_index < 0:
                     return None
-                remainder = candidate[
-                    marker_index + len(compaction_end_marker) :
+                remainder = plain_snippet[
+                    marker_index + len(_MANAGED_COMPACTION_END_MARKER) :
                 ].lstrip()
                 query_terms = [
                     term.strip('"*').casefold()
@@ -5148,7 +5135,7 @@ async def search_sessions(
                     term in remainder.casefold() for term in query_terms if term
                 ):
                     return None
-                return remainder
+                return _redact_managed_host_paths(remainder)
 
             for m in matches:
                 if len(seen) >= safe_limit:
@@ -15859,7 +15846,9 @@ PTY_REGISTRY = PtySessionRegistry(
 )
 
 
-async def _legacy_pump(ws: "WebSocket", bridge) -> None:
+async def _legacy_pump(
+    ws: "WebSocket", bridge, *, input_enabled: bool = True
+) -> None:
     """Original 1:1 socket<->PTY pump: stream until disconnect, then close the
     bridge. Used when no ``?attach=`` token is supplied (keep-alive opt-in).
 
@@ -15933,7 +15922,8 @@ async def _legacy_pump(ws: "WebSocket", bridge) -> None:
             if match and match.end() == len(raw):
                 bridge.resize(cols=int(match.group(1)), rows=int(match.group(2)))
                 continue
-            bridge.write(raw)
+            if input_enabled:
+                bridge.write(raw)
     except WebSocketDisconnect:
         pass
     finally:
@@ -16181,6 +16171,37 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
 def _ws_auth_ok(ws: "WebSocket") -> bool:
     """True when the WS-upgrade credential is accepted. See _ws_auth_reason."""
     return _ws_auth_reason(ws)[0] is None
+
+
+def _pty_security_identity(
+    trusted_context: Optional[dict[str, Any]],
+) -> Optional[tuple[str, str, str]]:
+    """Stable authorization identity for keep-alive PTY reuse.
+
+    Browser-controlled attach tokens identify continuity, not authority. A
+    hosted child may only be reused by the same authenticated workspace/user
+    and in the same server-derived access state. Local dashboard sessions have
+    no hosted trust context and retain their legacy single-user behavior.
+    """
+    if trusted_context is None:
+        return None
+    return (
+        str(trusted_context.get("workspace_id") or ""),
+        str(trusted_context.get("user_id") or ""),
+        str(trusted_context.get("access_state") or ""),
+    )
+
+
+def _pty_input_enabled(trusted_context: Optional[dict[str, Any]]) -> bool:
+    """Allow raw PTY input only for local or explicitly active launches.
+
+    A trusted context identifies a managed launch, so malformed or missing
+    access state must fail closed. Resize frames remain available because they
+    are consumed before this input gate and never reach the child process.
+    """
+    if trusted_context is None:
+        return True
+    return str(trusted_context.get("access_state") or "").strip() == "active"
 
 
 def _configured_runtime_pin(name: str) -> bool:
@@ -16883,6 +16904,7 @@ async def console_ws(ws: WebSocket) -> None:
         engine = HermesConsoleEngine(
             output_limit=_CONSOLE_OUTPUT_LIMIT,
             context=context,  # type: ignore[arg-type]
+            read_only=(trusted_context or {}).get("access_state") == "frozen",
         )
         if profile and profile.lower() != "current":
             _resolve_profile_dir(profile)
@@ -17313,13 +17335,19 @@ async def pty_ws(ws: WebSocket) -> None:
             await ws.send_text(f"\r\n\x1b[31mChat failed to start: {exc}\x1b[0m\r\n")
             await ws.close(code=1011)
             return
-        await _legacy_pump(ws, bridge)
+        await _legacy_pump(
+            ws,
+            bridge,
+            input_enabled=_pty_input_enabled(trusted_context),
+        )
         return
 
     # Keep-alive path: the PTY outlives this socket; reattach by token.
     try:
         session, _created = await PTY_REGISTRY.attach_or_spawn(
-            attach_token, spawn=_spawn
+            attach_token,
+            spawn=_spawn,
+            security_identity=_pty_security_identity(trusted_context),
         )
     except PtyUnavailableError as exc:
         await ws.send_text(f"\r\n\x1b[31mChat unavailable: {exc}\x1b[0m\r\n")
@@ -17361,7 +17389,8 @@ async def pty_ws(ws: WebSocket) -> None:
                 session.bridge.resize(cols=int(match.group(1)), rows=int(match.group(2)))
                 continue
 
-            session.bridge.write(raw)
+            if _pty_input_enabled(trusted_context):
+                session.bridge.write(raw)
     except WebSocketDisconnect:
         pass
     finally:

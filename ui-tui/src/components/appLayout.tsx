@@ -368,7 +368,27 @@ const ComposerPane = memo(function ComposerPane({
 
         {composer.input === '?' && !composer.inputBuf.length && <HelpHint t={ui.theme} />}
 
-        {!isBlocked && (
+        {!isBlocked && ui.accessState === 'frozen' && (
+          <Box flexDirection="column" paddingY={1}>
+            <Text bold color={ui.theme.color.label}>Read-only workspace</Text>
+            <Text color={ui.theme.color.muted}>Browse and copy saved research. Upgrade to run new research or make changes.</Text>
+            {/* Keep input decoding mounted so the dashboard's dedicated
+                /copy control remains functional; submission guards reject
+                every work-producing command before it reaches the gateway. */}
+            <Box height={0} overflow="hidden" width={1}>
+              <TextInput
+                columns={1}
+                onChange={composer.updateInput}
+                onPaste={composer.handleTextPaste}
+                onSubmit={composer.submit}
+                value={composer.input}
+                voiceRecordKey={composer.voiceRecordKey}
+              />
+            </Box>
+          </Box>
+        )}
+
+        {!isBlocked && ui.accessState !== 'frozen' && (
           <>
             {composer.inputBuf.map((line, i) => (
               <Box key={i}>

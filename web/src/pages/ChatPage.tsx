@@ -32,7 +32,9 @@ import { useSearchParams } from "react-router-dom";
 
 import { ChatSidebar } from "@/components/ChatSidebar";
 import { ChatSessionList } from "@/components/ChatSessionList";
+import { FrozenWorkspaceNotice } from "@/components/FrozenWorkspaceNotice";
 import { ResearchShareDialog } from "@/components/ResearchShareDialog";
+import { useAuth } from "@/components/auth-context";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { useI18n } from "@/i18n";
 import { api } from "@/lib/api";
@@ -127,7 +129,19 @@ function terminalLineHeightForWidth(layoutWidthPx: number): number {
   return layoutWidthPx < 1024 ? 1.02 : 1.15;
 }
 
-export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
+export default function ChatPage({
+  billingUrl,
+  isActive = true,
+}: {
+  billingUrl?: string;
+  isActive?: boolean;
+}) {
+  const { accessState } = useAuth();
+  const frozen = accessState === "frozen";
+  const frozenRef = useRef(frozen);
+  useEffect(() => {
+    frozenRef.current = frozen;
+  }, [frozen]);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -197,6 +211,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     setReconnectNonce((n) => n + 1);
   }, [clearReconnectTimer]);
   const startFreshPty = useCallback(() => {
+    if (frozen) return;
     forceFreshPtyRef.current = true;
     reconnectAttemptRef.current = 0;
     clearReconnectTimer();
@@ -207,8 +222,9 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     setLastCloseCode(null);
     setPtyState("connecting");
     setReconnectNonce((n) => n + 1);
-  }, [clearReconnectTimer]);
+  }, [clearReconnectTimer, frozen]);
   const startFreshDashboardChat = useCallback(() => {
+    if (frozen) return;
     const next = new URLSearchParams(searchParams);
 
     next.delete("resume");
@@ -223,7 +239,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     setLastCloseCode(null);
     setPtyState("connecting");
     setReconnectNonce((n) => n + 1);
-  }, [clearReconnectTimer, searchParams, setSearchParams]);
+  }, [clearReconnectTimer, frozen, searchParams, setSearchParams]);
   // Raw state for the mobile side-sheet + a derived value that force-
   // closes whenever the chat tab isn't active.  The *derived* value is
   // what side-effects (body-scroll lock, keydown listener, portal render)
@@ -627,6 +643,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       term.focus();
     };
     const uploadAndAttachImages = (files: File[]) => {
+      if (frozenRef.current) return;
       if (!files.length) return;
       void (async () => {
         const paths: string[] = [];
@@ -1013,6 +1030,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         const next = new URLSearchParams(searchParams);
         next.delete("learn");
         setSearchParams(next, { replace: true });
+        if (frozenRef.current) return;
         const cmd = `/learn ${learnSeed}`.trim();
         // Delay so Ink's composer has mounted and grabbed focus before input.
         setTimeout(() => {
@@ -1139,6 +1157,14 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         // them before the blocked-input check so scrolling a disconnected
         // terminal doesn't trip the "reconnecting" notice.
         if (SGR_MOUSE_RE.test(data)) {
+          return;
+        }
+
+        // Frozen is a server-derived read-only state. Keep copy/selection in
+        // xterm available, but never forward keyboard or paste bytes to the
+        // PTY. The backend remains authoritative; this prevents confusing UI
+        // echoes and is defense in depth against future TUI input regressions.
+        if (frozenRef.current) {
           return;
         }
 
@@ -1434,6 +1460,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
               />
             </div>
             <ChatSessionList
+              allowNew={!frozen}
               activeSessionId={resumeParam}
               className="min-h-64 border-t border-current/10 pt-2"
               profile={scopedProfile}
@@ -1450,6 +1477,10 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     <div className="flex min-h-0 flex-1 flex-col gap-2">
       <PluginSlot name="chat:top" />
       {mobileModelToolsPortal}
+
+      {managedOxaide && frozen && (
+        <FrozenWorkspaceNotice billingUrl={billingUrl} />
+      )}
 
       {visibleBanner && (
         <div className="border border-warning/50 bg-warning/10 text-warning px-3 py-2 text-xs tracking-wide">
@@ -1500,15 +1531,17 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
           {ptyState === "ended" && (
             <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-black/60">
               <div className="text-sm tracking-wide text-white/80">
-                Session ended.
+                {frozen ? "Saved research session ended." : "Session ended."}
               </div>
-              <Button
-                onClick={startFreshPty}
-                prefix={<RotateCcw className="h-4 w-4" />}
-                aria-label="Start a new chat session"
-              >
-                Start new session
-              </Button>
+              {!frozen ? (
+                <Button
+                  onClick={startFreshPty}
+                  prefix={<RotateCcw className="h-4 w-4" />}
+                  aria-label="Start a new chat session"
+                >
+                  Start new session
+                </Button>
+              ) : null}
             </div>
           )}
 
@@ -1555,6 +1588,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
                 onSessionTitleChange={handleSessionTitleChange}
               />
               <ChatSessionList
+                allowNew={!frozen}
                 activeSessionId={resumeParam}
                 className="mt-3 min-h-64 border-t border-current/10 pt-2"
                 profile={scopedProfile}

@@ -69,6 +69,7 @@ describe('configureTerminalKeybindings', () => {
     const copyFile = vi.fn().mockResolvedValue(undefined)
 
     const result = await configureTerminalKeybindings('vscode', {
+      env: {} as NodeJS.ProcessEnv,
       fileOps: { copyFile, mkdir, readFile, writeFile },
       homeDir: '/Users/me',
       platform: 'darwin'
@@ -94,6 +95,7 @@ describe('configureTerminalKeybindings', () => {
     const copyFile = vi.fn().mockResolvedValue(undefined)
 
     const result = await configureTerminalKeybindings('vscode', {
+      env: {} as NodeJS.ProcessEnv,
       fileOps: { copyFile, mkdir, readFile, writeFile },
       homeDir: '/home/me',
       platform: 'linux'
@@ -125,6 +127,7 @@ describe('configureTerminalKeybindings', () => {
     const copyFile = vi.fn().mockResolvedValue(undefined)
 
     const result = await configureTerminalKeybindings('cursor', {
+      env: {} as NodeJS.ProcessEnv,
       fileOps: { copyFile, mkdir, readFile, writeFile },
       homeDir: '/Users/me',
       platform: 'darwin'
@@ -155,6 +158,7 @@ describe('configureTerminalKeybindings', () => {
     const copyFile = vi.fn().mockResolvedValue(undefined)
 
     const result = await configureTerminalKeybindings('vscode', {
+      env: {} as NodeJS.ProcessEnv,
       fileOps: { copyFile, mkdir, readFile, writeFile },
       homeDir: '/Users/me',
       platform: 'darwin'
@@ -187,6 +191,7 @@ describe('configureTerminalKeybindings', () => {
     const copyFile = vi.fn().mockResolvedValue(undefined)
 
     const result = await configureTerminalKeybindings('vscode', {
+      env: {} as NodeJS.ProcessEnv,
       fileOps: { copyFile, mkdir, readFile, writeFile },
       homeDir: '/Users/me',
       platform: 'darwin'
@@ -218,6 +223,7 @@ describe('configureTerminalKeybindings', () => {
     const copyFile = vi.fn().mockResolvedValue(undefined)
 
     const result = await configureTerminalKeybindings('vscode', {
+      env: {} as NodeJS.ProcessEnv,
       fileOps: { copyFile, mkdir, readFile, writeFile },
       homeDir: '/Users/me',
       platform: 'darwin'
@@ -247,6 +253,7 @@ describe('configureTerminalKeybindings', () => {
     const copyFile = vi.fn().mockResolvedValue(undefined)
 
     const result = await configureTerminalKeybindings('vscode', {
+      env: {} as NodeJS.ProcessEnv,
       fileOps: { copyFile, mkdir, readFile, writeFile },
       homeDir: '/Users/me',
       platform: 'darwin'
@@ -263,6 +270,7 @@ describe('configureTerminalKeybindings', () => {
     const copyFile = vi.fn().mockResolvedValue(undefined)
 
     const result = await configureTerminalKeybindings('vscode', {
+      env: {} as NodeJS.ProcessEnv,
       fileOps: { copyFile, mkdir, readFile, writeFile },
       homeDir: '/Users/me',
       platform: 'darwin'
@@ -280,6 +288,7 @@ describe('configureTerminalKeybindings', () => {
     const copyFile = vi.fn().mockResolvedValue(undefined)
 
     const result = await configureTerminalKeybindings('vscode', {
+      env: {} as NodeJS.ProcessEnv,
       fileOps: { copyFile, mkdir, readFile, writeFile },
       homeDir: '/Users/me',
       platform: 'darwin'

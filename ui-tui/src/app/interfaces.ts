@@ -158,6 +158,7 @@ export interface TranscriptRow {
 }
 
 export interface UiState {
+  accessState: 'active' | 'frozen'
   bgTasks: Set<string>
   busy: boolean
   busyInputMode: BusyInputMode

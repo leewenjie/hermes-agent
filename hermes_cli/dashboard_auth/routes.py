@@ -66,12 +66,23 @@ _consumed_oxaide_launch_tokens_lock = threading.Lock()
 _OXAIDE_LAUNCH_AUDIENCE = "oxaide-hermes-runtime"
 _OXAIDE_LAUNCH_MAX_TTL_SECONDS = 15 * 60
 _OXAIDE_SESSION_AUDIENCE = "oxaide-hermes-session"
-_OXAIDE_SESSION_TTL_SECONDS = 12 * 60 * 60
+# An exchanged session must never outlive the control-plane assertion that
+# supplied its access_state. Oxaide currently issues ten-minute launches; the
+# accepted maximum remains fifteen minutes for clock/rollout compatibility.
+_OXAIDE_SESSION_TTL_SECONDS = _OXAIDE_LAUNCH_MAX_TTL_SECONDS
 _OXAIDE_LOGOUT_AUDIENCE = "oxaide-runtime-logout"
 _OXAIDE_LOGOUT_TTL_SECONDS = 2 * 60
 _OXAIDE_CUSTOMER_LOGIN_URL = "https://oxaide.com/agents"
 _OXAIDE_WORKSPACE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{3,128}$")
 _OXAIDE_RUNTIME_PATTERN = re.compile(r"^[a-z0-9]{20,64}$")
+_OXAIDE_ACCESS_STATES = frozenset({"active", "frozen"})
+
+
+def _oxaide_access_state(payload: dict) -> str:
+    value = payload.get("access_state")
+    if not isinstance(value, str) or value not in _OXAIDE_ACCESS_STATES:
+        raise HTTPException(status_code=401, detail="Invalid Oxaide access state")
+    return value
 
 
 def _valid_oxaide_value(value: object, *, minimum_length: int = 1) -> bool:
@@ -168,6 +179,8 @@ def _decode_oxaide_launch_token(token: str) -> dict:
     if str(payload.get("runtime_key") or "").strip() != expected_runtime_key:
         raise HTTPException(status_code=401, detail="Launch token runtime mismatch")
 
+    _oxaide_access_state(payload)
+
     return payload
 
 
@@ -180,13 +193,19 @@ def _encode_oxaide_session_token(launch_payload: dict) -> str:
             detail="Oxaide demo auth secret is not configured",
         )
     now = int(time.time())
+    access_state_expires_at = int(launch_payload.get("exp") or 0)
+    if access_state_expires_at <= now:
+        raise HTTPException(status_code=401, detail="Oxaide access state expired")
     payload = dict(launch_payload)
     payload.update(
         {
             "aud": _OXAIDE_SESSION_AUDIENCE,
             "jti": uuid.uuid4().hex,
             "iat": now,
-            "exp": now + _OXAIDE_SESSION_TTL_SECONDS,
+            "exp": min(
+                access_state_expires_at,
+                now + _OXAIDE_SESSION_TTL_SECONDS,
+            ),
         }
     )
     encoded = base64.urlsafe_b64encode(
@@ -241,6 +260,7 @@ def _decode_oxaide_session_token(token: str) -> dict:
         raise HTTPException(status_code=401, detail="Oxaide session workspace mismatch")
     if str(payload.get("runtime_key") or "").strip() != expected_runtime_key:
         raise HTTPException(status_code=401, detail="Oxaide session runtime mismatch")
+    _oxaide_access_state(payload)
     return payload
 
 
@@ -291,6 +311,7 @@ def _oxaide_session_from_token(token: str) -> Session:
         expires_at=expires_at,
         access_token=token,
         refresh_token=token,
+        access_state=_oxaide_access_state(payload),
     )
 
 
@@ -315,6 +336,7 @@ def _trusted_oxaide_context(payload: dict) -> dict:
         ),
         "jti": bounded("jti", payload.get("jti"), 200),
         "expires_at": int(payload.get("exp") or 0),
+        "access_state": _oxaide_access_state(payload),
     }
     if not all(context.values()):
         raise HTTPException(status_code=401, detail="Launch token context is incomplete")
@@ -1074,6 +1096,7 @@ async def api_auth_me(request: Request):
         "org_id": sess.org_id,
         "provider": sess.provider,
         "expires_at": sess.expires_at,
+        "access_state": sess.access_state,
     }
 
 

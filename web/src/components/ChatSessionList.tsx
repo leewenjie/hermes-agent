@@ -32,6 +32,7 @@ import { cn, timeAgo } from "@/lib/utils";
 
 const SESSION_LIMIT = 30;
 interface ChatSessionListProps {
+  allowNew?: boolean;
   /** Active resume target (the session currently shown in the terminal). */
   activeSessionId: string | null;
   /** Management profile from the dashboard switcher — scopes the listing. */
@@ -57,6 +58,7 @@ function rowLabel(session: SessionInfo, untitled: string): string {
 }
 
 export function ChatSessionList({
+  allowNew = true,
   activeSessionId,
   profile,
   className,
@@ -284,15 +286,17 @@ export function ChatSessionList({
         </Button>
       </div>
 
-      <Button
-        outlined
-        size="sm"
-        onClick={startNew}
-        prefix={<MessageSquarePlus />}
-        className="mx-2 mb-2 justify-center"
-      >
-        {managedOxaide ? "New research" : t.sessions.newChat}
-      </Button>
+      {allowNew ? (
+        <Button
+          outlined
+          size="sm"
+          onClick={startNew}
+          prefix={<MessageSquarePlus />}
+          className="mx-2 mb-2 justify-center"
+        >
+          {managedOxaide ? "New research" : t.sessions.newChat}
+        </Button>
+      ) : null}
 
       <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-1 pb-1">
         {content}

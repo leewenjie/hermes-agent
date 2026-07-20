@@ -96,7 +96,13 @@ class WSTransport:
         self._loop = loop
         self._peer = peer
         self._closed = False
-        self.trusted_context = MappingProxyType(dict(trusted_context or {}))
+        context = dict(trusted_context or {})
+        if trusted_context is not None:
+            access_state = str(context.get("access_state") or "").strip()
+            context["access_state"] = (
+                access_state if access_state in {"active", "frozen"} else "frozen"
+            )
+        self.trusted_context = MappingProxyType(context)
         # Token-coalescing buffer (CF-2). Streamed token frames land here and a
         # short timer flushes the batch. The lock guards the buffer + the
         # "armed" flag against the worker threads that call write(); the timer
@@ -308,6 +314,8 @@ async def handle_ws(ws: Any, *, trusted_context: dict[str, Any] | None = None) -
             trusted_context=trusted_context,
         )
 
+        access_state = str(transport.trusted_context.get("access_state") or "active")
+
         # The desktop app and dashboard chat reach the agent through this WS
         # sidecar, NOT through tui_gateway.entry.main() (the stdio TUI path that
         # spawns the background MCP discovery thread). Without starting it here,
@@ -317,12 +325,16 @@ async def handle_ws(ws: Any, *, trusted_context: dict[str, Any] | None = None) -
         # to surface MCP tools is a manual /reload-mcp. Start it once per
         # process here (idempotent, config-gated) before gateway.ready so the
         # first agent build can pick up already-spawning servers. (#38945)
-        from hermes_cli.mcp_startup import start_background_mcp_discovery
+        # Frozen managed sessions are retained-history viewers and must not
+        # trigger external network/process work. Malformed managed access state
+        # is normalized to frozen by WSTransport, so it also skips discovery.
+        if access_state == "active":
+            from hermes_cli.mcp_startup import start_background_mcp_discovery
 
-        start_background_mcp_discovery(
-            logger=_log,
-            thread_name="tui-ws-mcp-discovery",
-        )
+            start_background_mcp_discovery(
+                logger=_log,
+                thread_name="tui-ws-mcp-discovery",
+            )
 
         ready_ok = await transport.write_async(
             {
@@ -330,7 +342,10 @@ async def handle_ws(ws: Any, *, trusted_context: dict[str, Any] | None = None) -
                 "method": "event",
                 "params": {
                     "type": "gateway.ready",
-                    "payload": {"skin": server.resolve_skin()},
+                    "payload": {
+                        "access_state": access_state,
+                        "skin": server.resolve_skin(),
+                    },
                 },
             }
         )
