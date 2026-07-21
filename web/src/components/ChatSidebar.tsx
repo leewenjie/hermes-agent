@@ -43,6 +43,7 @@ import {
   type ChatSessionCapabilityInfo,
 } from "@/lib/chat-sidebar-events";
 import { titleFromSessionInfoPayload } from "@/lib/chat-title";
+import { bootstrapChatSidebar } from "@/lib/chat-sidebar-bootstrap";
 import { isOxaideManagedDashboard } from "@/lib/managed-dashboard";
 import {
   shouldRetrySidebarSocket,
@@ -107,10 +108,18 @@ function managedErrorMessage(message: string): string {
   return "The research workspace hit a temporary problem. Please retry.";
 }
 
+function isFrozenAccessError(message: string | null): boolean {
+  return message?.toLowerCase().includes("access_frozen") ?? false;
+}
+
 interface ChatSidebarProps {
   channel: string;
   /** Chat profile from the dashboard switcher / URL scope. */
   profile?: string;
+  /** Whether the server-derived access state has finished loading. */
+  accessResolved?: boolean;
+  /** Preserve read access without starting a mutation-capable sidecar session. */
+  readOnly?: boolean;
   className?: string;
   onDashboardNewSessionRequest?: () => void;
   onSessionChange?: (session: ChatSessionIdentity) => void;
@@ -120,6 +129,8 @@ interface ChatSidebarProps {
 export function ChatSidebar({
   channel,
   profile,
+  accessResolved = true,
+  readOnly = false,
   className,
   onDashboardNewSessionRequest,
   onSessionChange,
@@ -230,22 +241,17 @@ export function ChatSidebar({
     // signals (connection state, credential warnings). It's independent of the
     // PTY pane's session by design. The model picker no longer rides this
     // session — it writes config.yaml over REST — so we don't track its id.
-    gw.connect()
-      .then(() => {
+    bootstrapChatSidebar(gw, {
+      profile,
+      readOnly: readOnly || !accessResolved,
+    })
+      .then((result) => {
         if (cancelled) {
           return;
         }
-        // close_on_disconnect: the gateway reaps this sidecar session (and its
-        // slash_worker subprocess) when the WS drops, instead of leaking it.
-        return gw.request<{ session_id: string; info?: unknown }>("session.create", {
-          close_on_disconnect: true,
-          source: "tool",
-          ...(profile ? { profile } : {}),
-        }).then((result) => {
-          if (cancelled) return;
-          const preview = capabilityInfoFromSessionCreate(result);
-          if (preview) setInfo((prev) => ({ ...prev, ...preview }));
-        });
+        if (!result) return;
+        const preview = capabilityInfoFromSessionCreate(result);
+        if (preview) setInfo((prev) => ({ ...prev, ...preview }));
       })
       .catch((e: Error) => {
         if (!cancelled) {
@@ -260,9 +266,10 @@ export function ChatSidebar({
       offError();
       gw.close();
     };
-    // `profile` is read from render; scope changes bump `version` → new `gw`.
+    // Profile scope changes bump `version` → new `gw`. Access state resolves
+    // independently after mount, so rerun once it is authoritative.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gw]);
+  }, [accessResolved, gw, readOnly]);
 
   // The metadata gateway is supporting UI, but it should recover just as the
   // main PTY does after a dashboard restart, laptop sleep, or suspended tab.
@@ -452,7 +459,10 @@ export function ChatSidebar({
   // sidecar gateway session, so it's available whenever the sidebar is mounted.
   const modelName = effectiveModel || info.model || "—";
   const modelLabel = modelName.split("/").slice(-1)[0] ?? "—";
-  const banner = error ?? info.credential_warning ?? null;
+  const frozenAccessError = isFrozenAccessError(error);
+  const banner = frozenAccessError
+    ? null
+    : error ?? info.credential_warning ?? null;
   const preloadedSkills = info.preloaded_skills ?? [];
   const researchCapabilities = summarizeResearchCapabilities(info.tools ?? {});
   const visibleBanner = managedOxaide && banner ? managedErrorMessage(banner) : banner;
@@ -475,7 +485,9 @@ export function ChatSidebar({
               className="flex min-w-0 max-w-full items-center gap-1.5 text-sm font-medium"
               title="Managed by Oxaide"
             >
-              <span className="truncate">Ready for research</span>
+              <span className="truncate">
+                {readOnly ? "Read-only access" : "Ready for research"}
+              </span>
               <LockKeyhole className="size-3.5 shrink-0 text-text-tertiary" />
             </div>
           ) : (
@@ -511,8 +523,15 @@ export function ChatSidebar({
           <div className="text-display text-xs tracking-wider text-text-tertiary">
             research capabilities
           </div>
-          <div className="mt-1 text-sm font-medium">Research methods ready</div>
-          {preloadedSkills.length > 0 && (
+          <div className="mt-1 text-sm font-medium">
+            {readOnly ? "Saved research available" : "Research methods ready"}
+          </div>
+          {readOnly && (
+            <div className="mt-1 text-xs leading-relaxed text-text-secondary">
+              Browse, copy, and share existing results. Upgrade to run new research.
+            </div>
+          )}
+          {!readOnly && preloadedSkills.length > 0 && (
             <div className="mt-2 grid max-h-32 gap-1.5 overflow-y-auto">
               {preloadedSkills.map((skill) => (
                 <Badge
@@ -526,7 +545,7 @@ export function ChatSidebar({
               ))}
             </div>
           )}
-          {researchCapabilities.length > 0 && (
+          {!readOnly && researchCapabilities.length > 0 && (
             <div className="mt-3 grid gap-2 border-t border-border pt-2">
               {researchCapabilities.map((capability) => (
                 <div key={capability.label}>
