@@ -136,7 +136,7 @@ export default function ChatPage({
   billingUrl?: string;
   isActive?: boolean;
 }) {
-  const { accessState } = useAuth();
+  const { accessState, loading: accessLoading } = useAuth();
   const frozen = accessState === "frozen";
   const frozenRef = useRef(frozen);
   useEffect(() => {
@@ -1451,9 +1451,11 @@ export default function ChatPage({
           >
             <div className="border-b border-current/10 px-1 py-2">
               <ChatSidebar
+                accessResolved={!accessLoading}
                 channel={channel}
                 className="h-auto overflow-visible pr-0"
                 profile={scopedProfile}
+                readOnly={frozen}
                 onDashboardNewSessionRequest={startFreshDashboardChat}
                 onSessionChange={handleSessionChange}
                 onSessionTitleChange={handleSessionTitleChange}
@@ -1580,9 +1582,11 @@ export default function ChatPage({
           >
             <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pr-1">
               <ChatSidebar
+                accessResolved={!accessLoading}
                 channel={channel}
                 className="h-auto overflow-visible pr-0"
                 profile={scopedProfile}
+                readOnly={frozen}
                 onDashboardNewSessionRequest={startFreshDashboardChat}
                 onSessionChange={handleSessionChange}
                 onSessionTitleChange={handleSessionTitleChange}
