@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 from pathlib import Path
 import re
 from unittest.mock import patch
@@ -49,6 +50,9 @@ def test_analysis_preserves_distribution_invariants():
     stats = report["statistics"]
 
     assert report["observation_count"] == report["return_count"] + 1
+    assert report["prices"] == _prices()
+    assert report["prices"][0]["adjusted_close"] == 100
+    assert report["prices"][-1]["adjusted_close"] == 110
     assert stats["p01"] <= stats["p05"] <= stats["median_daily_return"]
     assert stats["median_daily_return"] <= stats["p95"] <= stats["p99"]
     assert stats["worst_day"] <= stats["historical_expected_shortfall_95"]
@@ -64,10 +68,12 @@ def test_artifact_pack_is_complete_and_linked(tmp_path):
 
     assert set(paths) == {"json", "markdown", "svg"}
     markdown = Path(paths["markdown"]).read_text(encoding="utf-8")
+    saved_report = json.loads(Path(paths["json"]).read_text(encoding="utf-8"))
     svg = Path(paths["svg"]).read_text(encoding="utf-8")
     assert "SPY_return_distribution.svg" in markdown
     assert "https://example.test/spy" in markdown
     assert "not financial advice" in markdown
+    assert saved_report["prices"] == report["prices"]
     assert "<svg" in svg
     assert "daily adjusted-return distribution" in svg
 
@@ -104,4 +110,21 @@ def test_live_fetch_rejects_oversized_payload():
     response = io.BytesIO(b"x" * (module.MAX_RESPONSE_BYTES + 1))
     with patch.object(module.urllib.request, "urlopen", return_value=response):
         with pytest.raises(RuntimeError, match="8 MiB"):
+            module.fetch_prices("SPY", "1y")
+
+
+def test_live_fetch_rejects_raw_close_fallback():
+    module = _module()
+    payload = {
+        "chart": {
+            "error": None,
+            "result": [{
+                "timestamp": [1735689600, 1767225600],
+                "indicators": {"quote": [{"close": [100, 110]}]},
+            }],
+        },
+    }
+    response = io.BytesIO(json.dumps(payload).encode())
+    with patch.object(module.urllib.request, "urlopen", return_value=response):
+        with pytest.raises(RuntimeError, match="adjusted-close"):
             module.fetch_prices("SPY", "1y")

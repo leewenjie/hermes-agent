@@ -28,7 +28,7 @@ timestamps; it does not provide licensed real-time data, trading, or advice.
 
 ## Prerequisites
 
-- Python 3.9 or newer.
+- Python 3.11 or newer.
 - Network access to Yahoo Finance public endpoints.
 - The `terminal` tool.
 - No API key or third-party Python package is required.
@@ -66,6 +66,8 @@ python3 skills/research/stocks/scripts/stocks_client.py crypto BTC
 4. Use `history` for OHLCV and adjusted-close performance. Do not mix raw close
    and adjusted-close return claims without saying so.
 5. Use `compare` only for symbols observed on a consistent basis and timestamp.
+   Its schema-versioned output reports `trailing_1y_return_pct` only when the
+   provider observations span at least 330 days, and identifies the price field.
 6. Preserve provider, source URL, retrieval timestamp, and endpoint caveats.
 7. Verify material company, filing, and event claims through primary sources
    using `web_search` and `web_extract`; a quote endpoint is not a filing source.
@@ -85,5 +87,7 @@ python3 skills/research/stocks/scripts/stocks_client.py crypto BTC
 - Confirm every successful response includes `source_url` and `retrieved_at`.
 - Confirm quote and comparison requests accept no more than ten unique symbols.
 - Confirm history reports the adjusted-close field when Yahoo supplies it.
+- Confirm comparison output reports schema version 2, calendar coverage, and
+   the exact adjusted- or raw-close basis used for trailing return.
 - Confirm malformed symbols and oversized responses fail without writing artifacts.
 - Run `scripts/run_tests.sh tests/skills/test_stocks_skill.py -q`.

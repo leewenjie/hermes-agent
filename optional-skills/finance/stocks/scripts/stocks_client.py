@@ -6,6 +6,7 @@ Zero external dependencies - Python stdlib only.
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -86,22 +87,33 @@ def source_metadata(url: str, *, price_field: str | None = None) -> dict:
     return metadata
 
 
-def fmt_price(value) -> str | None:
-    if value is None:
+def finite_number(
+    value, *, positive: bool = False, nonnegative: bool = False
+) -> float | None:
+    if value is None or isinstance(value, bool):
         return None
     try:
-        return f"{float(value):.2f}"
+        numeric = float(value)
     except (TypeError, ValueError):
         return None
+    if (
+        not math.isfinite(numeric)
+        or (positive and numeric <= 0)
+        or (nonnegative and numeric < 0)
+    ):
+        return None
+    return numeric
+
+
+def fmt_price(value) -> str | None:
+    numeric = finite_number(value)
+    return f"{numeric:.2f}" if numeric is not None else None
 
 
 def fmt_large(value) -> str | None:
     """Format large numbers with B/T suffix."""
-    if value is None:
-        return None
-    try:
-        v = float(value)
-    except (TypeError, ValueError):
+    v = finite_number(value)
+    if v is None:
         return None
     if abs(v) >= 1e12:
         return f"{v / 1e12:.2f}T"
@@ -113,12 +125,8 @@ def fmt_large(value) -> str | None:
 
 
 def fmt_pct(value) -> str | None:
-    if value is None:
-        return None
-    try:
-        return f"{float(value):.2f}%"
-    except (TypeError, ValueError):
-        return None
+    numeric = finite_number(value)
+    return f"{numeric:.2f}%" if numeric is not None else None
 
 
 def safe_get(d: dict, *keys, default=None):
@@ -342,18 +350,24 @@ def extract_quote_from_chart(symbol: str, chart_data: dict) -> dict:
     result["short_name"] = meta.get("shortName") or meta.get("longName")
 
     # Price
-    price = meta.get("regularMarketPrice") or meta.get("chartPreviousClose")
+    price = finite_number(meta.get("regularMarketPrice"), positive=True)
+    if price is None:
+        price = finite_number(meta.get("chartPreviousClose"), positive=True)
     result["price"] = fmt_price(price)
 
     # Change
-    prev_close = meta.get("previousClose") or meta.get("chartPreviousClose")
-    if price and prev_close:
-        chg = float(price) - float(prev_close)
-        chg_pct = (chg / float(prev_close)) * 100
+    prev_close = finite_number(meta.get("previousClose"), positive=True)
+    if prev_close is None:
+        prev_close = finite_number(meta.get("chartPreviousClose"), positive=True)
+    if price is not None and prev_close is not None:
+        chg = price - prev_close
+        chg_pct = (chg / prev_close) * 100
         result["change"] = fmt_price(chg)
         result["change_pct"] = fmt_pct(chg_pct)
 
-    result["volume"] = meta.get("regularMarketVolume")
+    result["volume"] = finite_number(
+        meta.get("regularMarketVolume"), nonnegative=True
+    )
     result["52w_high"] = fmt_price(meta.get("fiftyTwoWeekHigh"))
     result["52w_low"] = fmt_price(meta.get("fiftyTwoWeekLow"))
 
@@ -388,7 +402,11 @@ def extract_quote_summary_fields(qs_data: dict) -> dict:
     out["pe_ratio"] = fmt_price(pe_raw) if pe_raw else None
     out["52w_high"] = fmt_price(safe_get(sd, "fiftyTwoWeekHigh", "raw"))
     out["52w_low"] = fmt_price(safe_get(sd, "fiftyTwoWeekLow", "raw"))
-    out["volume"] = safe_get(sd, "volume", "raw") or safe_get(sd, "regularMarketVolume", "raw")
+    out["volume"] = finite_number(
+        safe_get(sd, "volume", "raw")
+        or safe_get(sd, "regularMarketVolume", "raw"),
+        nonnegative=True,
+    )
 
     # defaultKeyStatistics
     ks = r.get("defaultKeyStatistics", {})
@@ -397,6 +415,66 @@ def extract_quote_summary_fields(qs_data: dict) -> dict:
         # can't compute PE from EPS alone without price, skip
 
     return out
+
+
+def extract_price_series(
+    chart_data: dict, *, minimum_coverage_days: float = 0
+) -> tuple[str | None, list[tuple[int, float]]]:
+    """Return one internally consistent timestamped price series."""
+    chart = safe_get(chart_data, "chart", "result")
+    if not chart or not isinstance(chart, list):
+        return None, []
+
+    result = chart[0]
+    timestamps = result.get("timestamp") or []
+    if not isinstance(timestamps, list):
+        return None, []
+    indicators = result.get("indicators") or {}
+    adjusted_sets = indicators.get("adjclose") or []
+    quote_sets = indicators.get("quote") or []
+    adjusted = adjusted_sets[0].get("adjclose") if adjusted_sets else None
+    closes = quote_sets[0].get("close") if quote_sets else None
+
+    candidates = []
+    for field, values in (("adjusted_close", adjusted), ("raw_close", closes)):
+        if not isinstance(values, list):
+            continue
+        series = []
+        for timestamp, value in zip(timestamps, values):
+            numeric = finite_number(value, positive=True)
+            try:
+                observed_at = int(timestamp)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if numeric is not None:
+                series.append((observed_at, numeric))
+        if len(series) >= 2:
+            candidates.append((field, series))
+            coverage_days = (series[-1][0] - series[0][0]) / 86400
+            if coverage_days >= minimum_coverage_days:
+                return field, series
+    if candidates:
+        return candidates[0]
+    return None, []
+
+
+def extract_trailing_return(chart_data: dict) -> dict:
+    """Calculate a one-year return only when observations span most of a year."""
+    field, series = extract_price_series(chart_data, minimum_coverage_days=330)
+    if len(series) < 2:
+        return {"return_pct": None, "price_field": field, "coverage_days": None}
+    coverage_days = (series[-1][0] - series[0][0]) / 86400
+    if coverage_days < 330:
+        return {
+            "return_pct": None,
+            "price_field": field,
+            "coverage_days": round(coverage_days, 1),
+        }
+    return {
+        "return_pct": fmt_pct((series[-1][1] / series[0][1] - 1.0) * 100),
+        "price_field": field,
+        "coverage_days": round(coverage_days, 1),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -420,6 +498,8 @@ def cmd_quote(symbols: list[str]) -> None:
         if chart_data:
             q = extract_quote_from_chart(sym, chart_data)
             entry.update(q)
+        if not entry.get("price"):
+            entry["error"] = f"No current price returned for {sym}"
 
         # Fetch quoteSummary for enriched data
         qs_data = yf_quote_summary(sym)
@@ -439,16 +519,25 @@ def cmd_quote(symbols: list[str]) -> None:
             av_data = av_overview(sym)
             if av_data:
                 entry["data_source"] = "Yahoo Finance + Alpha Vantage"
+                entry["enrichment_sources"] = [{
+                    "provider": "Alpha Vantage",
+                    "source_url": (
+                        f"{AV_BASE}?"
+                        + urllib.parse.urlencode({"function": "OVERVIEW", "symbol": sym})
+                    ),
+                    "retrieved_at": retrieved_at(),
+                    "credential_redacted": True,
+                }]
                 if entry.get("pe_ratio") is None:
                     pe = av_data.get("PERatio")
-                    entry["pe_ratio"] = pe if pe and pe != "None" and pe != "-" else None
+                    entry["pe_ratio"] = fmt_price(pe)
                 if entry.get("market_cap") is None:
                     mc = av_data.get("MarketCapitalization")
                     entry["market_cap"] = fmt_large(mc)
                 if entry.get("52w_high") is None:
-                    entry["52w_high"] = av_data.get("52WeekHigh")
+                    entry["52w_high"] = fmt_price(av_data.get("52WeekHigh"))
                 if entry.get("52w_low") is None:
-                    entry["52w_low"] = av_data.get("52WeekLow")
+                    entry["52w_low"] = fmt_price(av_data.get("52WeekLow"))
 
         results.append(entry)
 
@@ -534,34 +623,32 @@ def cmd_history(symbol: str, range_: str = "1mo") -> None:
     lows = ohlcv.get("low") or []
     volumes = ohlcv.get("volume") or []
 
+    def _v(values, index, *, positive=False, nonnegative=False):
+        try:
+            return finite_number(
+                values[index], positive=positive, nonnegative=nonnegative
+            )
+        except (IndexError, TypeError):
+            return None
+
     history = []
     for i, ts in enumerate(timestamps):
-        def _v(lst, idx):
-            try:
-                val = lst[idx]
-                return round(val, 2) if val is not None else None
-            except IndexError:
-                return None
-
         entry = {
             "date": ts_to_date(ts),
-            "open": _v(opens, i),
-            "close": _v(closes, i),
-            "high": _v(highs, i),
-            "low": _v(lows, i),
-            "volume": _v(volumes, i),
-            "adjusted_close": _v(adjusted or [], i),
+            "open": _v(opens, i, positive=True),
+            "close": _v(closes, i, positive=True),
+            "high": _v(highs, i, positive=True),
+            "low": _v(lows, i, positive=True),
+            "volume": _v(volumes, i, nonnegative=True),
+            "adjusted_close": _v(adjusted or [], i, positive=True),
         }
         history.append(entry)
 
-    # Total return prefers adjusted close so distributions and splits are not
-    # silently treated as losses. Raw OHLC fields remain available separately.
-    valid_closes = [
-        c["adjusted_close"] if c["adjusted_close"] is not None else c["close"]
-        for c in history
-        if c["adjusted_close"] is not None or c["close"] is not None
-    ]
-    stats = {}
+    # Never mix adjusted and raw closes in one calculation. If adjusted close
+    # is unavailable, label the raw-close fallback explicitly.
+    return_price_field, price_series = extract_price_series(chart_data)
+    valid_closes = [value for _, value in price_series]
+    stats = {"price_field": return_price_field}
     if valid_closes:
         stats["min"] = fmt_price(min(valid_closes))
         stats["max"] = fmt_price(max(valid_closes))
@@ -584,7 +671,15 @@ def cmd_history(symbol: str, range_: str = "1mo") -> None:
         "data_source": "Yahoo Finance",
         "source": source_metadata(
             public_chart_url(sym, "1d", range_),
-            price_field="adjusted_close_with_raw_ohlcv",
+            price_field=(
+                "adjusted_close_with_raw_ohlcv"
+                if return_price_field == "adjusted_close"
+                else (
+                    "raw_close_with_raw_ohlcv"
+                    if return_price_field == "raw_close"
+                    else "return_price_unavailable_with_raw_ohlcv"
+                )
+            ),
         ),
     }
     print_json(output)
@@ -613,11 +708,14 @@ def cmd_compare(symbols: list[str]) -> None:
             "pe_ratio": None,
             "52w_high": None,
             "52w_low": None,
-            "52w_performance_pct": None,
+            "trailing_1y_return_pct": None,
+            "trailing_1y_price_field": None,
+            "trailing_1y_coverage_days": None,
         }
 
-        # Chart data
-        chart_data = yf_chart(sym, interval="1d", range_="1d")
+        # A one-year chart supplies both the current quote and a true trailing
+        # adjusted-close return. Distance from the 52-week low is not return.
+        chart_data = yf_chart(sym, interval="1d", range_="1y")
         if chart_data:
             q = extract_quote_from_chart(sym, chart_data)
             entry["name"] = q.get("short_name")
@@ -625,6 +723,10 @@ def cmd_compare(symbols: list[str]) -> None:
             entry["change_pct"] = q.get("change_pct")
             entry["52w_high"] = q.get("52w_high")
             entry["52w_low"] = q.get("52w_low")
+            trailing_return = extract_trailing_return(chart_data)
+            entry["trailing_1y_return_pct"] = trailing_return["return_pct"]
+            entry["trailing_1y_price_field"] = trailing_return["price_field"]
+            entry["trailing_1y_coverage_days"] = trailing_return["coverage_days"]
 
         # quoteSummary for enrichment
         qs_data = yf_quote_summary(sym)
@@ -641,26 +743,36 @@ def cmd_compare(symbols: list[str]) -> None:
             if entry["name"] is None and qs.get("short_name"):
                 entry["name"] = qs["short_name"]
 
-        # 52w performance: (current - 52w_low) / (52w_high - 52w_low)
-        try:
-            price_f = float(entry["price"]) if entry["price"] else None
-            high_f = float(entry["52w_high"]) if entry["52w_high"] else None
-            low_f = float(entry["52w_low"]) if entry["52w_low"] else None
-            if price_f and low_f and price_f > 0 and low_f > 0:
-                perf = ((price_f - low_f) / low_f) * 100
-                entry["52w_performance_pct"] = fmt_pct(perf)
-        except (ValueError, TypeError, ZeroDivisionError):
-            pass
+        if not entry.get("price"):
+            entry["error"] = f"No current price returned for {sym}"
 
         comparisons.append(entry)
 
     output = {
+        "schema_version": 2,
         "comparison": comparisons,
         "symbols": normalized_symbols,
         "data_source": "Yahoo Finance",
+        "metric_definitions": {
+            "trailing_1y_return_pct": (
+                "First-to-last daily close return when the provider window spans "
+                "at least 330 days; adjusted close is preferred."
+            ),
+        },
         "sources": [
-            source_metadata(public_chart_url(symbol, "1d", "1d"), price_field="regular_market_price")
-            for symbol in normalized_symbols
+            source_metadata(
+                public_chart_url(entry["symbol"], "1d", "1y"),
+                price_field=(
+                    "adjusted_close_with_regular_market_price"
+                    if entry["trailing_1y_price_field"] == "adjusted_close"
+                    else (
+                        "raw_close_with_regular_market_price"
+                        if entry["trailing_1y_price_field"] == "raw_close"
+                        else "regular_market_price_only"
+                    )
+                ),
+            )
+            for entry in comparisons
         ],
     }
     print_json(output)
@@ -718,9 +830,21 @@ def cmd_crypto(symbol: str, vs: str = "USD") -> None:
     indicators = r.get("indicators", {})
     quote_list = indicators.get("quote") or [{}]
     ohlcv = quote_list[0] if quote_list else {}
-    highs = [h for h in (ohlcv.get("high") or []) if h is not None]
-    lows = [l for l in (ohlcv.get("low") or []) if l is not None]
-    volumes = [v for v in (ohlcv.get("volume") or []) if v is not None]
+    highs = [
+        numeric
+        for value in (ohlcv.get("high") or [])
+        if (numeric := finite_number(value, positive=True)) is not None
+    ]
+    lows = [
+        numeric
+        for value in (ohlcv.get("low") or [])
+        if (numeric := finite_number(value, positive=True)) is not None
+    ]
+    volumes = [
+        numeric
+        for value in (ohlcv.get("volume") or [])
+        if (numeric := finite_number(value, nonnegative=True)) is not None
+    ]
 
     output = {
         "symbol": ticker,

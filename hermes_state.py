@@ -3231,6 +3231,14 @@ class SessionDB:
             row = cursor.fetchone()
         return dict(row) if row else None
 
+    def get_message_session_id(self, message_id: int) -> Optional[str]:
+        """Return the session that owns a message, if the message exists."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT session_id FROM messages WHERE id = ?", (message_id,)
+            ).fetchone()
+        return str(row[0]) if row else None
+
     def resolve_session_id(self, session_id_or_prefix: str) -> Optional[str]:
         """Resolve an exact or uniquely prefixed session ID to the full ID.
 
