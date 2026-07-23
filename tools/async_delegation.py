@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
+import os
 import threading
 import time
 import uuid
@@ -46,6 +46,12 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional
 
 from hermes_constants import get_hermes_home
+from tools.async_delegation_repository import (
+    AsyncDelegationRepository,
+    PostgresAsyncDelegationRepository,
+    SQLiteAsyncDelegationRepository,
+    oxaide_namespace_id,
+)
 from tools.daemon_pool import DaemonThreadPoolExecutor
 from tools.thread_context import propagate_context_to_thread
 
@@ -77,143 +83,86 @@ _DEFAULT_MAX_ASYNC_CHILDREN = 3
 _MAX_RETAINED_COMPLETED = 50
 _DURABLE_RETENTION_SECONDS = 7 * 24 * 60 * 60
 _MAX_DURABLE_PENDING = 1000
+# Backward-compatible test lock for callers that still inspect local SQLite
+# directly. Production persistence uses the repository's own lock/transactions.
 _DB_LOCK = threading.Lock()
+_repositories_lock = threading.Lock()
+_repositories: Dict[tuple, AsyncDelegationRepository] = {}
 
 
 def _db_path():
     return get_hermes_home() / "state.db"
 
 
-def _connect() -> sqlite3.Connection:
-    path = _db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=10)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS async_delegations (
-            delegation_id TEXT PRIMARY KEY,
-            origin_session TEXT NOT NULL,
-            origin_ui_session_id TEXT NOT NULL DEFAULT '',
-            parent_session_id TEXT,
-            state TEXT NOT NULL,
-            dispatched_at REAL NOT NULL,
-            completed_at REAL,
-            updated_at REAL NOT NULL,
-            event_json TEXT,
-            result_json TEXT,
-            delivery_state TEXT NOT NULL DEFAULT 'pending',
-            delivery_attempts INTEGER NOT NULL DEFAULT 0,
-            delivered_at REAL,
-            owner_pid INTEGER,
-            owner_started_at INTEGER,
-            task_json TEXT,
-            delivery_claim TEXT,
-            delivery_claimed_at REAL
-        )"""
-    )
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(async_delegations)")}
-    for name, sql_type in (
-        ("owner_pid", "INTEGER"),
-        ("owner_started_at", "INTEGER"),
-        ("task_json", "TEXT"),
-        ("delivery_claim", "TEXT"),
-        ("delivery_claimed_at", "REAL"),
-    ):
-        if name not in columns:
-            conn.execute(f"ALTER TABLE async_delegations ADD COLUMN {name} {sql_type}")
-    return conn
+def _state_database_url() -> str:
+    value = str(os.environ.get("HERMES_STATE_DATABASE_URL") or "").strip()
+    if not value or value.lower().startswith("replace-with-"):
+        return ""
+    return value
+
+
+def _repository() -> AsyncDelegationRepository:
+    database_url = _state_database_url()
+    if database_url:
+        workspace_id = str(os.environ.get("HERMES_OXAIDE_WORKSPACE_ID") or "").strip()
+        runtime_key = str(os.environ.get("HERMES_OXAIDE_RUNTIME_KEY") or "").strip()
+        if not workspace_id or not runtime_key:
+            raise RuntimeError(
+                "PostgreSQL Hermes state requires trusted Oxaide workspace and runtime identity"
+            )
+        namespace_id = oxaide_namespace_id(workspace_id, runtime_key)
+        key = ("postgres", database_url, namespace_id)
+        constructor = lambda: PostgresAsyncDelegationRepository(
+            database_url, namespace_id
+        )
+    else:
+        path = _db_path()
+        key = ("sqlite", str(path.resolve()))
+        constructor = lambda: SQLiteAsyncDelegationRepository(path)
+
+    with _repositories_lock:
+        repository = _repositories.get(key)
+        if repository is None:
+            repository = constructor()
+            _repositories[key] = repository
+        return repository
+
+
+def _connect():
+    """Backward-compatible direct connection for SQLite-only diagnostics."""
+    return SQLiteAsyncDelegationRepository(_db_path()).connect()
 
 
 def _persist_dispatch(record: Dict[str, Any]) -> None:
     now = time.time()
     try:
         from gateway.status import get_process_start_time
-        owner_started_at = get_process_start_time(__import__("os").getpid())
+        owner_started_at = get_process_start_time(os.getpid())
     except Exception:
         owner_started_at = None
-    task_payload = {
-        key: record.get(key)
-        for key in ("goal", "goals", "context", "toolsets", "role", "model", "is_batch")
-        if key in record
-    }
-    with _DB_LOCK, _connect() as conn:
-        conn.execute(
-            """INSERT OR REPLACE INTO async_delegations
-               (delegation_id, origin_session, origin_ui_session_id,
-                parent_session_id, state, dispatched_at, updated_at,
-                delivery_state, delivery_attempts, owner_pid,
-                owner_started_at, task_json)
-               VALUES (?, ?, ?, ?, 'running', ?, ?, 'pending', 0, ?, ?, ?)""",
-            (record["delegation_id"], record.get("session_key", ""),
-             record.get("origin_ui_session_id", ""), record.get("parent_session_id"),
-             record["dispatched_at"], now, __import__("os").getpid(),
-             owner_started_at, json.dumps(task_payload)),
-        )
+    _repository().persist_dispatch({**record, "updated_at": now}, owner_started_at)
     _prune_durable_records()
 
 
 def _delete_durable_delegation(delegation_id: str) -> None:
-    with _DB_LOCK, _connect() as conn:
-        conn.execute("DELETE FROM async_delegations WHERE delegation_id=?", (delegation_id,))
+    _repository().delete(delegation_id)
 
 
 def _prune_durable_records() -> None:
     """Bound terminal history, preferring delivered records for deletion."""
-    now = time.time()
-    cutoff = now - _DURABLE_RETENTION_SECONDS
-    with _DB_LOCK, _connect() as conn:
-        conn.execute(
-            "DELETE FROM async_delegations WHERE delivery_state='delivered' AND updated_at < ?",
-            (cutoff,),
-        )
-        terminal_count = conn.execute(
-            "SELECT COUNT(*) FROM async_delegations WHERE state NOT IN ('running','finalizing')"
-        ).fetchone()[0]
-        excess = max(0, terminal_count - _MAX_RETAINED_COMPLETED)
-        if excess:
-            conn.execute(
-                """DELETE FROM async_delegations WHERE delegation_id IN (
-                     SELECT delegation_id FROM async_delegations
-                     WHERE state NOT IN ('running','finalizing')
-                     ORDER BY CASE delivery_state WHEN 'delivered' THEN 0 ELSE 1 END,
-                              updated_at ASC LIMIT ?
-                   )""",
-                (excess,),
-            )
-        pending_count = conn.execute(
-            """SELECT COUNT(*) FROM async_delegations
-               WHERE state NOT IN ('running','finalizing') AND delivery_state='pending'"""
-        ).fetchone()[0]
-        overflow = max(0, pending_count - _MAX_DURABLE_PENDING)
-        if overflow:
-            conn.execute(
-                """DELETE FROM async_delegations WHERE delegation_id IN (
-                     SELECT delegation_id FROM async_delegations
-                     WHERE state NOT IN ('running','finalizing') AND delivery_state='pending'
-                     ORDER BY updated_at ASC LIMIT ?
-                   )""",
-                (overflow,),
-            )
+    _repository().prune(
+        cutoff=time.time() - _DURABLE_RETENTION_SECONDS,
+        retained_completed=_MAX_RETAINED_COMPLETED,
+        max_pending=_MAX_DURABLE_PENDING,
+    )
 
 
 def _persist_completion(event: Dict[str, Any], result: Dict[str, Any]) -> None:
-    now = time.time()
-    with _DB_LOCK, _connect() as conn:
-        conn.execute(
-            """UPDATE async_delegations SET state=?, completed_at=?, updated_at=?,
-               event_json=?, result_json=?, delivery_state='pending'
-               WHERE delegation_id=?""",
-            (event.get("status", "completed"), event.get("completed_at", now), now,
-             json.dumps(event), json.dumps(result), event["delegation_id"]),
-        )
+    _repository().persist_completion(event, result, time.time())
 
 
 def _note_delivery_attempt(delegation_id: str) -> None:
-    with _DB_LOCK, _connect() as conn:
-        conn.execute(
-            "UPDATE async_delegations SET delivery_attempts=delivery_attempts+1, updated_at=? WHERE delegation_id=?",
-            (time.time(), delegation_id),
-        )
+    _repository().note_delivery_attempt(delegation_id, time.time())
 
 
 def recover_abandoned_delegations() -> int:
@@ -224,41 +173,35 @@ def recover_abandoned_delegations() -> int:
         return 0
     now = time.time()
     recovered = 0
-    with _DB_LOCK, _connect() as conn:
-        rows = conn.execute(
-            """SELECT delegation_id, origin_session, origin_ui_session_id,
-                      parent_session_id, dispatched_at, owner_pid,
-                      owner_started_at, task_json
-               FROM async_delegations WHERE state IN ('running','finalizing')"""
-        ).fetchall()
-        for row in rows:
-            delegation_id, session_key, origin_ui, parent_id, dispatched_at, pid, started, task_json = row
-            live = False
-            if pid:
-                live = _pid_exists(int(pid))
-                if live and started is not None:
-                    live = get_process_start_time(int(pid)) == int(started)
-            if live:
-                continue
-            task = json.loads(task_json or "{}")
-            event = {
-                "type": "async_delegation", "delegation_id": delegation_id,
-                "session_key": session_key, "origin_ui_session_id": origin_ui,
-                "parent_session_id": parent_id, "goal": task.get("goal", ""),
-                "goals": task.get("goals"), "context": task.get("context"),
-                "toolsets": task.get("toolsets"), "role": task.get("role"),
-                "model": task.get("model"), "is_batch": bool(task.get("is_batch")),
-                "status": "unknown", "summary": None,
-                "error": "Delegation owner exited before recording a terminal result; outcome unknown.",
-                "dispatched_at": dispatched_at, "completed_at": now,
-            }
-            result = {"status": "unknown", "summary": None, "error": event["error"]}
-            conn.execute(
-                """UPDATE async_delegations SET state='unknown', completed_at=?,
-                   updated_at=?, event_json=?, result_json=?, delivery_state='pending'
-                   WHERE delegation_id=?""",
-                (now, now, json.dumps(event), json.dumps(result), delegation_id),
-            )
+    repository = _repository()
+    for row in repository.list_inflight():
+        pid = row.get("owner_pid")
+        started = row.get("owner_started_at")
+        live = False
+        if pid:
+            live = _pid_exists(int(pid))
+            if live and started is not None:
+                live = get_process_start_time(int(pid)) == int(started)
+        if live:
+            continue
+        task = row.get("task") or {}
+        event = {
+            "type": "async_delegation", "delegation_id": row["delegation_id"],
+            "session_key": row.get("session_key", ""),
+            "origin_ui_session_id": row.get("origin_ui_session_id", ""),
+            "parent_session_id": row.get("parent_session_id"),
+            "goal": task.get("goal", ""), "goals": task.get("goals"),
+            "context": task.get("context"), "toolsets": task.get("toolsets"),
+            "role": task.get("role"), "model": task.get("model"),
+            "is_batch": bool(task.get("is_batch")), "status": "unknown",
+            "summary": None,
+            "error": "Delegation owner exited before recording a terminal result; outcome unknown.",
+            "dispatched_at": row.get("dispatched_at"), "completed_at": now,
+        }
+        result = {"status": "unknown", "summary": None, "error": event["error"]}
+        if repository.mark_abandoned_unknown(
+            row["delegation_id"], event, result, now
+        ):
             recovered += 1
     return recovered
 
@@ -266,47 +209,21 @@ def recover_abandoned_delegations() -> int:
 def restore_undelivered_completions(target_queue) -> int:
     """Enqueue durable pending completions as fresh turns after process start."""
     recover_abandoned_delegations()
-    with _DB_LOCK, _connect() as conn:
-        rows = conn.execute(
-            """SELECT delegation_id, event_json FROM async_delegations
-               WHERE state != 'running' AND delivery_state='pending' AND event_json IS NOT NULL
-               ORDER BY completed_at, delegation_id"""
-        ).fetchall()
-        for _delegation_id, payload in rows:
-            target_queue.put(json.loads(payload))
-    return len(rows)
+    events = _repository().list_pending_events()
+    for event in events:
+        target_queue.put(event)
+    return len(events)
 
 
 def mark_completion_delivered(delegation_id: str) -> bool:
     """Atomically acknowledge successful injection of a durable completion."""
-    now = time.time()
-    with _DB_LOCK, _connect() as conn:
-        cur = conn.execute(
-            """UPDATE async_delegations SET delivery_state='delivered', delivered_at=?, updated_at=?
-               WHERE delegation_id=? AND delivery_state!='delivered'""",
-            (now, now, delegation_id),
-        )
-        return cur.rowcount == 1
+    return _repository().mark_delivered(delegation_id, time.time())
 
 
 def claim_completion_delivery(delegation_id: str, claim_id: str) -> bool:
     """Claim one pending completion across competing consumers/processes."""
     now = time.time()
-    with _DB_LOCK, _connect() as conn:
-        row = conn.execute(
-            "SELECT delivery_state FROM async_delegations WHERE delegation_id=?",
-            (delegation_id,),
-        ).fetchone()
-        if row is None:
-            return True  # legacy event created before durable dispatch
-        cur = conn.execute(
-            """UPDATE async_delegations SET delivery_claim=?, delivery_claimed_at=?,
-                      delivery_attempts=delivery_attempts+1, updated_at=?
-               WHERE delegation_id=? AND delivery_state='pending'
-                 AND (delivery_claim IS NULL OR delivery_claimed_at < ?)""",
-            (claim_id, now, now, delegation_id, now - 300),
-        )
-        return cur.rowcount == 1
+    return _repository().claim_delivery(delegation_id, claim_id, now, now - 300)
 
 
 def claim_event_delivery(evt: Dict[str, Any], consumer: str) -> Optional[str]:
@@ -316,36 +233,18 @@ def claim_event_delivery(evt: Dict[str, Any], consumer: str) -> Optional[str]:
     delegation_id = str(evt.get("delegation_id") or "")
     if not delegation_id:
         return ""
-    claim_id = f"{consumer}:{__import__('os').getpid()}:{uuid.uuid4().hex}"
+    claim_id = f"{consumer}:{os.getpid()}:{uuid.uuid4().hex}"
     return claim_id if claim_completion_delivery(delegation_id, claim_id) else None
 
 
 def release_completion_delivery(delegation_id: str, claim_id: str) -> bool:
     """Release a failed delivery claim so another consumer may retry."""
-    with _DB_LOCK, _connect() as conn:
-        cur = conn.execute(
-            """UPDATE async_delegations SET delivery_claim=NULL,
-                      delivery_claimed_at=NULL, updated_at=?
-               WHERE delegation_id=? AND delivery_state='pending'
-                 AND delivery_claim=?""",
-            (time.time(), delegation_id, claim_id),
-        )
-        return cur.rowcount == 1
+    return _repository().release_delivery(delegation_id, claim_id, time.time())
 
 
 def complete_completion_delivery(delegation_id: str, claim_id: str) -> bool:
     """Acknowledge acceptance for the consumer holding this claim."""
-    now = time.time()
-    with _DB_LOCK, _connect() as conn:
-        cur = conn.execute(
-            """UPDATE async_delegations SET delivery_state='delivered',
-                      delivered_at=?, updated_at=?, delivery_claim=NULL,
-                      delivery_claimed_at=NULL
-               WHERE delegation_id=? AND delivery_state='pending'
-                 AND delivery_claim=?""",
-            (now, now, delegation_id, claim_id),
-        )
-        return cur.rowcount == 1
+    return _repository().complete_delivery(delegation_id, claim_id, time.time())
 
 
 def complete_event_delivery(evt: Dict[str, Any], claim_id: str) -> None:
@@ -359,20 +258,7 @@ def release_event_delivery(evt: Dict[str, Any], claim_id: str) -> None:
 
 
 def get_durable_delegation(delegation_id: str) -> Optional[Dict[str, Any]]:
-    with _DB_LOCK, _connect() as conn:
-        row = conn.execute(
-            """SELECT origin_session, state, dispatched_at, completed_at,
-                      result_json, delivery_state, delivery_attempts
-               FROM async_delegations WHERE delegation_id=?""", (delegation_id,),
-        ).fetchone()
-    if row is None:
-        return None
-    return {
-        "delegation_id": delegation_id, "origin_session": row[0], "state": row[1],
-        "dispatched_at": row[2], "completed_at": row[3],
-        "result": json.loads(row[4]) if row[4] else None,
-        "delivery_state": row[5], "delivery_attempts": row[6],
-    }
+    return _repository().get(delegation_id)
 
 
 def _get_executor(max_workers: int) -> ThreadPoolExecutor:
@@ -925,3 +811,8 @@ def _reset_for_tests() -> None:
         _executor_max_workers = 0
     with _records_lock:
         _records.clear()
+    with _repositories_lock:
+        repositories = list(_repositories.values())
+        _repositories.clear()
+    for repository in repositories:
+        repository.close()

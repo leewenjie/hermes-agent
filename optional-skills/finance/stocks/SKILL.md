@@ -28,7 +28,7 @@ installs. Yahoo's endpoint is unofficial and may rate-limit or change.
 
 ## Prerequisites
 
-Python 3.8+ stdlib only. Optional: set `ALPHA_VANTAGE_KEY` to enrich
+Python 3.11+ stdlib only. Optional: set `ALPHA_VANTAGE_KEY` to enrich
 `market_cap`, `pe_ratio`, and 52-week levels when Yahoo's crumb-protected
 fields come back null. Free key: https://www.alphavantage.co/support/#api-key
 
@@ -71,7 +71,9 @@ Daily OHLCV plus stats (min, max, avg, total return %). Ranges: `1mo`,
 
 ### `compare SYMBOL1 SYMBOL2 [...]`
 
-Side-by-side: price, change%, 52-week performance.
+Side-by-side: price, change%, valuation fields, and a trailing one-year return
+when the observations span at least 330 days. Schema version 2 identifies the
+adjusted- or raw-close basis and calendar coverage for that return.
 
 ### `crypto SYMBOL [SYMBOL2 ...]`
 
@@ -92,4 +94,5 @@ Crypto prices. Pass `BTC` (the script appends `-USD` automatically).
 python3 ~/.hermes/skills/finance/stocks/scripts/stocks_client.py quote AAPL
 ```
 
-Returns a JSON object with `symbol: "AAPL"` and a numeric `price` field.
+Returns a JSON object with `symbol: "AAPL"` and a formatted `price` field. A
+missing or malformed provider price produces an explicit `error` field.

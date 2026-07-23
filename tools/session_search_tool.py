@@ -379,13 +379,9 @@ def _scroll(
     if not messages:
         owning = None
         try:
-            conn = getattr(db, "_conn", None)
-            if conn is not None:
-                row = conn.execute(
-                    "SELECT session_id FROM messages WHERE id = ?",
-                    (around_message_id,),
-                ).fetchone()
-                owning = row[0] if row else None
+            lookup_owner = getattr(db, "get_message_session_id", None)
+            if callable(lookup_owner):
+                owning = lookup_owner(around_message_id)
         except Exception as e:
             logging.debug("owning-session lookup failed: %s", e, exc_info=True)
             owning = None

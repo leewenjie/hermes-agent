@@ -89,15 +89,12 @@ def fetch_prices(symbol: str, period: str) -> tuple[list[dict[str, Any]], str]:
     timestamps = result.get("timestamp") or []
     indicators = result.get("indicators") or {}
     adjclose_sets = indicators.get("adjclose") or []
-    quote_sets = indicators.get("quote") or []
     adjusted = adjclose_sets[0].get("adjclose") if adjclose_sets else None
-    closes = quote_sets[0].get("close") if quote_sets else None
-    values = adjusted if isinstance(adjusted, list) else closes
-    if not isinstance(timestamps, list) or not isinstance(values, list):
-        raise RuntimeError("Yahoo Finance chart is missing prices")
+    if not isinstance(timestamps, list) or not isinstance(adjusted, list):
+        raise RuntimeError("Yahoo Finance chart is missing adjusted-close prices")
 
     prices = []
-    for timestamp, value in zip(timestamps, values):
+    for timestamp, value in zip(timestamps, adjusted):
         if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
             continue
         if float(value) <= 0:
@@ -225,6 +222,7 @@ def analyze(symbol: str, prices: list[dict[str, Any]], source_url: str) -> dict[
             "skewness": skewness,
             "excess_kurtosis": excess_kurtosis,
         },
+        "prices": prices,
         "returns": [
             {"date": prices[index]["date"], "return": returns[index - 1]}
             for index in range(1, len(prices))

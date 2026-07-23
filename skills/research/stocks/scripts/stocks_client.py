@@ -4,10 +4,13 @@
 from pathlib import Path
 import runpy
 
+from hermes_constants import get_optional_skills_dir
+
 
 RELATIVE_IMPLEMENTATION = Path("optional-skills/finance/stocks/scripts/stocks_client.py")
 CANDIDATES = [
     Path(__file__).resolve().parents[4] / RELATIVE_IMPLEMENTATION,
+    get_optional_skills_dir() / "finance/stocks/scripts/stocks_client.py",
     Path("/opt/hermes") / RELATIVE_IMPLEMENTATION,
 ]
 IMPLEMENTATION = next((path for path in CANDIDATES if path.is_file()), CANDIDATES[0])

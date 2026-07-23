@@ -141,6 +141,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Hosted Oxaide state authority. SQLite remains dependency-free and local by
+# default; production runtimes install this extra explicitly.
+postgres = ["psycopg[binary]==3.3.4", "psycopg-pool==3.3.1"]
 # Native Anthropic provider — only needed when provider=anthropic (not via
 # OpenRouter or other aggregators).
 anthropic = ["anthropic==0.87.0"]  # CVE-2026-34450, CVE-2026-34452
