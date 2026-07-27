@@ -4,7 +4,7 @@
  *   <div host> (dashboard chrome)                                         .
  *     └─ <div wrapper> (rounded, dark bg, padded — the "terminal window"  .
  *         look that gives the page a distinct visual identity)            .
- *         └─ @xterm/xterm Terminal (WebGL renderer, Unicode 11 widths)    .
+ *         └─ @xterm/xterm Terminal (default renderer, Unicode 11 widths)  .
  *              │ onData      keystrokes → WebSocket → PTY master          .
  *              │ onResize    terminal resize → `\x1b[RESIZE:cols;rows]`   .
  *              │ write(data) PTY output bytes → VT100 parser              .
@@ -19,7 +19,6 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { Button } from "@nous-research/ui/ui/components/button";
@@ -814,24 +813,11 @@ export default function ChatPage({
       };
     }
 
-    // WebGL draws from a texture atlas sized with device pixels. On phones and
-    // in DevTools device mode that often produces *visually* much larger cells
-    // than `fontSize` suggests — users see "huge" text even at 7–9px settings.
-    // The canvas/DOM renderer tracks `fontSize` faithfully; use it for narrow
-    // hosts.  Wide layouts still get WebGL for crisp box-drawing.
-    const useWebgl = terminalTierWidthPx(host) >= 768;
-    if (useWebgl) {
-      try {
-        const webgl = new WebglAddon();
-        webgl.onContextLoss(() => webgl.dispose());
-        term.loadAddon(webgl);
-      } catch (err) {
-        console.warn(
-          "[hermes-chat] WebGL renderer unavailable; falling back to default",
-          err,
-        );
-      }
-    }
+    // Keep xterm's default renderer. Initializing the optional WebGL renderer
+    // is synchronous and can wedge Chromium's main thread on software-rendered
+    // or virtual GPUs, leaving the entire dashboard as an unresponsive black
+    // canvas. The default renderer is reliable across local dev, containers,
+    // remote desktops, and mobile browsers.
 
     // Initial fit + resize observer.  fit.fit() reads the container's
     // current bounding box and resizes the terminal grid to match.

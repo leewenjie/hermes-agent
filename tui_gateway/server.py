@@ -5615,18 +5615,33 @@ def _authorize_oxaide_user_turn(session: dict):
 _OXAIDE_LEASE_LOSS_HARD_STOP_SECONDS = 30.0
 
 
+def _terminate_oxaide_runtime(code: str) -> None:
+    """Ask s6 to terminate the complete tenant container, then exit locally."""
+    logger.critical(
+        "Oxaide lease loss requires tenant runtime restart: %s",
+        code or "turn_lease_renewal_failed",
+    )
+    try:
+        subprocess.run(
+            ["/run/s6/basedir/bin/halt"],
+            check=True,
+            timeout=10,
+        )
+    except Exception:
+        logger.critical(
+            "Oxaide s6 container shutdown request failed",
+            exc_info=True,
+        )
+    # The local process must stop executing tenant work even if s6 teardown is
+    # delayed or the production image is unexpectedly misconfigured.
+    os._exit(70)
+
+
 def _schedule_oxaide_runtime_hard_stop(code: str) -> None:
-    """Exit PID 1 before a lost 90-second lease can be reused by the host."""
+    """Terminate the tenant container before its lost lease can be reused."""
     def hard_stop() -> None:
         threading.Event().wait(_OXAIDE_LEASE_LOSS_HARD_STOP_SECONDS)
-        logger.critical(
-            "Oxaide lease loss requires tenant runtime restart: %s",
-            code or "turn_lease_renewal_failed",
-        )
-        # The hardened Oxaide Python process is PID 1 in a dedicated tenant
-        # container. Exiting it tears down the complete PID namespace, including
-        # blocked tools and descendants, and Docker's restart policy replaces it.
-        os._exit(70)
+        _terminate_oxaide_runtime(code)
 
     threading.Thread(
         target=hard_stop,
@@ -5637,6 +5652,9 @@ def _schedule_oxaide_runtime_hard_stop(code: str) -> None:
 
 def _cancel_oxaide_turn_after_lease_loss(session: dict, code: str) -> None:
     """Interrupt physical work when its host-capacity lease is no longer held."""
+    from hermes_cli.managed_scope import mark_managed_runtime_terminal_failure
+
+    mark_managed_runtime_terminal_failure("terminal_lease_loss")
     should_schedule_hard_stop = False
     lock = session.get("history_lock")
     if lock is not None:
@@ -5699,12 +5717,14 @@ def _oxaide_completion_details(
     agent,
     baseline: dict[str, Any] | None,
     started_at: float | None,
+    *,
+    origin: str = "interactive",
 ) -> dict[str, Any]:
     before = baseline or {}
     after = _oxaide_usage_snapshot(agent)
     details: dict[str, Any] = {
         "schema_version": "2026-07-14-v1",
-        "origin": "interactive",
+        "origin": str(origin or "interactive")[:50],
         "model": str(getattr(agent, "model", "") or "")[:200],
         "provider": str(getattr(agent, "provider", "") or "")[:100],
         "cost_status": str(
@@ -10977,29 +10997,62 @@ def _(rid, params: dict) -> dict:
     text, parent = params.get("text", ""), params.get("session_id", "")
     if not text:
         return _err(rid, 4012, "text required")
+    try:
+        oxaide_turn = _authorize_oxaide_user_turn(session)
+    except Exception as exc:
+        code = str(
+            getattr(exc, "code", "") or "turn_authorization_unavailable"
+        )
+        return _err(rid, 4020, f"Oxaide turn denied: {code}")
     task_id = f"bg_{uuid.uuid4().hex[:6]}"
 
     def run():
         session_tokens = _set_session_context(task_id, cwd=_session_cwd(session))
+        oxaide_settled = False
         try:
             from run_agent import AIAgent
 
-            result = AIAgent(
+            agent = AIAgent(
                 **_background_agent_kwargs(session["agent"], task_id)
-            ).run_conversation(
+            )
+            usage_baseline = _oxaide_usage_snapshot(agent)
+            started_at = time.monotonic()
+            result = agent.run_conversation(
                 user_message=text,
                 task_id=task_id,
             )
+            raw = (
+                result.get("final_response", str(result))
+                if isinstance(result, dict)
+                else str(result)
+            )
+            status = (
+                "interrupted"
+                if isinstance(result, dict) and result.get("interrupted")
+                else "error"
+                if isinstance(result, dict) and result.get("error")
+                else "complete"
+            )
+            if oxaide_turn is not None:
+                oxaide_settled = True
+                _settle_oxaide_turn(
+                    oxaide_turn,
+                    result,
+                    raw,
+                    status,
+                    details=_oxaide_completion_details(
+                        agent,
+                        usage_baseline,
+                        started_at,
+                        origin="background",
+                    ),
+                )
             _emit(
                 "background.complete",
                 parent,
                 {
                     "task_id": task_id,
-                    "text": (
-                        result.get("final_response", str(result))
-                        if isinstance(result, dict)
-                        else str(result)
-                    ),
+                    "text": raw,
                 },
             )
         except Exception as e:
@@ -11009,6 +11062,8 @@ def _(rid, params: dict) -> dict:
                 {"task_id": task_id, "text": f"error: {e}"},
             )
         finally:
+            if oxaide_turn is not None and not oxaide_settled:
+                _release_oxaide_turn(oxaide_turn)
             _clear_session_context(session_tokens)
 
     threading.Thread(target=run, daemon=True).start()

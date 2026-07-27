@@ -1058,8 +1058,8 @@ export const api = {
     ),
 
   // Dashboard plugins
-  getPlugins: () =>
-    fetchJSON<PluginManifestResponse[]>("/api/dashboard/plugins"),
+  getPlugins: (signal?: AbortSignal) =>
+    fetchJSON<PluginManifestResponse[]>("/api/dashboard/plugins", { signal }),
   rescanPlugins: () =>
     fetchJSON<{ ok: boolean; count: number }>("/api/dashboard/plugins/rescan"),
 

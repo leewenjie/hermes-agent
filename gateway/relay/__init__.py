@@ -18,8 +18,11 @@ that don't set it are unaffected — exactly the same shape as ``gateway.proxy_u
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 def relay_url() -> Optional[str]:
@@ -800,27 +803,29 @@ def register_relay_adapter(force: bool = False, url: Optional[str] = None) -> bo
         )
         transport = None
         if resolved_url:
-            from gateway.relay.ws_transport import WebSocketRelayTransport
+            # --- Cloudflare path: CF Connector (Durable Object) transport ---
+            cf_url = os.environ.get("HERMES_CF_CONNECTOR_URL", "").strip()
+            if cf_url:
+                try:
+                    from cloudflare.cf_relay_transport import CFRelayTransport
+                    transport = CFRelayTransport(platform=platform, bot_id=bot_id)
+                    logger.info("Using CF relay transport (connector=%s)", cf_url)
+                except ImportError:
+                    logger.warning("CF_CONNECTOR_URL set but cf_relay_transport not found — falling back to VM relay")
+                    cf_url = ""
+            if not cf_url:
+                from gateway.relay.ws_transport import WebSocketRelayTransport
 
-            gateway_id, upgrade_secret = relay_connection_auth()
-            transport = WebSocketRelayTransport(
-                resolved_url,
-                platform,
-                bot_id,
-                # Phase 1.5: the full SET of (platform, bot_id) this gateway fronts.
-                # The transport sends one hello per identity (the connector
-                # accumulates them) and resolves the per-frame egress botId from
-                # this set. A single-platform deploy passes a 1-element list, so
-                # behaviour is byte-identical to before.
-                identities=relay_platform_identities(),
-                gateway_id=gateway_id,
-                upgrade_secret=upgrade_secret,
-                # Phase 5 §5.3: re-dial + re-handshake after an unexpected socket
-                # close so a gateway that went idle/suspended re-establishes its
-                # relay socket — which triggers the connector's buffered-flip drain
-                # (the delivery-leg onResume) on the new handshake.
-                reconnect=True,
-            )
+                gateway_id, upgrade_secret = relay_connection_auth()
+                transport = WebSocketRelayTransport(
+                    resolved_url,
+                    platform,
+                    bot_id,
+                    identities=relay_platform_identities(),
+                    gateway_id=gateway_id,
+                    upgrade_secret=upgrade_secret,
+                    reconnect=True,
+                )
         return RelayAdapter(config, placeholder, transport=transport)
 
     platform_registry.register(

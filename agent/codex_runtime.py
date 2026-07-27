@@ -596,6 +596,54 @@ def _item_field(item: Any, name: str, default: Any = None) -> Any:
     return value if value is not None else default
 
 
+def _item_has_usable_final_text(item: Any) -> bool:
+    """Return whether a completed-stream item contains a visible final answer."""
+    if _item_field(item, "type", "") != "message":
+        return False
+    phase = _item_field(item, "phase", None)
+    if isinstance(phase, str) and phase.strip().lower() in {"commentary", "analysis"}:
+        return False
+    content = _item_field(item, "content", None)
+    if not isinstance(content, list):
+        return False
+    return any(
+        _item_field(part, "type", "") in {"output_text", "text"}
+        and isinstance(_item_field(part, "text", None), str)
+        and bool(_item_field(part, "text", "").strip())
+        for part in content
+    )
+
+
+def _reconcile_completed_output_items(items: List[Any]) -> None:
+    """Repair stale nested statuses under an authoritative completed terminal.
+
+    Every item supplied here was observed through ``response.output_item.done``.
+    Some Responses-compatible endpoints nevertheless leave those items marked
+    queued/in_progress/incomplete even when ``response.completed`` terminates a
+    usable final answer.  That contradictory status otherwise causes Hermes to
+    issue fruitless continuation calls.  Do not reconcile commentary-only,
+    reasoning-only, or empty responses.
+    """
+    if not any(_item_has_usable_final_text(item) for item in items):
+        return
+    for item in items:
+        status = _item_field(item, "status", None)
+        if not isinstance(status, str) or status.strip().lower() not in {
+            "queued", "in_progress", "incomplete",
+        }:
+            continue
+        if isinstance(item, dict):
+            item["status"] = "completed"
+        else:
+            try:
+                setattr(item, "status", "completed")
+            except (AttributeError, TypeError):
+                logger.debug(
+                    "Could not reconcile completed Codex output item status",
+                    exc_info=True,
+                )
+
+
 def _raise_stream_error(event: Any) -> None:
     """Raise a ``_StreamErrorEvent`` from a ``type=error`` SSE frame.
 
@@ -781,11 +829,11 @@ def _consume_codex_event_stream(
                     if terminal_error is None and isinstance(resp_obj, dict):
                         terminal_error = resp_obj.get("error")
             if event_type == "response.completed":
-                terminal_status = terminal_status or "completed"
+                terminal_status = "completed"
             elif event_type == "response.incomplete":
-                terminal_status = terminal_status or "incomplete"
+                terminal_status = "incomplete"
             elif event_type == "response.failed":
-                terminal_status = terminal_status or "failed"
+                terminal_status = "failed"
             # Stop on terminal event.
             break
 
@@ -817,6 +865,15 @@ def _consume_codex_event_stream(
         )
 
     assembled_text = "".join(collected_text_deltas)
+
+    # ``response.completed`` is authoritative for items that separately
+    # arrived through ``response.output_item.done``. Azure/OpenAI-compatible
+    # surfaces can leave their nested status stale; reconcile only when the
+    # stream also contains a usable final answer. True response-level
+    # incomplete/failed states and commentary/reasoning-only output are left
+    # unchanged for the continuation/error paths.
+    if saw_terminal and terminal_status == "completed":
+        _reconcile_completed_output_items(output)
 
     final = SimpleNamespace(
         output=output,

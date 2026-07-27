@@ -833,6 +833,9 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
 
     if agent.api_mode == "codex_responses":
         _ct = agent._get_transport()
+        ephemeral_out = getattr(agent, "_ephemeral_max_output_tokens", None)
+        if ephemeral_out is not None:
+            agent._ephemeral_max_output_tokens = None  # consume immediately
         is_github_responses = (
             base_url_host_matches(agent.base_url, "models.github.ai")
             or base_url_host_matches(agent.base_url, "githubcopilot.com")
@@ -885,7 +888,10 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
             tools=tools_for_api,
             reasoning_config=agent.reasoning_config,
             session_id=getattr(agent, "session_id", None),
-            max_tokens=_clamp_output_tokens(agent, agent.max_tokens),
+            max_tokens=_clamp_output_tokens(
+                agent,
+                ephemeral_out if ephemeral_out is not None else agent.max_tokens,
+            ),
             timeout=agent._resolved_api_call_timeout(),
             request_overrides=agent.request_overrides,
             is_github_responses=is_github_responses,

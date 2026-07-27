@@ -37,6 +37,44 @@ _CACHE_LOCK = threading.Lock()
 _CONFIG_CACHE: Dict[str, tuple] = {}
 _ENV_CACHE: Dict[str, tuple] = {}
 
+_TERMINAL_FAILURE_LOCK = threading.Lock()
+_TERMINAL_FAILURE: Optional[str] = None
+
+
+def managed_value_configured(name: str, minimum_length: int = 1) -> bool:
+    """Return whether an environment value is nonblank and non-placeholder."""
+    value = str(os.environ.get(name) or "").strip()
+    lowered = value.lower()
+    return bool(
+        len(value) >= minimum_length
+        and not lowered.startswith("replace-with-")
+        and not lowered.startswith("__replace_with_")
+    )
+
+
+def mark_managed_runtime_terminal_failure(code: str) -> None:
+    """Latch the first stable terminal failure code until process restart."""
+    normalized = str(code or "").strip()
+    if not normalized or len(normalized) > 100 or not normalized.replace("_", "").isalnum():
+        raise ValueError("terminal failure code must be a stable machine code")
+    global _TERMINAL_FAILURE
+    with _TERMINAL_FAILURE_LOCK:
+        if _TERMINAL_FAILURE is None:
+            _TERMINAL_FAILURE = normalized
+
+
+def managed_runtime_terminal_failure() -> Optional[str]:
+    """Return the process-lifetime terminal failure code, when latched."""
+    with _TERMINAL_FAILURE_LOCK:
+        return _TERMINAL_FAILURE
+
+
+def _reset_managed_runtime_terminal_failure_for_tests() -> None:
+    """Clear process-global terminal state for isolated tests only."""
+    global _TERMINAL_FAILURE
+    with _TERMINAL_FAILURE_LOCK:
+        _TERMINAL_FAILURE = None
+
 
 def _under_pytest() -> bool:
     """True when running inside the test suite.

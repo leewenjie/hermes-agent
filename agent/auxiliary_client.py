@@ -2584,6 +2584,8 @@ def _try_azure_foundry(
     _clean_base, _dq = _extract_url_query_params(base_url)
     if _dq:
         extra["default_query"] = _dq
+    if isinstance(api_key, str) and api_key:
+        extra["default_headers"] = {"api-key": api_key}
 
     client = _create_openai_client(api_key=api_key, base_url=_clean_base, **extra)
 

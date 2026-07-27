@@ -252,6 +252,39 @@ async def test_session_chat_loads_history_and_preserves_session_headers(auth_ada
 
 
 @pytest.mark.asyncio
+async def test_session_chat_returns_502_for_incomplete_agent_turn(auth_adapter, session_db):
+    session_id = session_db.create_session("incomplete-session", "api_server")
+    error = "Codex response remained incomplete after 3 continuation attempts"
+    mock_run = AsyncMock(return_value=({
+        "final_response": error,
+        "session_id": session_id,
+        "completed": False,
+        "partial": True,
+        "error": error,
+    }, {"total_tokens": 9}))
+    app = _create_session_app(auth_adapter)
+    with patch.object(auth_adapter, "_run_agent", mock_run):
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                f"/api/sessions/{session_id}/chat",
+                json={"message": "continue"},
+                headers={"Authorization": "Bearer sk-test"},
+            )
+            payload = await resp.json()
+
+    assert resp.status == 502
+    assert resp.headers["X-Hermes-Completed"] == "false"
+    assert resp.headers["X-Hermes-Partial"] == "true"
+    assert payload["error"]["code"] == "agent_incomplete"
+    assert payload["error"]["message"] == error
+    assert payload["error"]["hermes"] == {
+        "completed": False,
+        "partial": True,
+        "failed": False,
+    }
+
+
+@pytest.mark.asyncio
 async def test_session_chat_accepts_multimodal_message(auth_adapter, session_db):
     session_id = session_db.create_session("image-session", "api_server")
     image_payload = [

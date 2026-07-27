@@ -1953,6 +1953,27 @@ class APIServerAdapter(BasePlatformAdapter):
         headers = {"X-Hermes-Session-Id": effective_session_id or session_id}
         if gateway_session_key:
             headers["X-Hermes-Session-Key"] = gateway_session_key
+        is_partial = bool(result.get("partial")) if isinstance(result, dict) else False
+        is_failed = bool(result.get("failed")) if isinstance(result, dict) else False
+        completed = bool(result.get("completed", True)) if isinstance(result, dict) else False
+        if is_partial or is_failed or not completed:
+            raw_error = result.get("error") if isinstance(result, dict) else None
+            error_message = _redact_api_error_text(
+                raw_error or final_response or "Agent run did not complete."
+            )
+            error_body = _openai_error(
+                error_message,
+                err_type="server_error",
+                code="agent_incomplete",
+            )
+            error_body["error"]["hermes"] = {
+                "completed": completed,
+                "partial": is_partial,
+                "failed": is_failed,
+            }
+            headers["X-Hermes-Completed"] = "false"
+            headers["X-Hermes-Partial"] = "true" if is_partial else "false"
+            return web.json_response(error_body, status=502, headers=headers)
         return web.json_response(
             {
                 "object": "hermes.session.chat.completion",
