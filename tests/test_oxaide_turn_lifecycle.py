@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import urllib.error
@@ -23,6 +24,7 @@ _CONTEXT_A = {
     "runtime_session_id": "runtime-a",
     "runtime_key": "runtime-key-a",
     "user_id": "user-a",
+    "access_state": "active",
     "jti": "launch-a",
     "expires_at": 4_000_000_000,
 }
@@ -31,6 +33,7 @@ _CONTEXT_B = {
     "runtime_session_id": "runtime-b",
     "runtime_key": "runtime-key-b",
     "user_id": "user-b",
+    "access_state": "active",
     "jti": "launch-b",
     "expires_at": 4_000_000_000,
 }
@@ -299,9 +302,13 @@ def test_authorize_happens_before_agent_or_context_work(monkeypatch):
     )
 
     try:
-        response = server._methods["prompt.submit"](
-            "rid", {"session_id": "sid", "text": "real user prompt"}
-        )
+        token = bind_transport(_Transport(dict(_CONTEXT_A)))
+        try:
+            response = server._methods["prompt.submit"](
+                "rid", {"session_id": "sid", "text": "real user prompt"}
+            )
+        finally:
+            reset_transport(token)
         assert response["result"]["status"] == "streaming"
         session["_run_thread"].join(timeout=2)
         assert calls[:4] == ["authorize", "db", "agent", "run"]
@@ -323,9 +330,13 @@ def test_authorization_denial_never_runs_agent_or_consumes_images(monkeypatch):
     monkeypatch.setattr(server, "_run_prompt_submit", lambda *_args, **_kwargs: calls.append("run"))
 
     try:
-        response = server._methods["prompt.submit"](
-            "rid", {"session_id": "sid", "text": "must be denied"}
-        )
+        token = bind_transport(_Transport(dict(_CONTEXT_A)))
+        try:
+            response = server._methods["prompt.submit"](
+                "rid", {"session_id": "sid", "text": "must be denied"}
+            )
+        finally:
+            reset_transport(token)
         assert response["error"]["code"] == 4020
         assert "trial_turn_limit_reached" in response["error"]["message"]
         assert calls == ["authorize"]
@@ -475,6 +486,9 @@ def test_heartbeat_failure_fails_closed(monkeypatch):
 def test_lease_loss_interrupts_physical_agent_work_and_schedules_one_hard_stop(
     monkeypatch,
 ):
+    from hermes_cli import managed_scope
+
+    managed_scope._reset_managed_runtime_terminal_failure_for_tests()
     class _Agent:
         def __init__(self):
             self.interrupted = 0
@@ -498,10 +512,127 @@ def test_lease_loss_interrupts_physical_agent_work_and_schedules_one_hard_stop(
         session, "turn_reservation_binding_fenced"
     )
 
+    assert managed_scope.managed_runtime_terminal_failure() == "terminal_lease_loss"
     assert session["_turn_cancel_requested"] is True
     assert session["_oxaide_lease_lost"] == "turn_reservation_binding_fenced"
     assert agent.interrupted == 2
     assert scheduled == ["turn_reservation_binding_fenced"]
+    managed_scope._reset_managed_runtime_terminal_failure_for_tests()
+
+
+def test_runtime_hard_stop_terminates_s6_service_tree(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        server.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append((command, kwargs)),
+    )
+    monkeypatch.setattr(
+        os,
+        "_exit",
+        lambda code: (_ for _ in ()).throw(SystemExit(code)),
+    )
+
+    with pytest.raises(SystemExit, match="70"):
+        server._terminate_oxaide_runtime("turn_reservation_binding_fenced")
+
+    assert calls == [
+        (
+            ["/run/s6/basedir/bin/halt"],
+            {"check": True, "timeout": 10},
+        )
+    ]
+
+
+def test_background_turn_authorizes_before_child_agent_construction(monkeypatch):
+    session = _install_session(monkeypatch)
+    session["agent"] = object()
+    calls = []
+
+    class _Turn:
+        def complete(self, details=None):
+            calls.append(("complete", details))
+
+        def release(self):
+            calls.append(("release", None))
+
+    class _ChildAgent:
+        model = "test-model"
+        provider = "test-provider"
+
+        def __init__(self, **_kwargs):
+            calls.append(("construct", None))
+            self.session_api_calls = 0
+            self.session_input_tokens = 0
+            self.session_output_tokens = 0
+            self.session_cache_read_tokens = 0
+            self.session_cache_write_tokens = 0
+            self.session_reasoning_tokens = 0
+            self.session_estimated_cost_usd = 0.0
+
+        def run_conversation(self, **_kwargs):
+            calls.append(("run", None))
+            self.session_api_calls = 1
+            self.session_input_tokens = 12
+            self.session_output_tokens = 3
+            return {"final_response": "background answer"}
+
+    monkeypatch.setattr(
+        server,
+        "_authorize_oxaide_user_turn",
+        lambda _session: calls.append(("authorize", None)) or _Turn(),
+    )
+    monkeypatch.setattr(server, "_background_agent_kwargs", lambda *_args: {})
+    monkeypatch.setattr("run_agent.AIAgent", _ChildAgent)
+    monkeypatch.setattr(server, "_emit", lambda *_args: calls.append(("emit", None)))
+
+    try:
+        response = server._methods["prompt.background"](
+            "rid", {"session_id": "sid", "text": "background prompt"}
+        )
+        assert "task_id" in response["result"]
+        deadline = time.monotonic() + 2
+        while not any(call[0] == "emit" for call in calls):
+            if time.monotonic() >= deadline:
+                pytest.fail("background turn did not complete")
+            threading.Event().wait(0.01)
+
+        assert [call[0] for call in calls[:4]] == [
+            "authorize",
+            "construct",
+            "run",
+            "complete",
+        ]
+        details = next(value for name, value in calls if name == "complete")
+        assert details["origin"] == "background"
+        assert details["api_calls"] == 1
+        assert details["input_tokens"] == 12
+        assert details["output_tokens"] == 3
+        assert "prompt" not in details
+        assert "response" not in details
+    finally:
+        server._sessions.clear()
+
+
+def test_background_authorization_denial_never_constructs_agent(monkeypatch):
+    _install_session(monkeypatch)
+
+    monkeypatch.setattr(
+        server,
+        "_authorize_oxaide_user_turn",
+        lambda _session: (_ for _ in ()).throw(
+            OxaideTurnDenied("trial_turn_limit_reached")
+        ),
+    )
+
+    try:
+        response = server._methods["prompt.background"](
+            "rid", {"session_id": "sid", "text": "must be denied"}
+        )
+        assert response["error"]["code"] == 4020
+        assert "trial_turn_limit_reached" in response["error"]["message"]
+    finally:
+        server._sessions.clear()
 
 
 def test_established_runtime_session_outlives_launch_token(monkeypatch):

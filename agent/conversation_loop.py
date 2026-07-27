@@ -4387,6 +4387,34 @@ def run_conversation(
             if agent.api_mode == "codex_responses" and finish_reason == "incomplete":
                 agent._codex_incomplete_retries += 1
 
+                _codex_incomplete_details = getattr(response, "incomplete_details", None)
+                if isinstance(_codex_incomplete_details, dict):
+                    _codex_incomplete_reason = _codex_incomplete_details.get("reason")
+                else:
+                    _codex_incomplete_reason = getattr(_codex_incomplete_details, "reason", None)
+                _codex_output_shape = []
+                for _codex_item in (getattr(response, "output", None) or []):
+                    _codex_output_shape.append({
+                        "type": getattr(_codex_item, "type", None),
+                        "status": getattr(_codex_item, "status", None),
+                        "phase": getattr(_codex_item, "phase", None),
+                    })
+                _codex_usage = getattr(response, "usage", None)
+                logger.warning(
+                    "Codex response incomplete: continuation=%s/3 status=%r "
+                    "reason=%r max_output_tokens=%r usage=%r output=%r",
+                    agent._codex_incomplete_retries,
+                    getattr(response, "status", None),
+                    _codex_incomplete_reason,
+                    agent._requested_output_cap_from_api_kwargs(api_kwargs),
+                    {
+                        "input_tokens": getattr(_codex_usage, "input_tokens", None),
+                        "output_tokens": getattr(_codex_usage, "output_tokens", None),
+                        "total_tokens": getattr(_codex_usage, "total_tokens", None),
+                    },
+                    _codex_output_shape,
+                )
+
                 interim_msg = agent._build_assistant_message(assistant_message, finish_reason)
                 interim_has_content = bool((interim_msg.get("content") or "").strip())
                 interim_has_reasoning = bool(interim_msg.get("reasoning", "").strip()) if isinstance(interim_msg.get("reasoning"), str) else False
@@ -4424,7 +4452,29 @@ def run_conversation(
                         messages.append(interim_msg)
                         agent._emit_interim_assistant_message(interim_msg)
 
-                if agent._codex_incomplete_retries < 3:
+                if agent._codex_incomplete_retries <= 3:
+                    # A terminal Responses API output-budget exhaustion needs
+                    # more room on the next request.  The generic length path
+                    # cannot do this for Codex because it would roll back the
+                    # replayable response items we just appended above.
+                    # Restrict the boost to an explicit terminal reason:
+                    # commentary-only and stale per-item-status continuations
+                    # are incomplete for different reasons and must retain the
+                    # configured/default provider budget.
+                    _codex_status = str(getattr(response, "status", "") or "").strip().lower()
+                    if (
+                        _codex_status == "incomplete"
+                        and _codex_incomplete_reason in {"max_output_tokens", "length"}
+                    ):
+                        _codex_boost_base = agent.max_tokens if agent.max_tokens else 4096
+                        _codex_boost = _codex_boost_base * (2 ** agent._codex_incomplete_retries)
+                        _codex_requested_cap = agent._requested_output_cap_from_api_kwargs(api_kwargs)
+                        if _codex_requested_cap is not None:
+                            _codex_boost = max(_codex_boost, _codex_requested_cap)
+                        _codex_boost_cap = max(32768, _codex_requested_cap or 0)
+                        agent._ephemeral_max_output_tokens = min(
+                            _codex_boost, _codex_boost_cap
+                        )
                     if not agent.quiet_mode:
                         agent._vprint(f"{agent.log_prefix}↻ Codex response incomplete; continuing turn ({agent._codex_incomplete_retries}/3)")
                     agent._session_messages = messages

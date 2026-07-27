@@ -266,6 +266,7 @@ class TestWebServerEndpoints:
         assert "hermes_home" in data
         assert "active_sessions" in data
         assert data["can_update_hermes"] is True
+        assert "oxaide_readiness" not in data
 
     def test_status_active_session_count_uses_read_only_db(self, monkeypatch, tmp_path):
         import hermes_cli.web_server as web_server
@@ -6950,6 +6951,7 @@ class TestPtyWebSocket:
 
         assert env["HERMES_INTERNAL_TUI_SKIN"] == "oxaide"
         assert env["HERMES_INTERNAL_OXAIDE_LOOPBACK_DEV"] == "1"
+        assert "HERMES_TUI_GATEWAY_URL" not in env
 
     def test_resolve_chat_argv_does_not_bypass_hosted_oxaide_turn_auth(self, monkeypatch):
         import hermes_cli.main as main_mod
@@ -7420,6 +7422,7 @@ def test_resolve_chat_argv_injects_gateway_ws_url(monkeypatch):
     )
     monkeypatch.setattr(ws.app.state, "bound_host", "127.0.0.1", raising=False)
     monkeypatch.setattr(ws.app.state, "bound_port", 9119, raising=False)
+    monkeypatch.setattr(ws.app.state, "auth_required", False, raising=False)
 
     _argv, _cwd, env = ws._resolve_chat_argv()
 

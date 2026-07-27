@@ -3265,6 +3265,12 @@ async def get_status(profile: Optional[str] = None):
                 "gateways": topology["gateways"],
             })
 
+        oxaide_readiness = _oxaide_readiness_diagnostics()
+        if oxaide_readiness is not None:
+            status["oxaide_readiness"] = oxaide_readiness
+            if not oxaide_readiness["ready"]:
+                return JSONResponse(status_code=503, content=status)
+
         return status
     finally:
         if status_scope is not None:
@@ -16205,13 +16211,9 @@ def _pty_input_enabled(trusted_context: Optional[dict[str, Any]]) -> bool:
 
 
 def _configured_runtime_pin(name: str) -> bool:
-    value = str(os.environ.get(name) or "").strip()
-    lowered = value.lower()
-    return bool(
-        value
-        and not lowered.startswith("replace-with-")
-        and not lowered.startswith("__replace_with_")
-    )
+    from hermes_cli.managed_scope import managed_value_configured
+
+    return managed_value_configured(name)
 
 
 def _is_oxaide_hosted_runtime() -> bool:
@@ -16219,6 +16221,78 @@ def _is_oxaide_hosted_runtime() -> bool:
         _configured_runtime_pin("HERMES_OXAIDE_WORKSPACE_ID")
         and _configured_runtime_pin("HERMES_OXAIDE_RUNTIME_KEY")
     )
+
+
+def _oxaide_runtime_intended() -> bool:
+    """Return whether local configuration explicitly selects Oxaide."""
+    runtime_markers = (
+        "HERMES_OXAIDE_MANAGED_POLICY",
+        "HERMES_OXAIDE_WORKSPACE_ID",
+        "HERMES_OXAIDE_RUNTIME_KEY",
+    )
+    if any(_configured_runtime_pin(name) for name in runtime_markers):
+        return True
+    try:
+        for config in (read_raw_config() or {}, load_config() or {}):
+            dashboard = config.get("dashboard")
+            branding = dashboard.get("branding") if isinstance(dashboard, dict) else None
+            if (
+                isinstance(branding, dict)
+                and str(branding.get("product") or "").strip().lower() == "oxaide"
+            ):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _is_loopback_unauthenticated_dashboard() -> bool:
+    """Return whether this process is serving a local-only dashboard."""
+    bound_host = str(getattr(app.state, "bound_host", "") or "").lower()
+    return (
+        not getattr(app.state, "auth_required", False)
+        and bound_host in _LOOPBACK_HOSTS
+    )
+
+
+def _oxaide_readiness_diagnostics() -> Optional[dict[str, Any]]:
+    """Return non-secret local readiness state for an intended Oxaide runtime."""
+    if not _oxaide_runtime_intended():
+        return None
+
+    from hermes_cli.dashboard_auth.routes import is_oxaide_native_auth_configured
+    from hermes_cli.managed_scope import (
+        managed_runtime_terminal_failure,
+        managed_value_configured,
+    )
+
+    failure_codes: list[str] = []
+    if not is_oxaide_native_auth_configured():
+        failure_codes.append("launch_auth_unconfigured")
+    if not managed_value_configured(
+        "HERMES_OXAIDE_USAGE_SIGNING_SECRET", minimum_length=32
+    ):
+        failure_codes.append("turn_authorization_unconfigured")
+    if not (
+        managed_value_configured("HERMES_OXAIDE_MODEL")
+        and managed_value_configured("HERMES_OXAIDE_PROVIDER")
+    ):
+        failure_codes.append("model_provider_unconfigured")
+    if (
+        _is_oxaide_hosted_runtime()
+        or managed_value_configured("HERMES_OXAIDE_MANAGED_POLICY")
+    ) and not _is_loopback_unauthenticated_dashboard() and not os.access(
+        "/run/s6/basedir/bin/halt", os.X_OK
+    ):
+        failure_codes.append("shutdown_command_unavailable")
+    terminal_failure = managed_runtime_terminal_failure()
+    if terminal_failure and terminal_failure not in failure_codes:
+        failure_codes.append(terminal_failure)
+
+    return {
+        "ready": not failure_codes,
+        "failure_codes": failure_codes,
+    }
 
 
 def _oxaide_scheduled_research_enabled() -> bool:
@@ -16375,13 +16449,11 @@ def _resolve_chat_argv(
     # setdefault so an explicit operator value still wins.
     env.setdefault("COLORTERM", "truecolor")
     env["HERMES_TUI_DASHBOARD"] = "1"
+    local_oxaide_development = False
     if _dashboard_branding_settings()["product"] == "oxaide":
         env["HERMES_INTERNAL_TUI_SKIN"] = "oxaide"
-        bound_host = str(getattr(app.state, "bound_host", "") or "").lower()
-        if (
-            not getattr(app.state, "auth_required", False)
-            and bound_host in _LOOPBACK_HOSTS
-        ):
+        local_oxaide_development = _is_loopback_unauthenticated_dashboard()
+        if local_oxaide_development:
             # A loopback-only dashboard intentionally has no Oxaide launch
             # ticket or hosted billing context. Mark only this server-spawned
             # child as local development so managed policy/branding can be
@@ -16414,7 +16486,11 @@ def _resolve_chat_argv(
     # gateway — it runs under the dashboard's own profile. Without the
     # attach URL, gatewayClient spawns its own `tui_gateway.entry`, which
     # inherits the profile HERMES_HOME set above.
-    if profile_dir is None:
+    # The in-process gateway inherits the dashboard process environment, not
+    # this child-only local-development marker. Let loopback Oxaide chat spawn
+    # its own gateway so the bypass stays scoped to this PTY child and can
+    # never weaken a hosted dashboard.
+    if profile_dir is None and not local_oxaide_development:
         if gateway_ws_url := _build_gateway_ws_url(trusted_context=trusted_context):
             env["HERMES_TUI_GATEWAY_URL"] = gateway_ws_url
 

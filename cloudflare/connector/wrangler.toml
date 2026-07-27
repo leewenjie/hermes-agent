@@ -1,0 +1,52 @@
+name = "hermes-cf-connector"
+main = "src/index.ts"
+compatibility_date = "2025-07-23"
+
+[[durable_objects.bindings]]
+name = "GATEWAY_SOCKET"
+class_name = "GatewaySocket"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["GatewaySocket"]
+
+# ---------------------------------------------------------------------------
+# D1 Database — requires D1:edit permission on API token
+# Uncomment after adding D1 permission:
+# [[d1_databases]]
+# binding = "HERMES_DB"
+# database_name = "hermes-db"
+# database_id = "hermes-db"
+# preview_database_id = "hermes-db-preview"
+# ---------------------------------------------------------------------------
+
+[[queues.producers]]
+queue = "inbound-messages"
+binding = "INBOUND_QUEUE"
+
+[[queues.producers]]
+queue = "outbound-actions"
+binding = "OUTBOUND_QUEUE"
+
+[[queues.consumers]]
+queue = "inbound-messages"
+max_batch_size = 10
+max_batch_timeout = 1
+max_retries = 5
+
+[[kv_namespaces]]
+binding = "SESSION_STORE"
+id = "f4c29b4a589f42ebbc8c7704f95474b5"
+preview_id = "f4c29b4a589f42ebbc8c7704f95474b5"
+
+[[r2_buckets]]
+binding = "SKILLS_STORE"
+bucket_name = "hermes-skills"
+preview_bucket_name = "hermes-skills-preview"
+
+[vars]
+AGENT_RUNTIME_URL = "https://hermes-runtime.oxaide.com"
+
+[observability]
+enabled = true
+head_sampling_rate = 0.1

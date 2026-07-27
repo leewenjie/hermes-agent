@@ -1,4 +1,5 @@
 """Unit tests for hermes_cli.managed_scope (resolver + loaders + key helpers)."""
+import threading
 import textwrap
 
 import pytest
@@ -143,3 +144,42 @@ def test_managed_dir_env_scrubbed_by_default():
     import os
 
     assert "HERMES_MANAGED_DIR" not in os.environ
+
+
+def test_managed_value_configured_rejects_blank_short_and_placeholder(monkeypatch):
+    from hermes_cli.managed_scope import managed_value_configured
+
+    monkeypatch.delenv("MANAGED_TEST_SECRET", raising=False)
+    assert managed_value_configured("MANAGED_TEST_SECRET") is False
+    monkeypatch.setenv("MANAGED_TEST_SECRET", "short")
+    assert managed_value_configured("MANAGED_TEST_SECRET", minimum_length=10) is False
+    for value in ("replace-with-secret", "__RePlAcE_WiTh_SECRET__"):
+        monkeypatch.setenv("MANAGED_TEST_SECRET", value)
+        assert managed_value_configured("MANAGED_TEST_SECRET") is False
+    monkeypatch.setenv("MANAGED_TEST_SECRET", "configured-secret")
+    assert managed_value_configured("MANAGED_TEST_SECRET", minimum_length=10) is True
+
+
+def test_terminal_failure_latch_is_thread_safe_stable_and_resettable():
+    from hermes_cli import managed_scope
+
+    managed_scope._reset_managed_runtime_terminal_failure_for_tests()
+    assert managed_scope.managed_runtime_terminal_failure() is None
+
+    threads = [
+        threading.Thread(
+            target=managed_scope.mark_managed_runtime_terminal_failure,
+            args=("terminal_lease_loss",),
+        )
+        for _ in range(8)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert managed_scope.managed_runtime_terminal_failure() == "terminal_lease_loss"
+    managed_scope.mark_managed_runtime_terminal_failure("later_failure")
+    assert managed_scope.managed_runtime_terminal_failure() == "terminal_lease_loss"
+    managed_scope._reset_managed_runtime_terminal_failure_for_tests()
+    assert managed_scope.managed_runtime_terminal_failure() is None

@@ -1691,6 +1691,12 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     httpx_verify = resolve_httpx_verify(ca_bundle=ssl_ca_cert, ssl_verify=ssl_verify_cfg)
     _validate_proxy_env_urls()
     _validate_base_url(client_kwargs.get("base_url"))
+    if agent.provider == "azure-foundry":
+        azure_api_key = client_kwargs.get("api_key")
+        if isinstance(azure_api_key, str) and azure_api_key:
+            default_headers = dict(client_kwargs.get("default_headers") or {})
+            default_headers.setdefault("api-key", azure_api_key)
+            client_kwargs["default_headers"] = default_headers
     if agent.provider == "copilot-acp" or str(client_kwargs.get("base_url", "")).startswith("acp://copilot"):
         from agent.copilot_acp_client import CopilotACPClient
 

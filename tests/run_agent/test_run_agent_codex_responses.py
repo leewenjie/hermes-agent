@@ -77,6 +77,26 @@ def _build_copilot_agent(monkeypatch, *, model="gpt-5.4"):
     return agent
 
 
+def _build_azure_agent(monkeypatch):
+    _patch_agent_bootstrap(monkeypatch)
+
+    agent = run_agent.AIAgent(
+        model="gpt-5.4-mini",
+        provider="azure-foundry",
+        api_mode="codex_responses",
+        base_url="https://example.openai.azure.com/openai/v1",
+        api_key="azure-token",
+        quiet_mode=True,
+        max_iterations=4,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+    agent._cleanup_task_resources = lambda task_id: None
+    agent._persist_session = lambda messages, history=None: None
+    agent._save_trajectory = lambda messages, user_message, completed: None
+    return agent
+
+
 def _codex_message_response(text: str):
     return SimpleNamespace(
         output=[
@@ -365,6 +385,31 @@ def test_build_api_kwargs_codex(monkeypatch):
     assert kwargs["timeout"] > 0
     assert "max_tokens" not in kwargs
     assert "extra_body" not in kwargs
+
+
+def test_build_api_kwargs_codex_consumes_ephemeral_output_budget(monkeypatch):
+    agent = _build_azure_agent(monkeypatch)
+    agent.max_tokens = 4096
+    agent._ephemeral_max_output_tokens = 8192
+
+    first = agent._build_api_kwargs([{"role": "user", "content": "Continue"}])
+    second = agent._build_api_kwargs([{"role": "user", "content": "Continue"}])
+
+    assert first["max_output_tokens"] == 8192
+    assert second["max_output_tokens"] == 4096
+    assert agent._ephemeral_max_output_tokens is None
+
+
+def test_build_api_kwargs_codex_clamps_ephemeral_output_budget(monkeypatch):
+    agent = _build_azure_agent(monkeypatch)
+    agent.max_tokens = 4096
+    agent.hard_max_output_tokens = 6144
+    agent._ephemeral_max_output_tokens = 8192
+
+    kwargs = agent._build_api_kwargs([{"role": "user", "content": "Continue"}])
+
+    assert kwargs["max_output_tokens"] == 6144
+    assert agent._ephemeral_max_output_tokens is None
 
 
 def test_build_api_kwargs_codex_clamps_minimal_effort(monkeypatch):
@@ -807,6 +852,115 @@ def test_run_codex_stream_ignores_completed_response_with_null_output(monkeypatc
     assert response.status == "completed"
     assert response.output == [output_item]
     assert response.usage.total_tokens == 11
+
+
+def test_consume_codex_stream_reconciles_stale_done_status_under_completed_terminal():
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    final_item = SimpleNamespace(
+        type="message",
+        phase="final_answer",
+        status="in_progress",
+        content=[SimpleNamespace(type="output_text", text="REAL_FINAL")],
+    )
+    stale_reasoning = SimpleNamespace(
+        type="reasoning",
+        status="in_progress",
+        summary=[],
+    )
+
+    response = _consume_codex_event_stream(
+        _FakeCreateStream([
+            SimpleNamespace(type="response.output_item.done", item=stale_reasoning),
+            SimpleNamespace(type="response.output_item.done", item=final_item),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(status="completed"),
+            ),
+        ]),
+        model="gpt-5.4-mini",
+    )
+
+    assert response.status == "completed"
+    assert [item.status for item in response.output] == ["completed", "completed"]
+
+
+def test_consume_codex_stream_completed_event_overrides_stale_embedded_status():
+    """The SSE terminal type is authoritative over stale Azure response metadata."""
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    item = SimpleNamespace(
+        type="message",
+        phase="final_answer",
+        status="in_progress",
+        content=[SimpleNamespace(type="output_text", text="REAL_FINAL")],
+    )
+    response = _consume_codex_event_stream(
+        _FakeCreateStream([
+            SimpleNamespace(type="response.output_item.done", item=item),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(status="incomplete"),
+            ),
+        ]),
+        model="gpt-5.4-mini",
+    )
+
+    assert response.status == "completed"
+    assert item.status == "completed"
+
+
+@pytest.mark.parametrize("terminal_type, terminal_status", [
+    ("response.incomplete", "incomplete"),
+    ("response.failed", "failed"),
+])
+def test_consume_codex_stream_does_not_reconcile_noncompleted_terminal(
+    terminal_type, terminal_status
+):
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    item = SimpleNamespace(
+        type="message",
+        phase="final_answer",
+        status="in_progress",
+        content=[SimpleNamespace(type="output_text", text="PARTIAL")],
+    )
+    response = _consume_codex_event_stream(
+        _FakeCreateStream([
+            SimpleNamespace(type="response.output_item.done", item=item),
+            SimpleNamespace(
+                type=terminal_type,
+                response=SimpleNamespace(status=terminal_status),
+            ),
+        ]),
+        model="gpt-5.4-mini",
+    )
+
+    assert response.status == terminal_status
+    assert item.status == "in_progress"
+
+
+def test_consume_codex_stream_does_not_reconcile_commentary_only_output():
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    item = SimpleNamespace(
+        type="message",
+        phase="commentary",
+        status="in_progress",
+        content=[SimpleNamespace(type="output_text", text="Still working")],
+    )
+    _consume_codex_event_stream(
+        _FakeCreateStream([
+            SimpleNamespace(type="response.output_item.done", item=item),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(status="completed"),
+            ),
+        ]),
+        model="gpt-5.4-mini",
+    )
+
+    assert item.status == "in_progress"
 
 
 def test_run_conversation_codex_plain_text(monkeypatch):
@@ -1523,7 +1677,12 @@ def test_run_conversation_codex_continues_after_incomplete_interim_message(monke
         _codex_tool_call_response(),
         _codex_message_response("Architecture summary complete."),
     ]
-    monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: responses.pop(0))
+    requests = []
+    monkeypatch.setattr(
+        agent,
+        "_interruptible_api_call",
+        lambda api_kwargs: requests.append(api_kwargs) or responses.pop(0),
+    )
 
     def _fake_execute_tool_calls(assistant_message, messages, effective_task_id, *_args):
         for call in assistant_message.tool_calls:
@@ -1548,6 +1707,7 @@ def test_run_conversation_codex_continues_after_incomplete_interim_message(monke
         for msg in result["messages"]
     )
     assert any(msg.get("role") == "tool" and msg.get("tool_call_id") == "call_1" for msg in result["messages"])
+    assert "max_output_tokens" not in requests[1]
 
 
 def test_run_conversation_codex_continues_after_max_output_incomplete(monkeypatch):
@@ -1557,24 +1717,62 @@ def test_run_conversation_codex_continues_after_max_output_incomplete(monkeypatc
     which returns the user-facing "Response truncated due to output length
     limit" warning and stops the gateway turn.
     """
-    agent = _build_agent(monkeypatch)
+    agent = _build_azure_agent(monkeypatch)
     responses = [
         _codex_max_output_incomplete_response("Partial final answer"),
-        _codex_message_response(" after continuation."),
+        _codex_max_output_incomplete_response(" after first continuation"),
+        _codex_max_output_incomplete_response(" after second continuation"),
+        _codex_message_response(" after third continuation."),
     ]
-    monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: responses.pop(0))
+    requests = []
+    monkeypatch.setattr(
+        agent,
+        "_interruptible_api_call",
+        lambda api_kwargs: requests.append(api_kwargs) or responses.pop(0),
+    )
 
     result = agent.run_conversation("write a long final answer")
 
     assert result["completed"] is True
-    assert result["final_response"] == "after continuation."
+    assert result["final_response"] == "after third continuation."
     assert "Response truncated due to output length limit" not in str(result)
+    assert "max_output_tokens" not in requests[0]
+    assert requests[1]["max_output_tokens"] == 8192
+    assert requests[2]["max_output_tokens"] == 16384
+    assert requests[3]["max_output_tokens"] == 32768
     assert any(
         msg.get("role") == "assistant"
         and msg.get("finish_reason") == "incomplete"
         and "Partial final answer" in (msg.get("content") or "")
         for msg in result["messages"]
     )
+
+
+def test_run_conversation_codex_fails_after_three_incomplete_continuations(monkeypatch):
+    agent = _build_azure_agent(monkeypatch)
+    responses = [
+        _codex_max_output_incomplete_response(f"partial {index}")
+        for index in range(4)
+    ]
+    requests = []
+    monkeypatch.setattr(
+        agent,
+        "_interruptible_api_call",
+        lambda api_kwargs: requests.append(api_kwargs) or responses.pop(0),
+    )
+
+    result = agent.run_conversation("write an answer that never completes")
+
+    assert result["completed"] is False
+    assert result["partial"] is True
+    assert result["error"] == "Codex response remained incomplete after 3 continuation attempts"
+    assert len(requests) == 4
+    assert "max_output_tokens" not in requests[0]
+    assert [request["max_output_tokens"] for request in requests[1:]] == [
+        8192,
+        16384,
+        32768,
+    ]
 
 
 def test_run_conversation_compresses_mid_turn_before_output_budget_exhaustion(monkeypatch):

@@ -25,13 +25,27 @@ export function usePlugins() {
 
   // Fetch manifests on mount.
   useEffect(() => {
+    const controller = new AbortController();
+    // Plugin discovery is optional and must never hold the built-in chat UI
+    // hostage. A plugin scanner can be slow or unavailable in local/container
+    // development, so fail open after the same two-second budget used below
+    // for plugin bundle registration.
+    const timeout = window.setTimeout(() => controller.abort(), 2000);
     api
-      .getPlugins()
+      .getPlugins(controller.signal)
       .then((list) => {
+        window.clearTimeout(timeout);
         setManifests(list);
         if (list.length === 0) setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch(() => {
+        window.clearTimeout(timeout);
+        setLoading(false);
+      });
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
   }, []);
 
   // Load plugin assets when manifests arrive.

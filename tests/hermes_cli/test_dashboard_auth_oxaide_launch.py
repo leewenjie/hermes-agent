@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from hermes_cli import web_server
 from hermes_cli import hosted_runtime_bridge
+from hermes_cli import managed_scope
 from hermes_cli.dashboard_auth import clear_providers
 from hermes_cli.dashboard_auth.ws_tickets import _reset_for_tests, consume_ticket
 from hermes_cli.dashboard_auth.routes import (
@@ -82,7 +83,19 @@ def gated_app(monkeypatch):
     monkeypatch.setenv("HERMES_OXAIDE_DEMO_AUTH_SECRET", secret)
     monkeypatch.setenv("HERMES_OXAIDE_WORKSPACE_ID", "workspace-1")
     monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", "runtimekey1234567890abcd")
+    monkeypatch.setenv("HERMES_OXAIDE_USAGE_SIGNING_SECRET", "test-usage-signing-secret-at-least-32-bytes")
+    monkeypatch.setenv("HERMES_OXAIDE_MODEL", "managed-model")
+    monkeypatch.setenv("HERMES_OXAIDE_PROVIDER", "managed-provider")
+    monkeypatch.setenv("HERMES_OXAIDE_MANAGED_POLICY", "true")
     monkeypatch.setenv("HERMES_HOSTED_RUNTIME_SHARED_SECRET", "test-hosted-runtime-secret-at-least-32-bytes")
+    real_os_access = web_server.os.access
+    monkeypatch.setattr(
+        web_server.os,
+        "access",
+        lambda path, mode: True
+        if path == "/run/s6/basedir/bin/halt"
+        else real_os_access(path, mode),
+    )
     monkeypatch.setattr(
         hosted_runtime_bridge,
         "load_config",
@@ -99,11 +112,13 @@ def gated_app(monkeypatch):
     web_server.app.state.bound_host = "agents.oxaide.test"
     web_server.app.state.bound_port = 443
     web_server.app.state.auth_required = True
+    managed_scope._reset_managed_runtime_terminal_failure_for_tests()
     client = TestClient(web_server.app, base_url="https://agents.oxaide.test")
     yield client, secret
     clear_providers()
     _reset_for_tests()
     _reset_oxaide_launch_tokens_for_tests()
+    managed_scope._reset_managed_runtime_terminal_failure_for_tests()
     for key, value in previous.items():
         setattr(web_server.app.state, key, value)
 
@@ -226,7 +241,79 @@ def test_public_status_exposes_only_nonsecret_tenant_identity(gated_app):
         b"oxaide-workspace-fingerprint:v1:workspace-1",
         hashlib.sha256,
     ).hexdigest()
+    assert payload["oxaide_readiness"] == {"ready": True, "failure_codes": []}
     assert "workspace-1" not in json.dumps(payload)
+    assert _secret not in json.dumps(payload)
+
+
+@pytest.mark.parametrize(
+    ("env_name", "env_value", "expected_code"),
+    [
+        ("HERMES_OXAIDE_DEMO_AUTH_SECRET", "", "launch_auth_unconfigured"),
+        (
+            "HERMES_OXAIDE_USAGE_SIGNING_SECRET",
+            "__replace_with_usage_secret__",
+            "turn_authorization_unconfigured",
+        ),
+        ("HERMES_OXAIDE_MODEL", "", "model_provider_unconfigured"),
+    ],
+)
+def test_oxaide_status_fails_closed_for_static_readiness_errors(
+    gated_app, monkeypatch, env_name, env_value, expected_code
+):
+    client, secret = gated_app
+    monkeypatch.setenv(env_name, env_value)
+
+    response = client.get("/api/status")
+
+    assert response.status_code == 503
+    assert response.json()["oxaide_readiness"] == {
+        "ready": False,
+        "failure_codes": [expected_code],
+    }
+    serialized = response.text
+    assert "workspace-1" not in serialized
+    assert secret not in serialized
+
+
+def test_oxaide_status_requires_runtime_shutdown_command(gated_app, monkeypatch):
+    client, _secret = gated_app
+    monkeypatch.setattr(web_server.os, "access", lambda _path, _mode: False)
+
+    response = client.get("/api/status")
+
+    assert response.status_code == 503
+    assert response.json()["oxaide_readiness"]["failure_codes"] == [
+        "shutdown_command_unavailable"
+    ]
+
+
+def test_local_oxaide_status_does_not_require_container_shutdown(gated_app, monkeypatch):
+    client, _secret = gated_app
+    monkeypatch.setattr(web_server.os, "access", lambda _path, _mode: False)
+    monkeypatch.setattr(web_server.app.state, "bound_host", "127.0.0.1")
+    monkeypatch.setattr(web_server.app.state, "auth_required", False)
+
+    response = client.get("/api/status", headers={"host": "127.0.0.1"})
+
+    assert response.status_code == 200
+    assert response.json()["oxaide_readiness"] == {
+        "ready": True,
+        "failure_codes": [],
+    }
+
+
+def test_terminal_lease_loss_immediately_marks_oxaide_status_unready(gated_app):
+    client, _secret = gated_app
+    managed_scope.mark_managed_runtime_terminal_failure("terminal_lease_loss")
+
+    response = client.get("/api/status")
+
+    assert response.status_code == 503
+    assert response.json()["oxaide_readiness"] == {
+        "ready": False,
+        "failure_codes": ["terminal_lease_loss"],
+    }
 
 
 def test_oxaide_tenant_login_redirects_to_single_customer_login(gated_app):
