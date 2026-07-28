@@ -715,6 +715,7 @@ _OXAIDE_RESEARCH_STATIC_API_METHODS = frozenset({
     ("GET", "/api/auth/providers"),
     ("GET", "/api/auth/me"),
     ("POST", "/api/auth/ws-ticket"),
+    ("GET", "/api/ready"),
     ("GET", "/api/status"),
     ("GET", "/api/events"),
     ("GET", "/api/pty"),

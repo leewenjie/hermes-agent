@@ -246,6 +246,15 @@ def test_public_status_exposes_only_nonsecret_tenant_identity(gated_app):
     assert _secret not in json.dumps(payload)
 
 
+def test_public_ready_bypasses_managed_tenant_api_boundary(gated_app):
+    client, _secret = gated_app
+
+    response = client.get("/api/ready")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+
+
 @pytest.mark.parametrize(
     ("env_name", "env_value", "expected_code"),
     [
