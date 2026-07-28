@@ -116,6 +116,24 @@ class TestProjectPluginsEnvGate:
         assert evil is not None
         assert evil["source"] == "project"
 
+    def test_safe_mode_excludes_user_and_project_plugin_trees(
+        self, project_plugin, tmp_path, monkeypatch
+    ):
+        _write_plugin_manifest(
+            tmp_path / "home" / "plugins",
+            "user-plugin",
+            {"name": "user-plugin", "entry": "dist/index.js"},
+        )
+        monkeypatch.setenv("HERMES_SAFE_MODE", "1")
+        monkeypatch.setenv("HERMES_ENABLE_PROJECT_PLUGINS", "1")
+
+        plugins = web_server._get_dashboard_plugins(force_rescan=True)
+
+        names = {p["name"] for p in plugins}
+        assert "evil" not in names
+        assert "user-plugin" not in names
+        assert all(p["source"] == "bundled" for p in plugins)
+
 
 # ---------------------------------------------------------------------------
 # Layer 2 — _safe_plugin_api_relpath rejects path-traversal payloads.
@@ -287,6 +305,16 @@ class TestMountApiRoutesRefusesUntrusted:
         called_path = Path(spec.call_args.args[1])
         assert called_path.name == "api.py"
         assert called_path.is_absolute()
+
+    def test_safe_mode_refuses_cached_user_api(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_SAFE_MODE", "1")
+        plugin = self._payload_plugin(tmp_path, source="user")
+        web_server._dashboard_plugins_cache = [plugin]
+
+        with patch("importlib.util.spec_from_file_location") as spec:
+            web_server._mount_plugin_api_routes()
+
+        assert spec.call_count == 0
 
     def test_traversal_api_caught_at_mount_time(self, tmp_path):
         """Defence-in-depth: if discovery is bypassed (e.g. cache
