@@ -3022,6 +3022,17 @@ def _collect_profile_gateway_topology() -> Dict[str, Any]:
     return {"profiles": profile_names, "gateway_mode": mode, "gateways": gateways}
 
 
+@app.get("/api/ready")
+async def get_ready():
+    """Return once the ASGI application is accepting requests.
+
+    Container startup must not probe ``/api/status``: that endpoint performs
+    restored-state and gateway enumeration, which can exceed a short probe
+    timeout and create a self-amplifying request backlog during cold starts.
+    """
+    return {"ok": True}
+
+
 @app.get("/api/status")
 async def get_status(profile: Optional[str] = None):
     status_scope = None
