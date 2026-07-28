@@ -330,6 +330,14 @@ def _apply_external_secret_sources(home_path: Path) -> None:
         return
     _APPLIED_HOMES.add(home_key)
 
+    # Managed hosted runtimes receive their credentials from the trusted
+    # control plane. Restored user configuration may still reference a local
+    # vault binary or service that is unavailable in the isolated runtime;
+    # attempting those synchronous fetches can consume the entire startup
+    # readiness budget before the server binds its port.
+    if os.getenv("HERMES_DISABLE_EXTERNAL_SECRET_SOURCES") == "1":
+        return
+
     try:
         cfg = _load_secrets_config(home_path)
     except Exception:  # noqa: BLE001 — config errors must not block startup
