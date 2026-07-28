@@ -27,6 +27,28 @@ def _args(**kw):
 
 
 class TestUnifiedDashboardRouting:
+    def test_hosted_safe_mode_skips_bundled_skill_sync(self, main_mod, monkeypatch):
+        monkeypatch.setenv("HERMES_SAFE_MODE", "1")
+        monkeypatch.setenv("HERMES_OXAIDE_CLOUDFLARE_CANARY", "1")
+        monkeypatch.setattr(
+            "tools.skills_sync.sync_skills",
+            lambda **_kwargs: pytest.fail("hosted startup must not sync skills"),
+        )
+
+        main_mod._sync_bundled_skills_quietly()
+
+    def test_non_hosted_safe_mode_still_syncs_bundled_skills(self, main_mod, monkeypatch):
+        monkeypatch.setenv("HERMES_SAFE_MODE", "1")
+        monkeypatch.delenv("HERMES_OXAIDE_CLOUDFLARE_CANARY", raising=False)
+        calls = []
+        monkeypatch.setattr(
+            "tools.skills_sync.sync_skills", lambda **kwargs: calls.append(kwargs),
+        )
+
+        main_mod._sync_bundled_skills_quietly()
+
+        assert calls == [{"quiet": True}]
+
     def test_profile_launch_attaches_to_running_dashboard(self, main_mod, monkeypatch):
         monkeypatch.setattr(
             "hermes_cli.profiles.get_active_profile_name", lambda: "worker_x"
