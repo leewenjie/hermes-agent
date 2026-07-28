@@ -128,6 +128,31 @@ def test_apply_external_secret_sources_noop_when_disabled(tmp_path, monkeypatch)
     assert env_loader.get_secret_source("ANTHROPIC_API_KEY") is None
 
 
+def test_apply_external_secret_sources_skips_vaults_in_managed_runtime(tmp_path, monkeypatch):
+    """Control-plane credentials must not trigger restored local vault fetches."""
+
+    monkeypatch.setenv("HERMES_DISABLE_EXTERNAL_SECRET_SOURCES", "1")
+    monkeypatch.setenv("AZURE_FOUNDRY_API_KEY", "control-plane-key")
+    (tmp_path / "config.yaml").write_text(
+        "secrets:\n"
+        "  bitwarden:\n"
+        "    enabled: true\n"
+        "    project_id: restored-project\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        env_loader,
+        "_load_secrets_config",
+        lambda _home: pytest.fail("managed runtime parsed restored vault config"),
+    )
+
+    loaded = env_loader.load_hermes_dotenv(hermes_home=tmp_path)
+
+    assert loaded == []
+    assert env_loader.os.environ["AZURE_FOUNDRY_API_KEY"] == "control-plane-key"
+    assert env_loader.get_secret_source("ANTHROPIC_API_KEY") is None
+
+
 def test_apply_external_secret_sources_dedupes_within_process(tmp_path, monkeypatch):
     """``load_hermes_dotenv()`` is called at module-import time from several
     hot modules (cli.py, hermes_cli/main.py, run_agent.py, ...).  The
