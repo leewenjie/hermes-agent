@@ -2195,6 +2195,11 @@ def _sync_bundled_skills_quietly() -> None:
     dependency. Hermes still functions without them; the user just sees an
     empty skills library.
     """
+    if (
+        os.environ.get("HERMES_SAFE_MODE") == "1"
+        and os.environ.get("HERMES_OXAIDE_CLOUDFLARE_CANARY") == "1"
+    ):
+        return
     try:
         from tools.skills_sync import sync_skills
 
