@@ -18137,10 +18137,11 @@ def _discover_dashboard_plugins() -> list:
     from hermes_cli.plugins import get_bundled_plugins_dir
     bundled_root = get_bundled_plugins_dir()
     search_dirs = [
-        (get_hermes_home() / "plugins", "user"),
         (bundled_root / "memory", "bundled"),
         (bundled_root, "bundled"),
     ]
+    if not env_var_enabled("HERMES_SAFE_MODE"):
+        search_dirs.insert(0, (get_hermes_home() / "plugins", "user"))
     # GHSA-5qr3-c538-wm9j (#29156): the previous ``os.environ.get(...)``
     # check treated *any* non-empty string as truthy, so ``=0``, ``=false``,
     # and ``=no`` — all of which the agent loader and operators correctly
@@ -18150,7 +18151,10 @@ def _discover_dashboard_plugins() -> list:
     # opt-in into a sticky always-on switch.  Use the shared truthy
     # semantics (``1`` / ``true`` / ``yes`` / ``on``) so the gate matches
     # ``hermes_cli/plugins.py`` and the documented user contract.
-    if env_var_enabled("HERMES_ENABLE_PROJECT_PLUGINS"):
+    if (
+        not env_var_enabled("HERMES_SAFE_MODE")
+        and env_var_enabled("HERMES_ENABLE_PROJECT_PLUGINS")
+    ):
         search_dirs.append((Path.cwd() / ".hermes" / "plugins", "project"))
 
     for plugins_root, source in search_dirs:
@@ -18676,6 +18680,12 @@ def _mount_plugin_api_routes():
         if not api_file_name:
             continue
         plugin_name = plugin.get("name", "")
+        if env_var_enabled("HERMES_SAFE_MODE") and plugin.get("source") != "bundled":
+            _log.info(
+                "Plugin %s: skipping API mount (safe mode permits bundled plugins only)",
+                plugin_name,
+            )
+            continue
         # Gate: user plugins must be in plugins.enabled and not in
         # plugins.disabled before we import their Python code.
         # Bundled plugins are trusted (they ship with the release) but
