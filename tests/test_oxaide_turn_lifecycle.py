@@ -522,6 +522,10 @@ def test_lease_loss_interrupts_physical_agent_work_and_schedules_one_hard_stop(
 
 def test_runtime_hard_stop_terminates_s6_service_tree(monkeypatch):
     calls = []
+    monkeypatch.setenv(
+        "HERMES_MANAGED_RUNTIME_SHUTDOWN_COMMAND",
+        "/opt/runtime/bin/terminate",
+    )
     monkeypatch.setattr(
         server.subprocess,
         "run",
@@ -538,7 +542,7 @@ def test_runtime_hard_stop_terminates_s6_service_tree(monkeypatch):
 
     assert calls == [
         (
-            ["/run/s6/basedir/bin/halt"],
+            ["/opt/runtime/bin/terminate"],
             {"check": True, "timeout": 10},
         )
     ]

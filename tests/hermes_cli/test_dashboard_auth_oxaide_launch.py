@@ -88,6 +88,7 @@ def gated_app(monkeypatch):
     monkeypatch.setenv("HERMES_OXAIDE_PROVIDER", "managed-provider")
     monkeypatch.setenv("HERMES_OXAIDE_MANAGED_POLICY", "true")
     monkeypatch.setenv("HERMES_HOSTED_RUNTIME_SHARED_SECRET", "test-hosted-runtime-secret-at-least-32-bytes")
+    monkeypatch.delenv("HERMES_MANAGED_RUNTIME_SHUTDOWN_COMMAND", raising=False)
     real_os_access = web_server.os.access
     monkeypatch.setattr(
         web_server.os,
@@ -295,6 +296,25 @@ def test_oxaide_status_requires_runtime_shutdown_command(gated_app, monkeypatch)
     assert response.json()["oxaide_readiness"]["failure_codes"] == [
         "shutdown_command_unavailable"
     ]
+
+
+def test_oxaide_status_accepts_deployment_shutdown_command(gated_app, monkeypatch):
+    client, _secret = gated_app
+    command = "/opt/runtime/bin/terminate"
+    monkeypatch.setenv("HERMES_MANAGED_RUNTIME_SHUTDOWN_COMMAND", command)
+    monkeypatch.setattr(
+        web_server.os,
+        "access",
+        lambda path, mode: path == command and mode == web_server.os.X_OK,
+    )
+
+    response = client.get("/api/status")
+
+    assert response.status_code == 200
+    assert response.json()["oxaide_readiness"] == {
+        "ready": True,
+        "failure_codes": [],
+    }
 
 
 def test_local_oxaide_status_does_not_require_container_shutdown(gated_app, monkeypatch):
