@@ -58,3 +58,25 @@ def test_skill_uses_modern_sections_in_order():
     ]
     positions = [content.index(section) for section in sections]
     assert positions == sorted(positions)
+
+
+def test_skill_covers_long_short_equity_momentum_contract():
+    _, content = _frontmatter()
+    lowered = content.lower()
+
+    for required in (
+        "point-in-time",
+        "12-1",
+        "skip-month",
+        "sector-neutral",
+        "beta neutrality",
+        "borrow",
+        "liquidity",
+        "crowding",
+        "gross and net",
+        "turnover",
+        "scenario",
+        "survivorship",
+        "unavailable data",
+    ):
+        assert required in lowered

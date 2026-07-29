@@ -24,6 +24,7 @@ market signal into a recommendation without stating the evidence and limits.
 - A user wants a market brief, asset comparison, thesis review, or watchlist.
 - A question combines current facts with historical performance or risk.
 - A company needs valuation context from multiples, cash flows, or peers.
+- A user wants an auditable long/short equity momentum screen, methodology, or portfolio illustration.
 - A crypto or perpetuals question needs funding, liquidity, candles, or trade review.
 - A research result must be reproducible as JSON, Markdown, SVG, or an Excel model.
 
@@ -68,6 +69,7 @@ uses Yahoo adjusted-close data as a proxy source, and writes an evidence pack.
 | --- | --- | --- |
 | S&P/ETF return distribution, drawdowns, tails | `market-return-analysis` | JSON, Markdown, SVG |
 | Current quote, OHLCV, ticker search, side-by-side | `stocks` | JSON |
+| Long/short equity momentum research | `stocks` + public primary sources | Screen or methodology memo |
 | Peer valuation and operating metrics | `comps-analysis` + `excel-author` | Auditable `.xlsx` |
 | Intrinsic-value scenarios and sensitivity | `dcf-model` + `excel-author` | Formula-driven `.xlsx` |
 | Crypto candles, funding, order book, trade review | optional `hyperliquid` | JSON or review memo |
@@ -100,7 +102,60 @@ at least one counter-signal. For valuation, separate historical inputs,
 assumptions, and formulas; show Bear/Base/Bull cases and sensitivity rather
 than a single point estimate.
 
-### 4. Review quality and risk
+### 4. Research long/short equity momentum
+
+Treat momentum as a cross-sectional research method, not a standalone trade
+signal. First classify the request as a current screen, historical study, or
+portfolio-construction illustration and define:
+
+- the as-of date and information cutoff;
+- region, exchanges, security types, currency, benchmark, and rebalance schedule;
+- the point-in-time eligible-universe source, IPO seasoning, minimum history,
+  liquidity, price, and market-cap rules;
+- adjusted-price and corporate-action treatment; and
+- the holding period, long and short quantiles, and comparison basis.
+
+Never substitute today's index members for historical constituents without
+disclosure. If point-in-time membership, delistings, or suspended securities
+are unavailable, label the work a **current-universe retrospective
+illustration**, not an unbiased backtest, and list the unavailable data.
+
+Use 12-1 momentum as the primary signal unless the research contract says
+otherwise: rank each security by adjusted return from 12 months ago through
+one month ago. The skip-month convention excludes the most recent month to
+reduce short-term reversal contamination. Report cross-sectional percentiles
+or robust z-scores, plus 6-1 and 3-1 rank stability when data permits. Flag
+short histories, stale prices, missing observations, and incomparable windows.
+
+For a long/short construction illustration:
+
+1. Winsorize or robustly scale the signal, then neutralize within sector or
+  industry. Sector-neutral is not the same as market-neutral.
+2. Estimate beta from lagged data only, constrain portfolio beta near zero,
+  and report residual sector, industry, size, and beta exposures.
+3. State gross and net exposure, name and sector caps, rebalance buffers,
+  turnover, and liquidity-aware position limits.
+4. On the short side, verify locate and borrow availability, borrow fees and
+  recall risk, short interest or days to cover, ADV participation, days to
+  liquidate, crowding or ownership proxies, and hard-to-borrow exclusions.
+  Mark unavailable borrow or crowding evidence as missing; never infer it
+  from price history.
+5. Model commissions, spread, market impact, financing, borrow, and turnover
+  costs. Keep the out-of-sample boundary explicit and do not optimize on the
+  same observations used to claim performance.
+
+Separate statistical momentum evidence from fundamental confirmation. For
+candidate names or cohorts, review filings, earnings, guidance, regulation,
+capital allocation, and dated catalysts; show counter-evidence and conditions
+that would invalidate the interpretation.
+
+Report long, short, and long-minus-short contribution; volatility, drawdown,
+tail loss, concentration, turnover, and factor exposures. Include momentum
+crash, sharp reversal, sector rotation, short squeeze, borrow recall, and
+liquidity-stress scenarios, with sensitivity to horizon, universe, rebalance
+date, neutralization, and cost assumptions.
+
+### 5. Review quality and risk
 
 Before writing conclusions, check symbol and benchmark identity, timezone,
 currency, missing observations, look-ahead bias, survivorship bias, fees,
@@ -108,7 +163,7 @@ slippage, funding, leverage, and data-source reliability. A backtest or
 historical relationship is not proof of future performance. Treat prediction-
 market prices as probabilities under market conditions, not certainties.
 
-### 5. Deliver the memo
+### 6. Deliver the memo
 
 Use this order:
 
@@ -128,6 +183,9 @@ Use this order:
 - Do not treat annualized returns, Sharpe-like statistics, or DCF outputs as forecasts.
 - Do not use web search as the primary source when a configured structured source exists.
 - Do not run a backtest without explicit costs, execution assumptions, and an out-of-sample boundary.
+- Do not call a current-universe retrospective screen a point-in-time backtest.
+- Do not describe sector neutrality as beta neutrality or market neutrality.
+- Do not fabricate borrow, liquidity, crowding, constituent, or delisting data when unavailable.
 - Do not expose account data or credentials in a memo or saved artifact.
 
 ## Verification
@@ -136,5 +194,8 @@ Use this order:
 - Confirm dates, symbols, units, and observation counts are internally consistent.
 - Confirm derived metrics can be regenerated from saved raw inputs.
 - Confirm model workbooks recalculate with zero formula errors and contain source comments.
+- Confirm momentum work states the 12-1 skip-month signal, point-in-time universe limits,
+  sector and beta neutralization, gross and net exposure, implementation costs,
+  turnover, borrow, liquidity, crowding, and adverse scenarios.
 - Confirm the memo includes counter-evidence, limitations, and no personalized trade instruction.
 - Run the relevant skill tests through `scripts/run_tests.sh` before delivery.
