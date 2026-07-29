@@ -11,6 +11,10 @@ export function managedFilePreviewPath(search: string): string | null {
   return path || null;
 }
 
+export function managedFilePreviewUrl(path: string): string {
+  return `/files?${new URLSearchParams({ preview: path }).toString()}`;
+}
+
 export function managedFilePreviewKind(
   mimeType: string | null | undefined,
   name: string,

@@ -22,6 +22,7 @@ import { useToast } from "@nous-research/ui/hooks/use-toast";
 import { ScheduleBuilder } from "@/components/ScheduleBuilder";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { api, type ResearchSchedule, type ResearchScheduleOccurrence } from "@/lib/api";
+import { managedFilePreviewUrl } from "@/lib/file-preview";
 import {
   buildScheduleString,
   DEFAULT_SCHEDULE_STATE,
@@ -268,7 +269,7 @@ export default function ScheduledResearchPage() {
             <Input
               id="research-schedule-name"
               maxLength={120}
-              placeholder="Weekly BTC liquidity review"
+              placeholder="Weekly SPY and QQQ risk review"
               value={form.name}
               onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
             />
@@ -281,7 +282,7 @@ export default function ScheduledResearchPage() {
               rows={6}
               maxLength={12000}
               className="w-full resize-y border border-border bg-background/40 px-3 py-2 text-sm leading-6 shadow-sm placeholder:text-muted-foreground focus-visible:border-foreground/25 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground/30"
-              placeholder="Review BTC spot and perpetual liquidity, funding, basis, major flows, and any evidence that changes the current thesis. Cite sources and flag missing evidence."
+              placeholder="Compare SPY and QQQ breadth, valuation, earnings revisions, rates sensitivity, and upcoming catalysts. Cite sources, explain what changed, and flag evidence that weakens the thesis."
               value={form.prompt}
               onChange={(event) => setForm((current) => ({ ...current, prompt: event.target.value }))}
             />
@@ -393,7 +394,7 @@ export default function ScheduledResearchPage() {
                       outlined
                       size="sm"
                       prefix={<FileText />}
-                      onClick={() => window.location.assign(`/files?path=${encodeURIComponent(occurrence.result_artifact_ref || "")}`)}
+                      onClick={() => window.location.assign(managedFilePreviewUrl(occurrence.result_artifact_ref || ""))}
                     >
                       Open result
                     </Button>
