@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   managedFilePreviewKind,
   managedFilePreviewPath,
+  managedFilePreviewUrl,
 } from "./file-preview";
 import { managedFileDownloadUrl } from "./api";
 
@@ -17,6 +18,17 @@ describe("managedFilePreviewPath", () => {
 
   it("returns null when no preview was requested", () => {
     expect(managedFilePreviewPath("?path=%2Fopt%2Fdata")).toBeNull();
+  });
+
+  it("builds a Files deep link that opens the requested preview", () => {
+    const url = managedFilePreviewUrl("/research-results/SPY weekly review.md");
+
+    expect(url).toBe(
+      "/files?preview=%2Fresearch-results%2FSPY+weekly+review.md",
+    );
+    expect(managedFilePreviewPath(new URL(url, "https://example.com").search)).toBe(
+      "/research-results/SPY weekly review.md",
+    );
   });
 });
 
