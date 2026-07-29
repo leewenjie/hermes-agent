@@ -132,6 +132,45 @@ describe("getWsTicket", () => {
       );
     },
   );
+
+  it("starts only one login redirect for concurrent hosted-session failures", async () => {
+    const assign = vi.fn();
+    const setItem = vi.fn();
+    vi.stubGlobal("window", {
+      __HERMES_AUTH_REQUIRED__: true,
+      location: {
+        assign,
+        pathname: "/sessions/research-123",
+        search: "?tab=messages",
+      },
+    });
+    vi.stubGlobal("sessionStorage", { setItem });
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      new Response(
+        JSON.stringify({
+          error: "session_expired",
+          detail: "Unauthorized",
+          login_url: "/login",
+        }),
+        {
+          headers: { "Content-Type": "application/json" },
+          status: 401,
+        },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    void Promise.all([getWsTicket(), api.getStatus()]);
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(assign).toHaveBeenCalledTimes(1));
+    expect(assign).toHaveBeenCalledWith("/login");
+    expect(setItem).toHaveBeenCalledTimes(1);
+    expect(setItem).toHaveBeenCalledWith(
+      "hermes.lastLocation",
+      "/sessions/research-123?tab=messages",
+    );
+  });
 });
 
 describe("api.getStatus", () => {
