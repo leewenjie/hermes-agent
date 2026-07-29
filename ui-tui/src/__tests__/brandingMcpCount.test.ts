@@ -50,8 +50,8 @@ const baseInfo = (mcp_servers: McpServerStatus[]): SessionInfo => ({
   tools: { file: ['read_file', 'write_file'] }
 })
 
-async function renderFooter(info: SessionInfo, t = DEFAULT_THEME): Promise<string> {
-  const streams = makeStreams()
+async function renderFooter(info: SessionInfo, t = DEFAULT_THEME, columns = 100): Promise<string> {
+  const streams = makeStreams(columns)
 
   const instance = renderSync(React.createElement(SessionPanel, { info, sid: 'test', t }), {
     patchConsole: false,
@@ -147,11 +147,36 @@ describe('Oxaide hosted banner privacy', () => {
     expect(frame).not.toContain('0.18.2')
     expect(frame).toContain('Research methods')
     expect(frame).toContain('Thesis and evidence review')
-    expect(frame).toContain('Return and risk analysis')
-    expect(frame).toContain('Prediction-market research')
+    expect(frame).toContain('Long/short equity momentum')
+    expect(frame).toContain('Return, risk, and scenario analysis')
+    expect(frame).toContain('Prediction-market context')
     expect(frame).toContain('Market data and quote provenance')
     expect(frame).not.toContain('investment-research')
     expect(frame).not.toContain('configured tools')
     expect(frame).not.toContain('toolsets')
+  })
+
+  it.each([42, 64, 100])('renders without reflow-prone borders at %i columns', async columns => {
+    const oxaideTheme = fromSkin(
+      {},
+      {
+        agent_name: 'Oxaide Research',
+        org_name: 'Oxaide',
+        tagline: 'Source-linked research workspace'
+      }
+    )
+
+    const frame = await renderFooter(
+      {
+        ...baseInfo([]),
+        capability_preview: true,
+        preloaded_skills: ['investment-research']
+      },
+      oxaideTheme,
+      columns
+    )
+
+    expect(frame).toContain('Research workspace ready')
+    expect(frame).not.toMatch(/[│╭╮╰╯]/)
   })
 })

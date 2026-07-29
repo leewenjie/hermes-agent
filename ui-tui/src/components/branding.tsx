@@ -162,8 +162,9 @@ const TOOLSETS_MAX = 8
 
 const OXAIDE_RESEARCH_METHODS = [
   'Thesis and evidence review',
-  'Return and risk analysis',
-  'Prediction-market research',
+  'Long/short equity momentum',
+  'Return, risk, and scenario analysis',
+  'Prediction-market context',
   'Market data and quote provenance'
 ]
 
@@ -298,7 +299,7 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
 
   if (isHostedOxaide) {
     return (
-      <Box borderColor={t.color.border} borderStyle="round" flexDirection="column" marginBottom={1} paddingX={2} paddingY={1}>
+      <Box flexDirection="column" marginBottom={1} paddingX={2} paddingY={1}>
         <Text bold color={t.color.primary}>
           Research workspace ready
         </Text>
