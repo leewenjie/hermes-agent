@@ -29,7 +29,7 @@ COPY hermes_time.py hermes_state.py utils.py ./
 COPY package.json package-lock.json ./
 RUN uv sync --frozen --no-dev
 
-COPY . .
+COPY --chown=hermes:hermes . .
 RUN uv sync --frozen --all-extras
 
 # Install Playwright browsers (Chromium) via project's npm setup
@@ -38,7 +38,7 @@ RUN npm install --prefer-offline --no-audit && \
     npx playwright install --with-deps chromium --only-shell && \
     npm cache clean --force
 
-RUN mkdir -p /opt/data && chown -R hermes:hermes /opt/hermes /opt/data
+RUN install -d -o hermes -g hermes /opt/data
 USER hermes
 
 HEALTHCHECK --interval=15s --timeout=5s --retries=3 CMD curl -sf http://localhost:9119/api/status || exit 1
