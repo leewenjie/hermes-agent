@@ -5616,20 +5616,22 @@ _OXAIDE_LEASE_LOSS_HARD_STOP_SECONDS = 30.0
 
 
 def _terminate_oxaide_runtime(code: str) -> None:
-    """Ask s6 to terminate the complete tenant container, then exit locally."""
+    """Ask the runtime supervisor to terminate the container, then exit locally."""
+    from hermes_cli.managed_scope import managed_runtime_shutdown_command
+
     logger.critical(
         "Oxaide lease loss requires tenant runtime restart: %s",
         code or "turn_lease_renewal_failed",
     )
     try:
         subprocess.run(
-            ["/run/s6/basedir/bin/halt"],
+            [managed_runtime_shutdown_command()],
             check=True,
             timeout=10,
         )
     except Exception:
         logger.critical(
-            "Oxaide s6 container shutdown request failed",
+            "Oxaide container shutdown request failed",
             exc_info=True,
         )
     # The local process must stop executing tenant work even if s6 teardown is

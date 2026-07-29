@@ -39,6 +39,15 @@ _ENV_CACHE: Dict[str, tuple] = {}
 
 _TERMINAL_FAILURE_LOCK = threading.Lock()
 _TERMINAL_FAILURE: Optional[str] = None
+_DEFAULT_RUNTIME_SHUTDOWN_COMMAND = "/run/s6/basedir/bin/halt"
+
+
+def managed_runtime_shutdown_command() -> str:
+    """Return the deployment-provided whole-runtime shutdown executable."""
+    configured = str(
+        os.environ.get("HERMES_MANAGED_RUNTIME_SHUTDOWN_COMMAND") or ""
+    ).strip()
+    return configured or _DEFAULT_RUNTIME_SHUTDOWN_COMMAND
 
 
 def managed_value_configured(name: str, minimum_length: int = 1) -> bool:

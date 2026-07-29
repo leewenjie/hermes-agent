@@ -16274,6 +16274,7 @@ def _oxaide_readiness_diagnostics() -> Optional[dict[str, Any]]:
 
     from hermes_cli.dashboard_auth.routes import is_oxaide_native_auth_configured
     from hermes_cli.managed_scope import (
+        managed_runtime_shutdown_command,
         managed_runtime_terminal_failure,
         managed_value_configured,
     )
@@ -16294,7 +16295,7 @@ def _oxaide_readiness_diagnostics() -> Optional[dict[str, Any]]:
         _is_oxaide_hosted_runtime()
         or managed_value_configured("HERMES_OXAIDE_MANAGED_POLICY")
     ) and not _is_loopback_unauthenticated_dashboard() and not os.access(
-        "/run/s6/basedir/bin/halt", os.X_OK
+        managed_runtime_shutdown_command(), os.X_OK
     ):
         failure_codes.append("shutdown_command_unavailable")
     terminal_failure = managed_runtime_terminal_failure()
