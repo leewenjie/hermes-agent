@@ -36,6 +36,13 @@ declare global {
 }
 const SESSION_HEADER = "X-Hermes-Session-Token";
 
+// A dashboard page commonly has several API requests in flight at once. When
+// its hosted session expires, all of them can return the same structured 401.
+// Track redirect ownership per Window so only the first response persists the
+// landing location and starts the full-page auth flow. The remaining requests
+// still stay pending while that navigation unloads the page.
+const authRedirectWindows = new WeakSet<object>();
+
 export class ApiError extends Error {
   readonly status: number;
   readonly detail: string;
@@ -142,21 +149,24 @@ export async function fetchJSON<T>(
       (body.error === "unauthenticated" || body.error === "session_expired") &&
       body.login_url
     ) {
-      // Preserve where the user was so /auth/callback can land them back
-      // after re-auth. The gate's login_url already carries a ``next=``
-      // built from the request path, but the SPA may be deep inside a
-      // SPA route the gate never saw — e.g. a hash route or a client-side
-      // /sessions/<id> deep link. Save the current location as a
-      // fallback the post-login handler can read.
-      try {
-        sessionStorage.setItem(
-          "hermes.lastLocation",
-          window.location.pathname + window.location.search,
-        );
-      } catch {
-        /* SSR / privacy mode — ignore */
+      if (!authRedirectWindows.has(window)) {
+        authRedirectWindows.add(window);
+        // Preserve where the user was so /auth/callback can land them back
+        // after re-auth. The gate's login_url already carries a ``next=``
+        // built from the request path, but the SPA may be deep inside a
+        // SPA route the gate never saw — e.g. a hash route or a client-side
+        // /sessions/<id> deep link. Save the current location as a
+        // fallback the post-login handler can read.
+        try {
+          sessionStorage.setItem(
+            "hermes.lastLocation",
+            window.location.pathname + window.location.search,
+          );
+        } catch {
+          /* SSR / privacy mode — ignore */
+        }
+        window.location.assign(body.login_url);
       }
-      window.location.assign(body.login_url);
       // Never resolve — the page is about to unload.
       return new Promise<T>(() => {});
     }
