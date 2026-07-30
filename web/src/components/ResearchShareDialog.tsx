@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, CheckCircle2, Copy, ExternalLink, RotateCcw, Share2, Trash2, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Copy, ExternalLink, Link2, RotateCcw, Trash2, X } from "lucide-react";
 import { ApiError, api } from "@/lib/api";
 import type { ResearchSharePreview, ResearchSharePublished, SessionInfo } from "@/lib/api";
 import { Markdown } from "@/components/Markdown";
@@ -246,13 +246,17 @@ export function ResearchShareDialog({ session, onClose }: ResearchShareDialogPro
   return (
     <>
       <Dialog open onOpenChange={(open) => !open && handleClose()}>
-        <DialogContent className="max-h-[92vh] w-[calc(100vw-1rem)] max-w-5xl overflow-hidden sm:w-full">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2"><Share2 className="h-4 w-4 text-success" /> Share read-only research</DialogTitle>
+        <DialogContent className="flex max-h-[92vh] w-[calc(100vw-1rem)] max-w-5xl flex-col gap-0 overflow-hidden p-0 sm:w-full">
+          <DialogHeader className="shrink-0 border-b border-border px-4 py-4 sm:px-6">
+            <DialogTitle className="flex items-center gap-3">
+              <img src="/brand/oxaide-wordmark-inverse.svg" alt="Oxaide" className="h-6 w-auto" />
+              <span className="sr-only">— </span>
+              <span>Share public session</span>
+            </DialogTitle>
             <DialogDescription>This creates a frozen, unlisted snapshot. Later chat messages and private workspace data are not added.</DialogDescription>
           </DialogHeader>
 
-          <div className="grid min-h-0 gap-5 overflow-y-auto p-3 sm:p-4 lg:grid-cols-[18rem_minmax(0,1fr)]">
+          <div className="grid min-h-0 flex-1 gap-5 overflow-y-auto p-3 sm:p-4 lg:grid-cols-[18rem_minmax(0,1fr)]">
             <aside className="space-y-3">
               <label htmlFor="research-share-title" className="block text-xs font-semibold uppercase tracking-[0.08em] text-text-secondary">Public title</label>
               <Input id="research-share-title" value={title} maxLength={200} onChange={(event) => setTitle(event.target.value)} className="normal-case" />
@@ -294,7 +298,7 @@ export function ResearchShareDialog({ session, onClose }: ResearchShareDialogPro
               ) : preview ? (
                 <div className="space-y-4">{preview.snapshot.messages.map((message, index) => (
                   <article key={`${message.role}-${index}`} className={message.role === "user" ? "border border-border bg-secondary/40 p-4" : "border border-success/25 bg-background p-4"}>
-                    <div className="mb-2 text-xs font-semibold uppercase tracking-[0.08em] text-text-secondary">{message.role === "user" ? "Research question" : "Research response"}</div>
+                    <div className="mb-2 text-xs font-semibold uppercase tracking-[0.08em] text-text-secondary">{message.role === "user" ? "You" : "Oxaide"}</div>
                     <Markdown content={message.content} />
                     {(message.artifacts || []).map((name) => {
                       const artifact = artifacts.get(name);
@@ -306,9 +310,9 @@ export function ResearchShareDialog({ session, onClose }: ResearchShareDialogPro
             </section>
           </div>
 
-          {actionError && <div role="alert" aria-live="polite" className="mx-3 flex flex-wrap items-center gap-3 border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive sm:mx-4"><span className="min-w-0 flex-1">{actionError.message}</span>{actionError.refreshPreview && <Button outlined size="sm" onClick={loadShareData} prefix={<RotateCcw className="h-3.5 w-3.5" />}>Refresh preview</Button>}</div>}
-          <DialogFooter className="flex-col gap-2 sm:flex-row">
-            {published ? <><div className="mr-auto flex items-center gap-2 text-sm text-success"><CheckCircle2 className="h-4 w-4" /> Public snapshot ready</div><Button outlined onClick={() => setConfirmRevoke(true)} disabled={revoking} prefix={<Trash2 />}>Revoke</Button><Button outlined onClick={() => void copyLink()} prefix={copied ? <CheckCircle2 /> : <Copy />}>{copied ? "Copied" : "Copy link"}</Button><Button onClick={() => window.open(published.public_url, "_blank", "noopener,noreferrer")} prefix={<ExternalLink />}>Open link</Button></> : <><Button outlined onClick={handleClose}>Cancel</Button><Button onClick={() => void publish()} disabled={!preview || !confirmed || !title.trim() || publishing} prefix={publishing ? <Spinner /> : <Share2 />}>Publish snapshot</Button></>}
+          {actionError && <div role="alert" aria-live="polite" className="mx-3 mt-3 flex shrink-0 flex-wrap items-center gap-3 border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive sm:mx-4"><span className="min-w-0 flex-1">{actionError.message}</span>{actionError.refreshPreview && <Button outlined size="sm" onClick={loadShareData} prefix={<RotateCcw className="h-3.5 w-3.5" />}>Refresh preview</Button>}</div>}
+          <DialogFooter className="shrink-0 flex-col gap-2 border-t border-border bg-background px-4 py-3 sm:flex-row sm:px-6">
+            {published ? <><div className="mr-auto flex items-center gap-2 text-sm text-success"><CheckCircle2 className="h-4 w-4" /> Public link ready</div><Button outlined onClick={() => setConfirmRevoke(true)} disabled={revoking} prefix={<Trash2 />}>Revoke</Button><Button outlined onClick={() => void copyLink()} prefix={copied ? <CheckCircle2 /> : <Copy />}>{copied ? "Copied" : "Copy link"}</Button><Button onClick={() => window.open(published.public_url, "_blank", "noopener,noreferrer")} prefix={<ExternalLink />}>Open link</Button></> : <><Button outlined onClick={handleClose}>Cancel</Button><Button onClick={() => void publish()} disabled={!preview || !confirmed || !title.trim() || publishing} prefix={publishing ? <Spinner /> : <Link2 />}>Create public link</Button></>}
           </DialogFooter>
         </DialogContent>
       </Dialog>
