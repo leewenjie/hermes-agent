@@ -35,7 +35,7 @@ _SIGNATURE_PREFIX = {
 }
 _DEFAULT_EVENT_ENDPOINT = "https://oxaide.com/api/agents/research-schedule-events"
 _EVENT_TIMEOUT_SECONDS = 10.0
-_LOCAL_LEASE_SECONDS = 240
+_LOCAL_LEASE_SECONDS = 360
 _LOCAL_LEASE_RENEWAL_SECONDS = 60.0
 _worker_lock = threading.Lock()
 _worker_thread: threading.Thread | None = None
