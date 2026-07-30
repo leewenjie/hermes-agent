@@ -35,6 +35,8 @@ _SIGNATURE_PREFIX = {
 }
 _DEFAULT_EVENT_ENDPOINT = "https://oxaide.com/api/agents/research-schedule-events"
 _EVENT_TIMEOUT_SECONDS = 10.0
+_LOCAL_LEASE_SECONDS = 240
+_LOCAL_LEASE_RENEWAL_SECONDS = 60.0
 _worker_lock = threading.Lock()
 _worker_thread: threading.Thread | None = None
 _worker_wake = threading.Event()
@@ -396,11 +398,11 @@ def _run_occurrence(db: SessionDB, claim: dict[str, Any]) -> None:
     local_lease_stop = threading.Event()
 
     def renew_local_lease() -> None:
-        while not local_lease_stop.wait(timeout=300.0):
+        while not local_lease_stop.wait(timeout=_LOCAL_LEASE_RENEWAL_SECONDS):
             if not db.renew_scheduled_research_occurrence_lease(
                 occurrence_id,
                 lease_token,
-                lease_seconds=1800,
+                lease_seconds=_LOCAL_LEASE_SECONDS,
             ):
                 logger.error(
                     "Scheduled research local lease renewal lost id=%s",
@@ -451,7 +453,14 @@ def _run_occurrence(db: SessionDB, claim: dict[str, Any]) -> None:
         success, document, final_response, run_error = run_job(
             job, cancel_requested=lease_lost.is_set
         )
-        if lease_lost.is_set():
+        if "managed_scheduled_research_timeout" in str(run_error or ""):
+            terminal_status = "failed"
+            error_code = "execution_timeout"
+            error_message = (
+                "Scheduled research exceeded the 3 minute execution limit."
+            )
+            turn.release()
+        elif lease_lost.is_set():
             terminal_status = "released"
             error_code = "billing_lease_lost"
             error_message = "Scheduled research authorization expired during execution."
@@ -517,7 +526,9 @@ def _worker_loop() -> None:
         try:
             flush_occurrence_events(db)
             while True:
-                claim = db.claim_scheduled_research_occurrence(lease_seconds=1800)
+                claim = db.claim_scheduled_research_occurrence(
+                    lease_seconds=_LOCAL_LEASE_SECONDS
+                )
                 if claim is None:
                     break
                 _run_occurrence(db, claim)

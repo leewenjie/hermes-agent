@@ -442,6 +442,105 @@ def test_heartbeat_renews_same_event_until_completion(monkeypatch):
     assert {payload["hermes_event_id"] for payload in payloads} == {turn.event_id}
 
 
+def test_transient_heartbeat_failure_retries_within_active_lease(monkeypatch):
+    monkeypatch.setenv("HERMES_OXAIDE_USAGE_SIGNING_SECRET", "test-usage-signing-secret-at-least-32-bytes")
+    monkeypatch.setenv(
+        "OXAIDE_TURN_ENDPOINT",
+        "https://oxaide.test/api/agents/billing/usage/record",
+    )
+    monkeypatch.setattr("tui_gateway.oxaide_turns._HEARTBEAT_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr("tui_gateway.oxaide_turns._HEARTBEAT_RETRY_INTERVAL_SECONDS", 0.01)
+    heartbeat_recovered = threading.Event()
+    lost_codes = []
+    heartbeat_attempts = 0
+
+    def urlopen(request, timeout):
+        nonlocal heartbeat_attempts
+        payload = json.loads(request.data)
+        if payload["phase"] == "authorize":
+            return _Response(
+                {
+                    "ok": True,
+                    "phase": "authorize",
+                    "code": "turn_authorized",
+                    "workspace_id": "workspace-a",
+                }
+            )
+        if payload["phase"] == "heartbeat":
+            heartbeat_attempts += 1
+            if heartbeat_attempts == 1:
+                raise urllib.error.URLError("temporary network outage")
+            heartbeat_recovered.set()
+            return _Response(
+                {
+                    "ok": True,
+                    "phase": "heartbeat",
+                    "code": "turn_lease_renewed",
+                    "workspace_id": "workspace-a",
+                }
+            )
+        return _Response(
+            {
+                "ok": True,
+                "phase": "complete",
+                "code": "turn_completed",
+                "workspace_id": "workspace-a",
+            }
+        )
+
+    monkeypatch.setattr("tui_gateway.oxaide_turns.urllib.request.urlopen", urlopen)
+    turn = OxaideTurnClient(dict(_CONTEXT_A)).authorize(
+        on_lease_lost=lost_codes.append
+    )
+
+    assert heartbeat_recovered.wait(timeout=1)
+    turn.complete()
+    assert heartbeat_attempts >= 2
+    assert lost_codes == []
+
+
+def test_persistent_transient_heartbeat_failure_stops_at_lease_deadline(monkeypatch):
+    monkeypatch.setenv("HERMES_OXAIDE_USAGE_SIGNING_SECRET", "test-usage-signing-secret-at-least-32-bytes")
+    monkeypatch.setenv(
+        "OXAIDE_TURN_ENDPOINT",
+        "https://oxaide.test/api/agents/billing/usage/record",
+    )
+    monkeypatch.setattr("tui_gateway.oxaide_turns._HEARTBEAT_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr("tui_gateway.oxaide_turns._HEARTBEAT_RETRY_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr("tui_gateway.oxaide_turns._LEGACY_LEASE_GRACE_SECONDS", 0.06)
+    lease_lost = threading.Event()
+    lost_codes = []
+    heartbeat_attempts = 0
+
+    def urlopen(request, timeout):
+        nonlocal heartbeat_attempts
+        payload = json.loads(request.data)
+        if payload["phase"] == "authorize":
+            return _Response(
+                {
+                    "ok": True,
+                    "phase": "authorize",
+                    "code": "turn_authorized",
+                    "workspace_id": "workspace-a",
+                }
+            )
+        heartbeat_attempts += 1
+        raise urllib.error.URLError("persistent network outage")
+
+    def on_lease_lost(code):
+        lost_codes.append(code)
+        lease_lost.set()
+
+    monkeypatch.setattr("tui_gateway.oxaide_turns.urllib.request.urlopen", urlopen)
+    started_at = time.monotonic()
+    OxaideTurnClient(dict(_CONTEXT_A)).authorize(on_lease_lost=on_lease_lost)
+
+    assert lease_lost.wait(timeout=1)
+    assert time.monotonic() - started_at >= 0.05
+    assert heartbeat_attempts >= 2
+    assert lost_codes == ["turn_lease_renewal_failed"]
+
+
 def test_heartbeat_failure_fails_closed(monkeypatch):
     monkeypatch.setenv("HERMES_OXAIDE_USAGE_SIGNING_SECRET", "test-usage-signing-secret-at-least-32-bytes")
     monkeypatch.setenv(

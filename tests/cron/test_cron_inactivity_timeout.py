@@ -311,3 +311,63 @@ class TestSysPathOrdering:
         """hermes_constants should be importable from cron context."""
         from hermes_constants import get_hermes_home
         assert callable(get_hermes_home)
+
+
+def test_active_managed_occurrence_hits_wall_clock_deadline(monkeypatch):
+    """Managed work is bounded even while it continuously reports activity."""
+    import cron.scheduler as scheduler
+    import hermes_cli.runtime_provider as runtime_provider
+    import run_agent
+
+    class ActiveManagedAgent(FakeAgent):
+        instance = None
+
+        def __init__(self, **_kwargs):
+            super().__init__(idle_seconds=0.0, activity_desc="stream_delta")
+            self._stop = False
+            self.closed = False
+            type(self).instance = self
+
+        def interrupt(self, msg):
+            super().interrupt(msg)
+            self._stop = True
+
+        def run_conversation(self, _prompt):
+            while not self._stop:
+                time.sleep(0.001)
+            return {"completed": False, "failed": True, "final_response": "stopped"}
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(
+        scheduler, "_OXAIDE_MANAGED_EXECUTION_TIMEOUT_SECONDS", 0.02
+    )
+    monkeypatch.setenv("HERMES_OXAIDE_MODEL", "test-model")
+    monkeypatch.setenv("HERMES_OXAIDE_PROVIDER", "openrouter")
+    monkeypatch.setattr(run_agent, "AIAgent", ActiveManagedAgent)
+    monkeypatch.setattr(
+        runtime_provider,
+        "resolve_runtime_provider",
+        lambda **_kwargs: {
+            "provider": "openrouter",
+            "api_mode": "chat_completions",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "test-key",
+            "source": "test",
+        },
+    )
+
+    success, _document, _response, error = scheduler.run_job({
+        "id": "managed-timeout",
+        "name": "Managed timeout",
+        "prompt": "Keep working actively",
+        "schedule": {"kind": "once", "run_at": "2099-01-01T00:00:00Z"},
+        "origin": {"type": "oxaide-scheduled-research-v1"},
+    })
+
+    agent = ActiveManagedAgent.instance
+    assert success is False
+    assert error == "TimeoutError: managed_scheduled_research_timeout"
+    assert agent is not None and agent._interrupted is True
+    assert "execution deadline" in agent._interrupt_msg

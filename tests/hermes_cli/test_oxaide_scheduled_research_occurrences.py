@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import json
+import threading
 import time
 from types import SimpleNamespace
 
@@ -209,3 +211,112 @@ def test_occurrence_ingress_enforces_runtime_pins(occurrence_client):
     response = _signed_request(occurrence_client, _payload(workspace_id="workspace-2"))
     assert response.status_code == 422
     assert response.json()["code"] == "runtime_identity_mismatch"
+
+
+def _claim_occurrence(db, payload):
+    raw = json.dumps(payload, separators=(",", ":")).encode()
+    db.accept_scheduled_research_occurrence(payload, hashlib.sha256(raw).hexdigest())
+    db.authorize_scheduled_research_occurrence(payload)
+    return db.claim_scheduled_research_occurrence(lease_seconds=30)
+
+
+def test_managed_occurrence_has_hard_deadline_and_terminal_callback(
+    occurrence_client, monkeypatch
+):
+    del occurrence_client
+    payload = _payload()
+    db = managed._session_db()
+    claim = _claim_occurrence(db, payload)
+    assert claim is not None
+
+    # Simulate sequence 2 surviving a process interruption. Re-emitting
+    # `running` during recovery must not block the terminal sequence 3 event.
+    managed.enqueue_occurrence_event(db, payload, 2, "running")
+    monkeypatch.setattr(managed, "flush_occurrence_events", lambda db=None: None)
+
+    class FakeTurn:
+        def __init__(self):
+            self.released = False
+
+        def release(self):
+            self.released = True
+
+        def complete(self, _metadata):
+            raise AssertionError("timed-out work must not complete billing")
+
+    turn = FakeTurn()
+
+    class FakeClient:
+        @classmethod
+        def from_scheduled_occurrence(cls, **_kwargs):
+            return cls()
+
+        def authorize(self, _on_revoke, *, event_id):
+            assert event_id == payload["occurrence_id"]
+            return turn
+
+    monkeypatch.setattr(
+        "tui_gateway.oxaide_turns.OxaideTurnClient", FakeClient
+    )
+
+    def timed_out_job(_job, *, cancel_requested):
+        assert cancel_requested() is False
+        return False, "", "", "TimeoutError: managed_scheduled_research_timeout"
+
+    monkeypatch.setattr("cron.scheduler.run_job", timed_out_job)
+
+    managed._run_occurrence(db, claim)
+
+    row = db._conn.execute(
+        "SELECT status, last_error_code FROM scheduled_research_occurrences "
+        "WHERE occurrence_id = ?", (payload["occurrence_id"],)
+    ).fetchone()
+    events = db._conn.execute(
+        "SELECT sequence, raw_body FROM scheduled_research_event_outbox "
+        "WHERE occurrence_id = ? ORDER BY sequence", (payload["occurrence_id"],)
+    ).fetchall()
+    db.close()
+
+    assert dict(row) == {"status": "failed", "last_error_code": "execution_timeout"}
+    assert [(event["sequence"], json.loads(event["raw_body"])["status"]) for event in events] == [
+        (2, "running"),
+        (3, "failed"),
+    ]
+    assert json.loads(events[-1]["raw_body"])["error_code"] == "execution_timeout"
+    assert turn.released is True
+
+
+def test_expired_running_occurrence_is_reclaimed_without_duplicate_running_event(
+    occurrence_client,
+):
+    del occurrence_client
+    payload = _payload()
+    db = managed._session_db()
+    first_claim = _claim_occurrence(db, payload)
+    assert first_claim is not None
+    managed.enqueue_occurrence_event(db, payload, 2, "running")
+
+    db._conn.execute(
+        "UPDATE scheduled_research_occurrences SET lease_expires_at = ? "
+        "WHERE occurrence_id = ?", (time.time() - 1, payload["occurrence_id"])
+    )
+    recovered = db.claim_scheduled_research_occurrence(lease_seconds=30)
+    assert recovered is not None
+    assert recovered["lease_token"] != first_claim["lease_token"]
+
+    managed.enqueue_occurrence_event(db, payload, 2, "running")
+    assert db.finish_scheduled_research_occurrence(
+        payload["occurrence_id"], recovered["lease_token"], "failed",
+        error_code="execution_timeout", error="deadline",
+    )
+    managed.enqueue_occurrence_event(
+        db, payload, 3, "failed",
+        error_code="execution_timeout", error_message="deadline",
+    )
+    sequences = db._conn.execute(
+        "SELECT sequence FROM scheduled_research_event_outbox "
+        "WHERE occurrence_id = ? ORDER BY sequence", (payload["occurrence_id"],)
+    ).fetchall()
+    db.close()
+
+    assert [row["sequence"] for row in sequences] == [2, 3]

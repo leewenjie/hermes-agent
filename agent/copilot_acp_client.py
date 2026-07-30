@@ -105,9 +105,12 @@ def _build_subprocess_env() -> dict[str, str]:
     # (gateway bot tokens, GitHub auth, infra) are still stripped (#29157).
     env = hermes_subprocess_env(inherit_credentials=True)
     home = _resolve_home_dir()
-    env["HOME"] = home
     from hermes_constants import apply_subprocess_home_env
     apply_subprocess_home_env(env)
+    # ACP is a user-installed CLI and must retain the user's own auth/config
+    # home even when Hermes itself stores profile state under HERMES_HOME.
+    env["HOME"] = home
+    env["HERMES_REAL_HOME"] = home
     return env
 
 

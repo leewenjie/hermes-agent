@@ -15,6 +15,7 @@ from hermes_cli import web_server
 from hermes_cli import hosted_runtime_bridge
 from hermes_cli import managed_scope
 from hermes_cli.dashboard_auth import clear_providers
+from hermes_cli.dashboard_auth.base import RefreshExpiredError
 from hermes_cli.dashboard_auth.ws_tickets import _reset_for_tests, consume_ticket
 from hermes_cli.dashboard_auth.routes import (
     _OXAIDE_SESSION_TTL_SECONDS,
@@ -139,15 +140,17 @@ def test_signed_launch_creates_verified_dashboard_session(gated_app):
 
     identity = client.get("/api/auth/me")
     assert identity.status_code == 200
-    assert identity.json() == {
+    identity_payload = identity.json()
+    assert identity_payload == {
         "user_id": "oxaide-user-1",
         "email": "user@example.com",
         "display_name": "Oxaide User",
         "org_id": "workspace-1",
         "provider": "oxaide-demo",
-        "expires_at": launch_expires_at,
+        "expires_at": identity_payload["expires_at"],
         "access_state": "active",
     }
+    assert identity_payload["expires_at"] > launch_expires_at
 
     ticket = client.post("/api/auth/ws-ticket")
     assert ticket.status_code == 200
@@ -161,7 +164,7 @@ def test_signed_launch_creates_verified_dashboard_session(gated_app):
         "runtime_session_id": "rt_workspace_1",
         "runtime_key": "runtimekey1234567890abcd",
         "user_id": "oxaide-user-1",
-        "expires_at": launch_expires_at,
+        "expires_at": identity_payload["expires_at"],
         "access_state": "active",
     }
 
@@ -173,11 +176,15 @@ def test_signed_launch_creates_verified_dashboard_session(gated_app):
     assert exchanged["runtime_key"] == "runtimekey1234567890abcd"
     assert exchanged["jti"] == session_jti
     assert exchanged["access_state"] == "active"
-    assert exchanged["exp"] == launch_expires_at
+    refresh_cookie = client.cookies.get("__Host-hermes_session_rt")
+    assert refresh_cookie is not None
+    assert refresh_cookie.startswith("oxa_rt_")
+    assert refresh_cookie != access_cookie
+    assert exchanged["exp"] == identity_payload["expires_at"]
     assert exchanged["exp"] - exchanged["iat"] <= _OXAIDE_SESSION_TTL_SECONDS
 
 
-def test_dashboard_session_cannot_outlive_signed_access_state(gated_app, monkeypatch):
+def test_dashboard_session_is_independent_of_launch_assertion(gated_app, monkeypatch):
     client, secret = gated_app
     launch_expires_at = int(time.time()) + 600
     client.get(
@@ -186,16 +193,62 @@ def test_dashboard_session_cannot_outlive_signed_access_state(gated_app, monkeyp
     )
     access_cookie = client.cookies.get("__Host-hermes_session_at")
     assert access_cookie is not None
-    assert _decode_oxaide_session_token(access_cookie)["exp"] == launch_expires_at
+    session_expires_at = _decode_oxaide_session_token(access_cookie)["exp"]
+    assert session_expires_at > launch_expires_at
 
     monkeypatch.setattr(
         dashboard_auth_routes.time,
         "time",
         lambda: launch_expires_at + 1,
     )
-    with pytest.raises(HTTPException) as exc_info:
-        _decode_oxaide_session_token(access_cookie)
-    assert exc_info.value.status_code == 401
+    assert _decode_oxaide_session_token(access_cookie)["exp"] == session_expires_at
+
+
+def test_expired_access_token_transparently_refreshes(gated_app, monkeypatch):
+    client, secret = gated_app
+    client.get(
+        f"/auth/oxaide-launch?token={_launch_token(secret)}",
+        follow_redirects=False,
+    )
+    old_access = client.cookies.get("__Host-hermes_session_at")
+    refresh = client.cookies.get("__Host-hermes_session_rt")
+    assert old_access and refresh
+    old_expiry = _decode_oxaide_session_token(old_access)["exp"]
+
+    monkeypatch.setattr(dashboard_auth_routes.time, "time", lambda: old_expiry + 1)
+    monkeypatch.setattr(
+        dashboard_auth_routes,
+        "_revalidate_oxaide_session",
+        lambda _payload: "active",
+    )
+    response = client.get("/api/auth/me")
+
+    assert response.status_code == 200
+    assert response.json()["provider"] == "oxaide-demo"
+    assert response.json()["expires_at"] > old_expiry
+    assert client.cookies.get("__Host-hermes_session_at") != old_access
+    assert client.cookies.get("__Host-hermes_session_rt") == refresh
+
+
+def test_revoked_control_plane_access_cannot_refresh(gated_app, monkeypatch):
+    client, secret = gated_app
+    client.get(
+        f"/auth/oxaide-launch?token={_launch_token(secret)}",
+        follow_redirects=False,
+    )
+    access = client.cookies.get("__Host-hermes_session_at")
+    assert access
+    expiry = _decode_oxaide_session_token(access)["exp"]
+    monkeypatch.setattr(dashboard_auth_routes.time, "time", lambda: expiry + 1)
+
+    def revoked(_payload):
+        raise RefreshExpiredError("revoked")
+
+    monkeypatch.setattr(dashboard_auth_routes, "_revalidate_oxaide_session", revoked)
+    response = client.get("/api/auth/me", follow_redirects=False)
+
+    assert response.status_code == 401
+    assert response.json()["error"] == "session_expired"
 
 
 @pytest.mark.parametrize("access_state", [None, "", "paused", "ACTIVE"])

@@ -46,6 +46,7 @@ from hermes_cli.fallback_config import get_fallback_chain
 from hermes_time import now as _hermes_now
 
 logger = logging.getLogger(__name__)
+_OXAIDE_MANAGED_EXECUTION_TIMEOUT_SECONDS = 180.0
 
 
 def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
@@ -2678,9 +2679,10 @@ def run_job(
         logger.info("Job '%s': script produced no output, skipping AI call.", job_name)
         return True, "", SILENT_MARKER, None
     origin = _resolve_origin(job)
+    job_origin = job.get("origin")
     _is_oxaide_managed_occurrence = (
-        isinstance(origin, dict)
-        and origin.get("type") == "oxaide-scheduled-research-v1"
+        isinstance(job_origin, dict)
+        and job_origin.get("type") == "oxaide-scheduled-research-v1"
     )
     _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -3161,8 +3163,33 @@ def run_job(
         # env passthrough registrations) when the cron run hops into the worker
         # thread used for inactivity timeout monitoring.
         _cron_context = contextvars.copy_context()
+        _managed_deadline = (
+            time.monotonic() + _OXAIDE_MANAGED_EXECUTION_TIMEOUT_SECONDS
+            if _is_oxaide_managed_occurrence
+            else None
+        )
         _cron_future = _cron_pool.submit(_cron_context.run, agent.run_conversation, prompt)
         _inactivity_timeout = False
+
+        def _poll_timeout() -> float:
+            if _managed_deadline is None:
+                return _POLL_INTERVAL
+            return max(0.0, min(_POLL_INTERVAL, _managed_deadline - time.monotonic()))
+
+        def _raise_if_cancelled() -> None:
+            if cancel_requested is not None and cancel_requested():
+                if hasattr(agent, "interrupt"):
+                    agent.interrupt(
+                        "Managed scheduled research authorization was revoked"
+                    )
+                raise RuntimeError("managed_scheduled_research_cancelled")
+            if _managed_deadline is not None and time.monotonic() >= _managed_deadline:
+                if hasattr(agent, "interrupt"):
+                    agent.interrupt(
+                        "Managed scheduled research exceeded its execution deadline"
+                    )
+                raise TimeoutError("managed_scheduled_research_timeout")
+
         try:
             if _cron_inactivity_limit is None:
                 # Unlimited — no inactivity watchdog, but a one-shot still
@@ -3171,47 +3198,32 @@ def run_job(
                     result = None
                     while True:
                         done, _ = concurrent.futures.wait(
-                            {_cron_future}, timeout=_POLL_INTERVAL,
+                            {_cron_future}, timeout=_poll_timeout(),
                         )
+                        _raise_if_cancelled()
                         if done:
                             result = _cron_future.result()
                             break
-                        if cancel_requested is not None and cancel_requested():
-                            if hasattr(agent, "interrupt"):
-                                agent.interrupt(
-                                    "Managed scheduled research authorization was revoked"
-                                )
-                            raise RuntimeError("managed_scheduled_research_cancelled")
                         _heartbeat_run_claim_if_due()
                 else:
                     while True:
                         done, _ = concurrent.futures.wait(
-                            {_cron_future}, timeout=_POLL_INTERVAL,
+                            {_cron_future}, timeout=_poll_timeout(),
                         )
+                        _raise_if_cancelled()
                         if done:
                             result = _cron_future.result()
                             break
-                        if cancel_requested is not None and cancel_requested():
-                            if hasattr(agent, "interrupt"):
-                                agent.interrupt(
-                                    "Managed scheduled research authorization was revoked"
-                                )
-                            raise RuntimeError("managed_scheduled_research_cancelled")
             else:
                 result = None
                 while True:
                     done, _ = concurrent.futures.wait(
-                        {_cron_future}, timeout=_POLL_INTERVAL,
+                        {_cron_future}, timeout=_poll_timeout(),
                     )
+                    _raise_if_cancelled()
                     if done:
                         result = _cron_future.result()
                         break
-                    if cancel_requested is not None and cancel_requested():
-                        if hasattr(agent, "interrupt"):
-                            agent.interrupt(
-                                "Managed scheduled research authorization was revoked"
-                            )
-                        raise RuntimeError("managed_scheduled_research_cancelled")
                     _heartbeat_run_claim_if_due()
                     # Agent still running — check inactivity.
                     _idle_secs = 0.0

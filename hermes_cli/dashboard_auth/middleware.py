@@ -383,7 +383,14 @@ async def gated_auth_middleware(
         # one). On success we re-set the rotated cookies on the response and
         # serve the request transparently; on RefreshExpiredError (RT dead /
         # revoked / reuse-detected) we fall through to clear-and-relogin.
-        refreshed = _attempt_refresh(request, refresh_token=_rt)
+        try:
+            refreshed = _attempt_refresh(request, refresh_token=_rt)
+        except ProviderError as e:
+            _log.warning("dashboard-auth: refresh temporarily unavailable: %s", e)
+            return JSONResponse(
+                {"detail": "Authentication refresh is temporarily unavailable"},
+                status_code=503,
+            )
         if refreshed is not None:
             new_session, refreshing_provider = refreshed
             request.state.session = new_session
@@ -463,6 +470,20 @@ def _attempt_refresh(request: Request, *, refresh_token):
     """
     if not refresh_token:
         return None
+    try:
+        from hermes_cli.dashboard_auth.routes import _refresh_oxaide_session
+
+        oxaide_session = _refresh_oxaide_session(refresh_token)
+    except RefreshExpiredError:
+        audit_log(
+            AuditEvent.REFRESH_FAILURE,
+            provider="oxaide-demo",
+            reason="refresh_expired",
+            ip=_client_ip(request),
+        )
+        return None
+    if oxaide_session is not None:
+        return oxaide_session, "oxaide-demo"
     for provider in list_session_providers():
         try:
             new_session = provider.refresh_session(refresh_token=refresh_token)
