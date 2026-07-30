@@ -81,6 +81,7 @@ import {
   managedSessionMessageContent,
   splitCompactionContent,
 } from "@/lib/managed-session-message";
+import { canShareResearchSession } from "@/lib/research-share-availability";
 
 const SOURCE_CONFIG: Record<string, { icon: typeof Terminal; color: string }> =
   {
@@ -462,11 +463,11 @@ function SessionRow({
         </Button>
       )}
 
-      {sharingEnabled && (
+      {canShareResearchSession(session, sharingEnabled) && (
         <Button
           ghost
-          size="icon"
-          className="text-muted-foreground hover:text-success"
+          size={managedOxaide ? "sm" : "icon"}
+          className="gap-1.5 text-muted-foreground hover:text-success"
           aria-label="Share read-only research"
           title="Share read-only research"
           onClick={(e) => {
@@ -474,7 +475,8 @@ function SessionRow({
             onShare();
           }}
         >
-          <Share2 />
+          <Share2 className="h-4 w-4" />
+          {managedOxaide ? <span className="normal-case tracking-normal">Share</span> : null}
         </Button>
       )}
 

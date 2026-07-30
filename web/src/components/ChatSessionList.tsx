@@ -28,6 +28,7 @@ import { useI18n } from "@/i18n";
 import { ResearchShareDialog } from "@/components/ResearchShareDialog";
 import { api, type SessionInfo } from "@/lib/api";
 import { isOxaideManagedDashboard } from "@/lib/managed-dashboard";
+import { canShareResearchSession } from "@/lib/research-share-availability";
 import { cn, timeAgo } from "@/lib/utils";
 
 const SESSION_LIMIT = 30;
@@ -234,16 +235,17 @@ export function ChatSessionList({
                   )}
                 </span>
               </ListItem>
-              {sharingEnabled && s.message_count > 0 && (
+              {canShareResearchSession(s, sharingEnabled) && (
                 <Button
                   ghost
-                  size="icon"
+                  size="sm"
                   onClick={() => setShareSession(s)}
                   aria-label={`Share ${rowLabel(s, t.sessions.untitledSession)}`}
                   title="Share read-only snapshot"
-                  className="h-8 w-8 shrink-0 text-text-tertiary opacity-70 hover:text-success group-hover:opacity-100"
+                  className="h-8 shrink-0 gap-1 px-2 normal-case tracking-normal text-text-tertiary opacity-80 hover:text-success group-hover:opacity-100"
                 >
                   <Share2 className="size-3.5" />
+                  <span className="text-xs">Share</span>
                 </Button>
               )}
             </div>
