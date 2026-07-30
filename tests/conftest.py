@@ -20,8 +20,11 @@ test runner at ``scripts/run_tests.sh``.
 """
 
 import asyncio
+import atexit
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -30,6 +33,14 @@ import pytest
 PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+# Root conftest loads before test modules are collected. Establish isolation
+# here because an autouse fixture is too late for modules such as
+# ``tui_gateway.server`` that load Hermes dotenv files at import time.
+_COLLECTION_HERMES_HOME = tempfile.mkdtemp(prefix="hermes-pytest-collection-")
+atexit.register(shutil.rmtree, _COLLECTION_HERMES_HOME, ignore_errors=True)
+os.environ["HERMES_HOME"] = _COLLECTION_HERMES_HOME
+os.environ["HERMES_DISABLE_PROJECT_DOTENV"] = "1"
 
 
 # ── Per-file process isolation ──────────────────────────────────────────────

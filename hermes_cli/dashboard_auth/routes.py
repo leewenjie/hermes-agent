@@ -21,9 +21,12 @@ import hmac
 import json
 import logging
 import os
+import secrets
 import sqlite3
 import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
 import re
 from collections import defaultdict, deque
@@ -44,6 +47,7 @@ from hermes_cli.dashboard_auth.base import (
     InvalidCodeError,
     InvalidCredentialsError,
     ProviderError,
+    RefreshExpiredError,
 )
 from hermes_cli.dashboard_auth.cookies import (
     clear_pkce_cookie,
@@ -66,10 +70,10 @@ _consumed_oxaide_launch_tokens_lock = threading.Lock()
 _OXAIDE_LAUNCH_AUDIENCE = "oxaide-hermes-runtime"
 _OXAIDE_LAUNCH_MAX_TTL_SECONDS = 15 * 60
 _OXAIDE_SESSION_AUDIENCE = "oxaide-hermes-session"
-# An exchanged session must never outlive the control-plane assertion that
-# supplied its access_state. Oxaide currently issues ten-minute launches; the
-# accepted maximum remains fifteen minutes for clock/rollout compatibility.
 _OXAIDE_SESSION_TTL_SECONDS = _OXAIDE_LAUNCH_MAX_TTL_SECONDS
+_OXAIDE_REFRESH_TTL_SECONDS = 30 * 24 * 60 * 60
+_OXAIDE_REFRESH_PREFIX = "oxa_rt_"
+_OXAIDE_REFRESH_ENDPOINT = "https://oxaide.com/api/agents/runtime-session/refresh"
 _OXAIDE_LOGOUT_AUDIENCE = "oxaide-runtime-logout"
 _OXAIDE_LOGOUT_TTL_SECONDS = 2 * 60
 _OXAIDE_CUSTOMER_LOGIN_URL = "https://oxaide.com/agents"
@@ -190,8 +194,8 @@ def _decode_oxaide_launch_token(token: str) -> dict:
     return payload
 
 
-def _encode_oxaide_session_token(launch_payload: dict) -> str:
-    """Mint a bounded dashboard session after the launch URL is consumed."""
+def _encode_oxaide_session_token(session_payload: dict) -> str:
+    """Mint a short-lived access token independent of the launch assertion."""
     secret = _oxaide_launch_secret()
     if not secret:
         raise HTTPException(
@@ -199,19 +203,13 @@ def _encode_oxaide_session_token(launch_payload: dict) -> str:
             detail="Oxaide demo auth secret is not configured",
         )
     now = int(time.time())
-    access_state_expires_at = int(launch_payload.get("exp") or 0)
-    if access_state_expires_at <= now:
-        raise HTTPException(status_code=401, detail="Oxaide access state expired")
-    payload = dict(launch_payload)
+    payload = dict(session_payload)
     payload.update(
         {
             "aud": _OXAIDE_SESSION_AUDIENCE,
             "jti": uuid.uuid4().hex,
             "iat": now,
-            "exp": min(
-                access_state_expires_at,
-                now + _OXAIDE_SESSION_TTL_SECONDS,
-            ),
+            "exp": now + _OXAIDE_SESSION_TTL_SECONDS,
         }
     )
     encoded = base64.urlsafe_b64encode(
@@ -292,6 +290,163 @@ def _consume_oxaide_launch_token(token: str, expires_at: int) -> None:
                 raise HTTPException(status_code=401, detail="Launch token already used")
 
 
+def _oxaide_auth_db() -> sqlite3.Connection:
+    db_path = get_hermes_home() / "oxaide-launch-tokens.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(db_path, timeout=5.0)
+    connection.execute(
+        "create table if not exists refresh_sessions ("
+        "digest text primary key, payload text not null, expires_at integer not null)"
+    )
+    return connection
+
+
+def _create_oxaide_refresh_session(payload: dict) -> str:
+    """Persist an opaque renewable session and return its browser credential."""
+    token = f"{_OXAIDE_REFRESH_PREFIX}{secrets.token_urlsafe(48)}"
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    expires_at = int(time.time()) + _OXAIDE_REFRESH_TTL_SECONDS
+    stored = dict(payload)
+    stored.pop("exp", None)
+    stored.pop("iat", None)
+    stored.pop("aud", None)
+    with _consumed_oxaide_launch_tokens_lock, _oxaide_auth_db() as connection:
+        connection.execute(
+            "delete from refresh_sessions where expires_at <= ?", (int(time.time()),)
+        )
+        connection.execute(
+            "insert into refresh_sessions(digest, payload, expires_at) values (?, ?, ?)",
+            (digest, json.dumps(stored, separators=(",", ":")), expires_at),
+        )
+    return token
+
+
+def _load_oxaide_refresh_session(token: str) -> dict | None:
+    if not token.startswith(_OXAIDE_REFRESH_PREFIX):
+        return None
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    now = int(time.time())
+    with _consumed_oxaide_launch_tokens_lock, _oxaide_auth_db() as connection:
+        row = connection.execute(
+            "select payload, expires_at from refresh_sessions where digest = ?",
+            (digest,),
+        ).fetchone()
+        if row is None:
+            raise RefreshExpiredError("Oxaide refresh session is unknown")
+        if int(row[1]) <= now:
+            connection.execute("delete from refresh_sessions where digest = ?", (digest,))
+            raise RefreshExpiredError("Oxaide refresh session expired")
+    try:
+        payload = json.loads(str(row[0]))
+    except json.JSONDecodeError as exc:
+        raise RefreshExpiredError("Oxaide refresh session is invalid") from exc
+    if not isinstance(payload, dict):
+        raise RefreshExpiredError("Oxaide refresh session is invalid")
+    return payload
+
+
+def _revoke_oxaide_refresh_session(token: str) -> None:
+    if not token.startswith(_OXAIDE_REFRESH_PREFIX):
+        return
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    with _consumed_oxaide_launch_tokens_lock, _oxaide_auth_db() as connection:
+        connection.execute("delete from refresh_sessions where digest = ?", (digest,))
+
+
+def _revalidate_oxaide_session(payload: dict) -> str:
+    """Revalidate durable access with Oxaide before renewing browser access."""
+    request_payload = {
+        "workspace_id": str(payload.get("workspace_id") or "").strip(),
+        "runtime_session_id": str(payload.get("runtime_session_id") or "").strip(),
+        "runtime_key": str(payload.get("runtime_key") or "").strip(),
+        "user_id": str(payload.get("sub") or payload.get("user_id") or "").strip(),
+        "iat": int(time.time()),
+        "nonce": uuid.uuid4().hex,
+    }
+    if not all(request_payload.values()):
+        raise RefreshExpiredError("Oxaide refresh identity is incomplete")
+    body = json.dumps(
+        request_payload, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    signature = hmac.new(
+        _oxaide_launch_secret().encode("utf-8"), body, hashlib.sha256
+    ).hexdigest()
+    request = urllib.request.Request(
+        _OXAIDE_REFRESH_ENDPOINT,
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "X-Oxaide-Runtime-Key": request_payload["runtime_key"],
+            "X-Oxaide-Signature": signature,
+        },
+    )
+    try:
+        from hermes_cli.urllib_security import open_credentialed_url
+
+        with open_credentialed_url(request, timeout=10.0) as response:
+            response_body = response.read(16_385)
+            response_signature = response.headers.get("X-Oxaide-Signature", "")
+    except urllib.error.HTTPError as exc:
+        response_body = exc.read(16_385)
+        response_signature = exc.headers.get("X-Oxaide-Signature", "")
+        expected_signature = hmac.new(
+            _oxaide_launch_secret().encode("utf-8"), response_body, hashlib.sha256
+        ).hexdigest()
+        if (
+            len(response_body) <= 16_384
+            and hmac.compare_digest(response_signature, expected_signature)
+        ):
+            try:
+                error_result = json.loads(response_body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                error_result = None
+            if (
+                isinstance(error_result, dict)
+                and error_result.get("nonce") == request_payload["nonce"]
+                and exc.code in {403, 404, 409, 410}
+            ):
+                raise RefreshExpiredError(
+                    "Oxaide runtime access is no longer active"
+                ) from exc
+        raise ProviderError(f"Oxaide session revalidation returned HTTP {exc.code}") from exc
+    except (OSError, urllib.error.URLError) as exc:
+        raise ProviderError("Oxaide session revalidation is unavailable") from exc
+    if len(response_body) > 16_384:
+        raise ProviderError("Oxaide session revalidation response is too large")
+    expected_signature = hmac.new(
+        _oxaide_launch_secret().encode("utf-8"), response_body, hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(response_signature, expected_signature):
+        raise ProviderError("Oxaide session revalidation response is untrusted")
+    try:
+        result = json.loads(response_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProviderError("Oxaide session revalidation response is invalid") from exc
+    if not isinstance(result, dict) or result.get("nonce") != request_payload["nonce"]:
+        raise ProviderError("Oxaide session revalidation response is stale")
+    access_state = str(result.get("access_state") or "")
+    if access_state not in _OXAIDE_ACCESS_STATES:
+        raise RefreshExpiredError("Oxaide runtime access is no longer active")
+    return access_state
+
+
+def _refresh_oxaide_session(refresh_token: str) -> Session | None:
+    """Renew a recognised Oxaide refresh session after control-plane validation."""
+    payload = _load_oxaide_refresh_session(refresh_token)
+    if payload is None:
+        return None
+    payload["access_state"] = _revalidate_oxaide_session(payload)
+    access_token = _encode_oxaide_session_token(payload)
+    session = _oxaide_session_from_token(access_token)
+    return Session(
+        **{
+            **session.__dict__,
+            "refresh_token": refresh_token,
+        }
+    )
+
+
 def _reset_oxaide_launch_tokens_for_tests() -> None:
     with _consumed_oxaide_launch_tokens_lock:
         db_path = get_hermes_home() / "oxaide-launch-tokens.db"
@@ -316,7 +471,7 @@ def _oxaide_session_from_token(token: str) -> Session:
         provider='oxaide-demo',
         expires_at=expires_at,
         access_token=token,
-        refresh_token=token,
+        refresh_token="",
         access_state=_oxaide_access_state(payload),
     )
 
@@ -459,8 +614,14 @@ async def auth_oxaide_launch(request: Request, token: str = '', next: str = ''):
 
     launch_payload = _decode_oxaide_launch_token(token)
     _consume_oxaide_launch_token(token, int(launch_payload.get("exp") or 0))
-    session = _oxaide_session_from_token(
-        _encode_oxaide_session_token(launch_payload)
+    access_token = _encode_oxaide_session_token(launch_payload)
+    refresh_token = _create_oxaide_refresh_session(launch_payload)
+    access_session = _oxaide_session_from_token(access_token)
+    session = Session(
+        **{
+            **access_session.__dict__,
+            "refresh_token": refresh_token,
+        }
     )
 
     audit_log(
@@ -1039,6 +1200,7 @@ async def auth_logout(request: Request):
         except HTTPException:
             sess = None
     if rt:
+        _revoke_oxaide_refresh_session(rt)
         # Best-effort revoke. Try every provider so a session minted by
         # any registered provider is revoked correctly. Failures are
         # logged but never raised.

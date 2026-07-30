@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 _DEFAULT_ENDPOINT = "https://oxaide.com/api/agents/billing/usage/record"
 _TIMEOUT_SECONDS = 5.0
 _HEARTBEAT_INTERVAL_SECONDS = 30.0
+_HEARTBEAT_RETRY_INTERVAL_SECONDS = 2.0
+_LEASE_SAFETY_MARGIN_SECONDS = 10.0
+_LEGACY_LEASE_GRACE_SECONDS = 75.0
 _TERMINAL_SETTLEMENT_CODES = {
     "runtime_session_not_authorized",
     "turn_already_completed",
@@ -37,6 +40,14 @@ _TERMINAL_SETTLEMENT_CODES = {
     "turn_reservation_binding_fenced",
     "turn_reservation_not_active",
     "turn_reservation_not_found",
+}
+_TERMINAL_HEARTBEAT_CODES = {
+    "runtime_session_not_authorized",
+    "turn_event_runtime_mismatch",
+    "turn_reservation_binding_fenced",
+    "turn_reservation_not_active",
+    "turn_reservation_not_found",
+    "workspace_entitlement_missing",
 }
 _EXPECTED_CODES = {
     "authorize": "turn_authorized",
@@ -49,8 +60,15 @@ _EXPECTED_CODES = {
 class OxaideTurnError(RuntimeError):
     """The Oxaide turn contract could not be satisfied."""
 
-    def __init__(self, message: str, *, code: str = "") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "",
+        retryable: bool = False,
+    ) -> None:
         self.code = code
+        self.retryable = retryable
         super().__init__(message)
 
 
@@ -127,6 +145,7 @@ class OxaideTurnClient:
         self._heartbeat_thread: threading.Thread | None = None
         self._state_lock = threading.Lock()
         self._settlement_started = False
+        self._lease_deadline = 0.0
 
     @classmethod
     def from_scheduled_occurrence(
@@ -154,7 +173,8 @@ class OxaideTurnClient:
         effective_event_id = str(event_id or uuid.uuid4().hex).strip()
         if not effective_event_id or len(effective_event_id) > 200:
             raise OxaideTurnError("invalid Oxaide turn event identity")
-        self._request("authorize", effective_event_id)
+        response = self._request("authorize", effective_event_id)
+        self._update_lease_deadline(response)
         if on_lease_lost is not None:
             self._start_heartbeat(effective_event_id, on_lease_lost)
         return OxaideTurn(client=self, event_id=effective_event_id)
@@ -163,24 +183,56 @@ class OxaideTurnClient:
         if self._heartbeat_thread is not None:
             raise OxaideTurnError("Oxaide turn heartbeat already started")
 
+        def lose_lease(error: OxaideTurnError) -> None:
+            self._heartbeat_stop.set()
+            code = error.code or "turn_lease_renewal_failed"
+            logger.error(
+                "Oxaide turn lease lost event=%s code=%s error=%s",
+                event_id[:12],
+                code,
+                error,
+            )
+            try:
+                on_lease_lost(code)
+            except Exception:
+                logger.exception("Oxaide turn lease-loss callback failed")
+
         def heartbeat_loop() -> None:
-            while not self._heartbeat_stop.wait(_HEARTBEAT_INTERVAL_SECONDS):
+            delay = _HEARTBEAT_INTERVAL_SECONDS
+            retrying = False
+            while not self._heartbeat_stop.wait(delay):
+                with self._state_lock:
+                    if self._settlement_started:
+                        return
+                    lease_remaining = self._lease_deadline - time.monotonic()
+                if retrying and lease_remaining <= 0:
+                    lose_lease(OxaideTurnError("turn lease renewal deadline elapsed"))
+                    return
                 try:
-                    self._request("heartbeat", event_id)
+                    response = self._request("heartbeat", event_id)
+                    self._update_lease_deadline(response)
+                    delay = _HEARTBEAT_INTERVAL_SECONDS
+                    retrying = False
                 except OxaideTurnError as exc:
                     with self._state_lock:
                         if self._settlement_started:
                             return
-                    self._heartbeat_stop.set()
-                    logger.error(
-                        "Oxaide turn lease lost event=%s error=%s",
-                        event_id[:12],
-                        exc,
-                    )
-                    try:
-                        on_lease_lost(str(exc) or "turn_lease_renewal_failed")
-                    except Exception:
-                        logger.exception("Oxaide turn lease-loss callback failed")
+                        lease_remaining = self._lease_deadline - time.monotonic()
+                    if exc.retryable and lease_remaining > 0:
+                        delay = min(
+                            _HEARTBEAT_RETRY_INTERVAL_SECONDS,
+                            lease_remaining,
+                        )
+                        retrying = True
+                        logger.warning(
+                            "Oxaide turn heartbeat retry event=%s "
+                            "lease_remaining=%.1fs error=%s",
+                            event_id[:12],
+                            lease_remaining,
+                            exc,
+                        )
+                        continue
+                    lose_lease(exc)
                     return
 
         self._heartbeat_thread = threading.Thread(
@@ -189,6 +241,26 @@ class OxaideTurnClient:
             daemon=True,
         )
         self._heartbeat_thread.start()
+
+    def _update_lease_deadline(self, response: dict[str, Any]) -> None:
+        grace_seconds = _LEGACY_LEASE_GRACE_SECONDS
+        lease_expires_at = str(response.get("lease_expires_at") or "").strip()
+        server_time = str(response.get("server_time") or "").strip()
+        if lease_expires_at and server_time:
+            try:
+                expires = datetime.fromisoformat(
+                    lease_expires_at.replace("Z", "+00:00")
+                )
+                issued = datetime.fromisoformat(server_time.replace("Z", "+00:00"))
+                grace_seconds = max(
+                    0.0,
+                    (expires - issued).total_seconds()
+                    - _LEASE_SAFETY_MARGIN_SECONDS,
+                )
+            except (TypeError, ValueError):
+                logger.warning("Oxaide turn response contained an invalid lease deadline")
+        with self._state_lock:
+            self._lease_deadline = time.monotonic() + grace_seconds
 
     def stop_heartbeat(self) -> None:
         with self._state_lock:
@@ -323,13 +395,17 @@ class OxaideTurnClient:
             raw = exc.read(16 * 1024)
         except Exception as exc:
             raise OxaideTurnError(
-                f"Oxaide turn endpoint unavailable ({type(exc).__name__})"
+                f"Oxaide turn endpoint unavailable ({type(exc).__name__})",
+                retryable=True,
             ) from exc
 
         try:
             response = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise OxaideTurnError("Oxaide turn endpoint returned invalid JSON") from exc
+            raise OxaideTurnError(
+                "Oxaide turn endpoint returned invalid JSON",
+                retryable=status >= 500,
+            ) from exc
         if not isinstance(response, dict):
             raise OxaideTurnError("Oxaide turn endpoint returned an invalid response")
 
@@ -337,9 +413,22 @@ class OxaideTurnClient:
         if status < 200 or status >= 300 or response.get("ok") is not True:
             if phase == "authorize":
                 raise OxaideTurnDenied(code)
+            retryable = (
+                code not in _TERMINAL_HEARTBEAT_CODES
+                and (
+                    status >= 500
+                    or status in {408, 425, 429}
+                    or code in {
+                        "runtime_signature_invalid",
+                        "runtime_timestamp_invalid",
+                        "turn_contract_internal_error",
+                    }
+                )
+            )
             raise OxaideTurnError(
                 code or f"Oxaide turn endpoint returned HTTP {status}",
                 code=code,
+                retryable=retryable,
             )
         if response.get("phase") != phase:
             raise OxaideTurnError("Oxaide turn response phase mismatch")

@@ -129,6 +129,11 @@ class TestPulseSocketReachable:
 
 
 class TestDetectAudioEnvironment:
+    @pytest.fixture(autouse=True)
+    def _default_to_non_container_host(self, monkeypatch):
+        """Keep host containerization from leaking into detector tests."""
+        monkeypatch.setattr("hermes_constants.is_container", lambda: False)
+
     def test_clean_environment_is_available(self, monkeypatch):
         """No SSH, Docker, or WSL — should be available."""
         monkeypatch.delenv("SSH_CLIENT", raising=False)
