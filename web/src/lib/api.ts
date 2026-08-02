@@ -714,6 +714,14 @@ export const api = {
     fetchJSON<ResearchSchedule[]>("/api/research-schedules"),
   getResearchScheduleOccurrences: () =>
     fetchJSON<ResearchScheduleOccurrencesResponse>("/api/research-schedules/occurrences"),
+  getScheduledResearchEmailConsent: () =>
+    fetchJSON<ScheduledResearchEmailConsent>("/api/research-schedules/consent"),
+  setScheduledResearchEmailConsent: (enabled: boolean, requestId = crypto.randomUUID()) =>
+    fetchJSON<ScheduledResearchEmailConsent>("/api/research-schedules/consent", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled, request_id: requestId }),
+    }),
   createResearchSchedule: (schedule: ResearchScheduleMutation) =>
     fetchJSON<ResearchSchedule>("/api/research-schedules", {
       method: "POST",
@@ -2293,7 +2301,20 @@ export interface ResearchScheduleMutation {
   name: string;
   prompt: string;
   schedule: string;
+  completion_email_enabled: boolean;
   request_id: string;
+}
+
+export interface ScheduledResearchEmailConsent {
+  consentType: "scheduled_research_emails";
+  granted: boolean;
+  active: boolean;
+  confirmedEmail: string | null;
+  grantedAt: string | null;
+  withdrawnAt: string | null;
+  expiresAt: string | null;
+  method: string | null;
+  legalBasis: string | null;
 }
 
 export interface ResearchScheduleOccurrence {
@@ -2308,8 +2329,7 @@ export interface ResearchScheduleOccurrence {
   completed_at?: string | null;
   error_code?: string | null;
   error_message?: string | null;
-  result_artifact_ref?: string | null;
-  result_session_id?: string | null;
+  result_url: string | null;
   created_at: string;
 }
 
@@ -2331,6 +2351,7 @@ export interface ResearchSchedule {
   };
   schedule_input: string;
   schedule_display: string;
+  completion_email_enabled: boolean;
   enabled: boolean;
   state: string;
   created_at?: string | null;

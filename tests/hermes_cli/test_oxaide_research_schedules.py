@@ -1,6 +1,7 @@
 """Behavioral coverage for the managed scheduled-research boundary."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from starlette.testclient import TestClient
@@ -81,10 +82,12 @@ def test_managed_schedule_lifecycle_and_safe_projection(managed_schedule_client)
         "schedule",
         "schedule_display",
         "schedule_input",
+        "completion_email_enabled",
         "state",
     }
     assert created["schedule_input"] == "every 1440m"
     assert created["enabled"] is True
+    assert created["completion_email_enabled"] is False
 
     stored = json.loads(
         (hermes_home / "cron" / "jobs.json").read_text(encoding="utf-8")
@@ -148,6 +151,17 @@ def test_managed_schedule_rejects_advanced_fields_and_profile_spoofing(
     generic = client.get("/api/cron/jobs")
     assert generic.status_code == 404
     assert generic.json() == {"detail": "Not found"}
+
+
+def test_local_schedule_rejects_completion_email_delivery(managed_schedule_client):
+    client, _hermes_home = managed_schedule_client
+
+    response = _create(client, completion_email_enabled=True)
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "detail": "completion_email_not_supported_in_local_mode",
+    }
 
 
 def test_managed_schedule_cannot_mutate_unowned_cron_job(managed_schedule_client):
@@ -247,6 +261,7 @@ def test_hosted_schedule_control_proxies_create_and_revision_fenced_update(monke
         name="Market review",
         prompt="Review overnight markets.",
         schedule="every 1h",
+        completion_email_enabled=True,
         request_id="00000000-0000-4000-8000-000000000099",
     )
 
@@ -256,6 +271,7 @@ def test_hosted_schedule_control_proxies_create_and_revision_fenced_update(monke
     assert created["mutation"]["schedule"]["kind"] == "interval"
     assert calls[-1][1] == "create"
     assert calls[-1][2]["request_id"] == body.request_id
+    assert calls[-1][2]["mutation"]["completion_email_enabled"] is True
 
     updated = web_server._hosted_schedule_control_sync(
         "user-1", "update", job_id=schedules[0]["id"], body=body
@@ -278,3 +294,106 @@ def test_hosted_schedule_mutation_requires_stable_request_id(monkeypatch):
     with pytest.raises(web_server.HTTPException) as exc_info:
         web_server._hosted_schedule_control_sync("user-1", "create", body=body)
     assert exc_info.value.status_code == 400
+
+
+def test_hosted_consent_control_forwards_authenticated_identity_and_request_id(monkeypatch):
+    from hermes_cli import oxaide_scheduled_research_control as control
+
+    calls = []
+    consent = {
+        "consentType": "scheduled_research_emails",
+        "granted": False,
+        "active": False,
+        "confirmedEmail": "owner@example.com",
+        "grantedAt": None,
+        "withdrawnAt": "2026-07-31T00:00:00Z",
+        "expiresAt": None,
+        "method": "explicit",
+        "legalBasis": "consent",
+    }
+
+    def fake_request(user_id, action, **fields):
+        calls.append((user_id, action, fields))
+        return consent
+
+    monkeypatch.setattr(control, "request_control", fake_request)
+
+    assert web_server._hosted_research_consent_control_sync(
+        "user-1", "get_consent"
+    ) == consent
+    assert web_server._hosted_research_consent_control_sync(
+        "user-1",
+        "set_consent",
+        enabled=False,
+        request_id="00000000-0000-4000-8000-000000000099",
+    ) == consent
+
+    assert calls[0] == ("user-1", "get_consent", {})
+    assert calls[1] == (
+        "user-1",
+        "set_consent",
+        {
+            "request_id": "00000000-0000-4000-8000-000000000099",
+            "enabled": False,
+        },
+    )
+
+
+def test_hosted_consent_user_id_comes_from_verified_session():
+    request = SimpleNamespace(
+        state=SimpleNamespace(session=SimpleNamespace(user_id="session-user-1"))
+    )
+    assert web_server._hosted_research_user_id(request) == "session-user-1"
+
+    with pytest.raises(web_server.HTTPException) as exc_info:
+        web_server._hosted_research_user_id(
+            SimpleNamespace(state=SimpleNamespace(session=None))
+        )
+    assert exc_info.value.status_code == 401
+
+
+def test_consent_path_has_an_exact_browser_allowlist():
+    assert web_server._oxaide_research_api_allowed(
+        "GET", "/api/research-schedules/consent"
+    ) is True
+    assert web_server._oxaide_research_api_allowed(
+        "PUT", "/api/research-schedules/consent"
+    ) is True
+    assert web_server._oxaide_research_api_allowed(
+        "POST", "/api/research-schedules/consent"
+    ) is False
+    assert web_server._oxaide_research_api_allowed(
+        "GET", "/api/research-schedules/consent", scheduled_research_enabled=False
+    ) is False
+
+
+def test_loopback_session_token_can_reach_hosted_consent_route(monkeypatch, managed_schedule_client):
+    client, _hermes_home = managed_schedule_client
+    monkeypatch.setenv("HERMES_OXAIDE_WORKSPACE_ID", "workspace-123")
+    monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", "runtimekey1234567890abcd")
+    monkeypatch.setenv("HERMES_OXAIDE_SCHEDULED_RESEARCH_SIGNING_SECRET", "s" * 43)
+    monkeypatch.setenv("HERMES_OXAIDE_USAGE_SIGNING_SECRET", "u" * 43)
+    monkeypatch.setattr(web_server, "_is_oxaide_hosted_runtime", lambda: True)
+    monkeypatch.setattr(web_server, "_hosted_research_user_id", lambda _request: "loopback-user")
+
+    from hermes_cli import oxaide_scheduled_research_control as control
+
+    monkeypatch.setattr(
+        control,
+        "request_control",
+        lambda user_id, action, **_fields: {
+            "consentType": "scheduled_research_emails",
+            "granted": True,
+            "active": True,
+            "confirmedEmail": "owner@example.com",
+            "grantedAt": None,
+            "withdrawnAt": None,
+            "expiresAt": None,
+            "method": "explicit",
+            "legalBasis": "consent",
+        },
+    )
+
+    response = client.get("/api/research-schedules/consent")
+    assert response.status_code == 200
+    assert response.json()["consentType"] == "scheduled_research_emails"

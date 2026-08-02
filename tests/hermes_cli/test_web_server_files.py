@@ -202,6 +202,194 @@ def test_hosted_legacy_fs_and_git_paths_stay_under_root(forced_files_client, tmp
     assert client.get("/api/git/status", params={"path": str(tmp_path)}).status_code == 403
 
 
+def test_hosted_result_namespace_is_hidden_and_blocked(forced_files_client):
+    client, root = forced_files_client
+    results = root / "research-results"
+    results.mkdir(parents=True)
+    artifact = results / "00000000-0000-0000-0000-000000000001.md"
+    artifact.write_text("private result")
+
+    managed_listing = client.get("/api/files", params={"path": "/"})
+    legacy_listing = client.get("/api/fs/list", params={"path": str(root)})
+
+    assert managed_listing.status_code == 200
+    assert "research-results" not in {
+        entry["name"] for entry in managed_listing.json()["entries"]
+    }
+    assert legacy_listing.status_code == 200
+    assert "research-results" not in {
+        entry["name"] for entry in legacy_listing.json()["entries"]
+    }
+
+    blocked_requests = (
+        client.get("/api/files", params={"path": "/research-results"}),
+        client.get("/api/files/read", params={"path": f"/research-results/{artifact.name}"}),
+        client.get("/api/files/download", params={"path": f"/research-results/{artifact.name}"}),
+        client.get("/api/fs/list", params={"path": str(results)}),
+        client.get("/api/fs/read-text", params={"path": str(artifact)}),
+        client.get("/api/fs/read-data-url", params={"path": str(artifact)}),
+        client.post(
+            "/api/fs/write-text",
+            json={"path": str(artifact), "content": "replacement"},
+        ),
+        client.post(
+            "/api/files/upload",
+            json={
+                "path": f"/research-results/{artifact.name}",
+                "data_url": "data:text/plain;base64,bGVhaw==",
+            },
+        ),
+        client.post("/api/files/mkdir", json={"path": "/research-results/new"}),
+        client.request(
+            "DELETE",
+            "/api/files",
+            json={"path": f"/research-results/{artifact.name}"},
+        ),
+    )
+    assert {response.status_code for response in blocked_requests} == {404}
+    assert artifact.read_text() == "private result"
+
+
+def test_hosted_result_namespace_blocks_lexical_and_canonical_aliases(
+    forced_files_client,
+    tmp_path,
+):
+    client, root = forced_files_client
+    results = root / "research-results"
+    results.mkdir(parents=True)
+    artifact = results / "result.md"
+    artifact.write_text("private result")
+
+    canonical_alias = root / "ordinary-alias"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        canonical_alias.symlink_to(results, target_is_directory=True)
+    except OSError:
+        pytest.skip("filesystem does not allow directory symlinks")
+
+    managed_listing = client.get("/api/files", params={"path": "/"})
+    legacy_listing = client.get("/api/fs/list", params={"path": str(root)})
+    managed_names = {entry["name"] for entry in managed_listing.json()["entries"]}
+    legacy_names = {entry["name"] for entry in legacy_listing.json()["entries"]}
+
+    assert "ordinary-alias" not in managed_names
+    assert "ordinary-alias" not in legacy_names
+    assert "research-results" not in managed_names
+    assert "research-results" not in legacy_names
+    assert client.get(
+        "/api/files/read",
+        params={"path": "/ordinary-alias/result.md"},
+    ).status_code == 404
+
+    canonical_alias.unlink()
+    artifact.unlink()
+    results.rmdir()
+    try:
+        results.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("filesystem does not allow directory symlinks")
+
+    managed_listing = client.get("/api/files", params={"path": "/"})
+    legacy_listing = client.get("/api/fs/list", params={"path": str(root)})
+    assert "research-results" not in {
+        entry["name"] for entry in managed_listing.json()["entries"]
+    }
+    assert "research-results" not in {
+        entry["name"] for entry in legacy_listing.json()["entries"]
+    }
+    assert client.get(
+        "/api/fs/list",
+        params={"path": str(results)},
+    ).status_code == 404
+
+
+def test_hosted_result_reservation_is_exact(
+    forced_files_client,
+):
+    hosted_client, hosted_root = forced_files_client
+
+    allowed_hosted_paths = (
+        hosted_root / "research-results-copy" / "report.md",
+        hosted_root / "projects" / "research-results" / "report.md",
+    )
+    for path in allowed_hosted_paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("ordinary file")
+        assert hosted_client.get(
+            "/api/files/read",
+            params={"path": str(path)},
+        ).status_code == 200
+        assert hosted_client.get(
+            "/api/fs/read-text",
+            params={"path": str(path)},
+        ).status_code == 200
+
+
+def test_local_result_directory_remains_browsable(local_files_client):
+    local_client, local_home = local_files_client
+
+    local_result = local_home / "research-results" / "report.md"
+    local_result.parent.mkdir()
+    local_result.write_text("local file")
+    assert local_client.get(
+        "/api/files/read",
+        params={"path": str(local_result)},
+    ).status_code == 200
+    assert local_client.get(
+        "/api/fs/read-text",
+        params={"path": str(local_result)},
+    ).status_code == 200
+
+
+def test_hosted_default_cwd_and_git_root_do_not_cross_reserved_boundary(
+    forced_files_client,
+    monkeypatch,
+    tmp_path,
+):
+    client, root = forced_files_client
+    root.mkdir(parents=True, exist_ok=True)
+    results = root / "research-results"
+    results.mkdir()
+    (tmp_path / ".git").mkdir()
+    source = root / "source.py"
+    source.write_text("print('safe')")
+
+    monkeypatch.setattr(
+        web_server,
+        "load_config",
+        lambda: {"terminal": {"cwd": str(results)}},
+    )
+
+    cwd = client.get("/api/fs/default-cwd")
+    git_root = client.get("/api/fs/git-root", params={"path": str(source)})
+
+    assert cwd.status_code == 200
+    assert cwd.json()["cwd"] == str(root.resolve())
+    assert git_root.status_code == 200
+    assert git_root.json()["root"] is None
+
+
+def test_hosted_media_route_blocks_result_alias(forced_files_client, monkeypatch):
+    client, root = forced_files_client
+    monkeypatch.setenv("HERMES_HOME", str(root))
+    results = root / "research-results"
+    results.mkdir(parents=True)
+    artifact = results / "private.png"
+    artifact.write_bytes(b"not really an image")
+    images = root / "images"
+    images.mkdir()
+    alias = images / "preview.png"
+    try:
+        alias.symlink_to(artifact)
+    except OSError:
+        pytest.skip("filesystem does not allow file symlinks")
+
+    response = client.get("/api/media", params={"path": str(alias)})
+
+    assert response.status_code == 404
+
+
 def test_hosted_legacy_fs_blocks_sensitive_files(forced_files_client):
     client, root = forced_files_client
     root.mkdir(parents=True, exist_ok=True)

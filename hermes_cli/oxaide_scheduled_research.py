@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import hmac
+import inspect
 import json
 import logging
 import os
@@ -23,6 +24,12 @@ import uuid
 from typing import Any
 
 from hermes_constants import get_hermes_home
+from hermes_cli.scheduled_research_results import (
+    delete_result,
+    result_path,
+    results_directory,
+    write_result_text,
+)
 from hermes_state import SessionDB
 
 logger = logging.getLogger(__name__)
@@ -288,29 +295,23 @@ def _compute_next_run(payload: dict[str, Any]) -> str | None:
     return compute_next_run(schedule, payload.get("nominal_fire_at"))
 
 
+def _scheduled_research_results_root() -> Path:
+    return results_directory()
+
+
+def scheduled_research_result_path(artifact_id: str) -> Path:
+    """Derive a result path from an opaque artifact UUID for local tests."""
+    return result_path(artifact_id)
+
+
 def _persist_occurrence_result(
-    occurrence_id: str,
+    artifact_id: str,
     document: Any,
     final_response: Any,
 ) -> str:
-    """Atomically persist a completed result under the managed files root."""
-    uuid.UUID(occurrence_id)
-    configured_root = str(
-        os.environ.get("HERMES_DASHBOARD_FILES_ROOT") or ""
-    ).strip()
-    if configured_root:
-        root = Path(configured_root).expanduser()
-    else:
-        root = Path("/opt/data") if Path("/opt/data").is_dir() else get_hermes_home()
-    results = root / "research-results"
-    results.mkdir(mode=0o700, parents=True, exist_ok=True)
-    target = results / f"{occurrence_id}.md"
+    """Immutably persist one attempt artifact under the reserved root."""
     content = str(document or final_response or "Scheduled research completed without a text result.")
-    temporary = results / f".{occurrence_id}.{uuid.uuid4().hex}.tmp"
-    temporary.write_text(content, encoding="utf-8")
-    temporary.chmod(0o600)
-    os.replace(temporary, target)
-    return f"/research-results/{occurrence_id}.md"
+    return write_result_text(artifact_id, content)
 
 
 def _event_endpoint() -> str:
@@ -377,6 +378,63 @@ def flush_occurrence_events(db: SessionDB | None = None) -> None:
             )
             if not delivered:
                 break
+        flush_occurrence_billing(db)
+    finally:
+        if owns_db:
+            db.close()
+
+
+def flush_occurrence_billing(db: SessionDB | None = None) -> None:
+    """Deliver only SQLite-proven winner settlements to Oxaide."""
+    from tui_gateway.oxaide_turns import OxaideTurnClient, OxaideTurnError
+
+    owns_db = db is None
+    db = db or _session_db()
+    try:
+        for settlement in db.list_pending_scheduled_research_billing(limit=20):
+            billing_event_id = settlement["billing_event_id"]
+            try:
+                client = OxaideTurnClient.from_scheduled_occurrence(
+                    workspace_id=settlement["workspace_id"],
+                    user_id=settlement["user_id"],
+                    runtime_key=settlement["runtime_key"],
+                    runtime_session_id=settlement["runtime_session_id"],
+                    occurrence_id=settlement["occurrence_id"],
+                )
+                completed_at = datetime.fromtimestamp(
+                    float(settlement["completed_at"]),
+                    tz=timezone.utc,
+                ).isoformat(timespec="seconds")
+                client.complete_scheduled_occurrence(
+                    billing_event_id,
+                    completed_at=completed_at,
+                    details={
+                        "schema_version": "2026-07-18-v1",
+                        "origin": "scheduled_research",
+                    },
+                )
+            except OxaideTurnError as exc:
+                terminal = OxaideTurnClient._is_terminal_settlement_error(exc)
+                db.settle_scheduled_research_billing(
+                    billing_event_id,
+                    delivered=False,
+                    dead_letter=terminal,
+                    error=exc.code or str(exc),
+                )
+                if not terminal:
+                    break
+            except Exception as exc:
+                db.settle_scheduled_research_billing(
+                    billing_event_id,
+                    delivered=False,
+                    error=f"{type(exc).__name__}:{exc}",
+                )
+                break
+            else:
+                db.settle_scheduled_research_billing(
+                    billing_event_id,
+                    delivered=True,
+                )
     finally:
         if owns_db:
             db.close()
@@ -389,12 +447,18 @@ def _run_occurrence(db: SessionDB, claim: dict[str, Any]) -> None:
     payload = claim["payload"]
     occurrence_id = payload["occurrence_id"]
     lease_token = claim["lease_token"]
+    billing_event_id = str(uuid.uuid4())
     lease_lost = threading.Event()
+    client = None
     turn = None
     terminal_status = "failed"
     error_code = None
     error_message = None
     success = False
+    final_hermes_session_id = None
+    result_artifact_id = None
+    result_artifact_ref = None
+    final_session_capture: list[str | None] = []
     local_lease_stop = threading.Event()
 
     def renew_local_lease() -> None:
@@ -424,10 +488,11 @@ def _run_occurrence(db: SessionDB, claim: dict[str, Any]) -> None:
             user_id=payload["user_id"],
             runtime_key=payload["runtime_key"],
             runtime_session_id=payload["runtime_session_id"],
+            occurrence_id=occurrence_id,
         )
         turn = client.authorize(
             lambda _reason: lease_lost.set(),
-            event_id=occurrence_id,
+            event_id=billing_event_id,
         )
         enqueue_occurrence_event(db, payload, 2, "running")
         flush_occurrence_events(db)
@@ -450,32 +515,49 @@ def _run_occurrence(db: SessionDB, claim: dict[str, Any]) -> None:
             "attach_to_session": False,
             "origin": {"type": "oxaide-scheduled-research-v1"},
         }
-        success, document, final_response, run_error = run_job(
-            job, cancel_requested=lease_lost.is_set
-        )
+        run_job_kwargs: dict[str, Any] = {
+            "cancel_requested": lease_lost.is_set,
+        }
+        try:
+            run_job_parameters = inspect.signature(run_job).parameters.values()
+            accepts_final_session_capture = any(
+                parameter.name == "final_session_id"
+                or parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in run_job_parameters
+            )
+        except (TypeError, ValueError):
+            accepts_final_session_capture = False
+        if accepts_final_session_capture:
+            run_job_kwargs["final_session_id"] = final_session_capture
+        try:
+            success, document, final_response, run_error = run_job(
+                job, **run_job_kwargs
+            )
+        finally:
+            if final_session_capture:
+                final_hermes_session_id = final_session_capture[-1]
+            if final_hermes_session_id:
+                final_hermes_session_id = str(final_hermes_session_id).strip() or None
         if "managed_scheduled_research_timeout" in str(run_error or ""):
             terminal_status = "failed"
             error_code = "execution_timeout"
             error_message = (
                 "Scheduled research exceeded the 3 minute execution limit."
             )
-            turn.release()
         elif lease_lost.is_set():
             terminal_status = "released"
             error_code = "billing_lease_lost"
             error_message = "Scheduled research authorization expired during execution."
-            turn.release()
         elif success:
+            if not final_hermes_session_id:
+                raise RuntimeError("scheduled_research_final_session_missing")
+            result_artifact_id = str(uuid.uuid4())
             result_artifact_ref = _persist_occurrence_result(
-                occurrence_id, document, final_response
+                result_artifact_id, document, final_response
             )
-            turn.complete({
-                "schema_version": "2026-07-18-v1",
-                "origin": "scheduled_research",
-            })
+            result_artifact_ref = f"/research-results/{result_artifact_ref}.md"
             terminal_status = "completed"
         else:
-            turn.release()
             terminal_status = "failed"
             error_code = "execution_failed"
             error_message = str(run_error or "Scheduled research execution failed.")[:2000]
@@ -484,8 +566,6 @@ def _run_occurrence(db: SessionDB, claim: dict[str, Any]) -> None:
         error_code = exc.code or "turn_authorization_denied"
         error_message = "Scheduled research was not authorized."
     except Exception as exc:
-        if turn is not None:
-            turn.release()
         terminal_status = "released" if lease_lost.is_set() else "failed"
         error_code = (
             "billing_lease_lost" if lease_lost.is_set()
@@ -496,26 +576,57 @@ def _run_occurrence(db: SessionDB, claim: dict[str, Any]) -> None:
 
     local_lease_stop.set()
     local_lease_thread.join(timeout=5.0)
-    finished = db.finish_scheduled_research_occurrence(
-        occurrence_id,
-        lease_token,
-        terminal_status,
-        billing_event_id=occurrence_id,
-        error_code=error_code if terminal_status == "failed" else None,
-        error=error_message if terminal_status == "failed" else None,
-    )
+    try:
+        event_fields: dict[str, Any] = {"next_run_at": _compute_next_run(payload)}
+        if terminal_status == "completed":
+            event_fields["billing_event_id"] = billing_event_id
+            event_fields["result_artifact_ref"] = result_artifact_ref
+            event_fields["result_session_id"] = final_hermes_session_id
+        if terminal_status == "failed":
+            event_fields.update({
+                "error_code": error_code or "execution_failed",
+                "error_message": error_message or "Scheduled research execution failed.",
+            })
+        terminal_event_id, terminal_event_body = _event_body(
+            payload,
+            terminal_status,
+            **event_fields,
+        )
+        finished = db.finish_scheduled_research_occurrence(
+            occurrence_id,
+            lease_token,
+            terminal_status,
+            billing_event_id=(
+                billing_event_id if terminal_status == "completed" else None
+            ),
+            hermes_session_id=final_hermes_session_id,
+            result_artifact_id=result_artifact_id,
+            error_code=error_code if terminal_status == "failed" else None,
+            error=error_message if terminal_status == "failed" else None,
+            terminal_event_id=terminal_event_id,
+            terminal_event_body=terminal_event_body,
+        )
+    except BaseException:
+        if result_artifact_id is not None:
+            delete_result(result_artifact_id)
+        if turn is not None:
+            turn.release()
+        raise
     if not finished:
+        if result_artifact_id is not None:
+            delete_result(result_artifact_id)
+        if turn is not None:
+            turn.release()
         logger.error("Scheduled research local lease lost id=%s", occurrence_id)
         return
-    event_fields: dict[str, Any] = {"next_run_at": _compute_next_run(payload)}
     if terminal_status == "completed":
-        event_fields["result_artifact_ref"] = result_artifact_ref
-    if terminal_status == "failed":
-        event_fields.update({
-            "error_code": error_code or "execution_failed",
-            "error_message": error_message or "Scheduled research execution failed.",
-        })
-    enqueue_occurrence_event(db, payload, 3, terminal_status, **event_fields)
+        if client is not None:
+            client.stop_heartbeat()
+    else:
+        if result_artifact_id is not None:
+            delete_result(result_artifact_id)
+        if turn is not None:
+            turn.release()
     flush_occurrence_events(db)
 
 

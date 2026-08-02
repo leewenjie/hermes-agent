@@ -8,10 +8,7 @@ Covers:
 - The browser_registry resolves an active provider in the documented
   scenarios:
     * explicit config wins ignoring availability (so dispatcher surfaces
-      a typed credentials error)
     * legacy preference walk: browser-use → browserbase (filtered by
-      availability)
-    * firecrawl is NOT in the legacy walk — explicit-only
     * unknown name falls through to auto-detect
     * ``local`` short-circuits to None
 
@@ -42,6 +39,9 @@ def _clear_browser_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "FIRECRAWL_API_KEY",
         "FIRECRAWL_API_URL",
         "FIRECRAWL_BROWSER_TTL",
+        "CLOUDFLARE_ACCOUNT_ID",
+        "CLOUDFLARE_API_TOKEN",
+        "CLOUDFLARE_BROWSER_API_BASE_URL",
         "TOOL_GATEWAY_DOMAIN",
         "TOOL_GATEWAY_USER_TOKEN",
     ):
@@ -79,7 +79,7 @@ class TestBundledPluginsRegister:
         from agent.browser_registry import list_providers
 
         names = sorted(p.name for p in list_providers())
-        assert names == ["browser-use", "browserbase", "firecrawl"]
+        assert names == ["browser-use", "browserbase", "cloudflare", "firecrawl"]
 
     @pytest.mark.parametrize(
         "plugin_name,expected_display",
@@ -87,6 +87,7 @@ class TestBundledPluginsRegister:
             ("browserbase", "Browserbase"),
             ("browser-use", "Browser Use"),
             ("firecrawl", "Firecrawl"),
+            ("cloudflare", "Cloudflare Browser Run"),
         ],
     )
     def test_each_plugin_has_name_and_display_name(
@@ -102,7 +103,7 @@ class TestBundledPluginsRegister:
 
     @pytest.mark.parametrize(
         "plugin_name",
-        ["browserbase", "browser-use", "firecrawl"],
+        ["browserbase", "browser-use", "firecrawl", "cloudflare"],
     )
     def test_each_plugin_has_setup_schema(self, plugin_name: str) -> None:
         """``get_setup_schema()`` returns a dict the picker can consume."""
@@ -121,7 +122,7 @@ class TestBundledPluginsRegister:
 
     @pytest.mark.parametrize(
         "plugin_name",
-        ["browserbase", "browser-use", "firecrawl"],
+        ["browserbase", "browser-use", "firecrawl", "cloudflare"],
     )
     def test_each_plugin_implements_full_lifecycle(self, plugin_name: str) -> None:
         """The ABC's three lifecycle methods are all overridden."""
@@ -205,6 +206,19 @@ class TestIsAvailable:
 # ---------------------------------------------------------------------------
 
 
+    def test_cloudflare_requires_account_and_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _ensure_plugins_loaded()
+        from agent.browser_registry import get_provider
+
+        p = get_provider("cloudflare")
+        assert p is not None
+        assert p.is_available() is False
+        monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "account")
+        assert p.is_available() is False
+        monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "token")
+        assert p.is_available() is True
 class TestRegistryResolution:
     """``_resolve()`` implements the documented three-rule precedence."""
 
@@ -348,7 +362,7 @@ class TestLegacyAbcAliases:
 
 
 class TestPickerIntegration:
-    """`_plugin_browser_providers()` exposes all three plugins as picker rows."""
+    """`_plugin_browser_providers()` exposes all bundled plugins as picker rows."""
 
     def test_picker_rows_match_registered_plugins(self) -> None:
         _ensure_plugins_loaded()
@@ -356,7 +370,7 @@ class TestPickerIntegration:
 
         rows = _plugin_browser_providers()
         names = sorted(r.get("browser_provider") for r in rows)
-        assert names == ["browser-use", "browserbase", "firecrawl"]
+        assert names == ["browser-use", "browserbase", "cloudflare", "firecrawl"]
 
     def test_picker_rows_carry_post_setup_hook(self) -> None:
         """Every browser plugin row has post_setup='agent_browser' so

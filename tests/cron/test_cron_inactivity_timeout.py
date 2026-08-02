@@ -14,6 +14,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 
 # Ensure project root is importable
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -343,19 +345,25 @@ def test_active_managed_occurrence_hits_wall_clock_deadline(monkeypatch):
     monkeypatch.setattr(
         scheduler, "_OXAIDE_MANAGED_EXECUTION_TIMEOUT_SECONDS", 0.02
     )
-    monkeypatch.setenv("HERMES_OXAIDE_MODEL", "test-model")
-    monkeypatch.setenv("HERMES_OXAIDE_PROVIDER", "openrouter")
+    monkeypatch.setenv("HERMES_OXAIDE_MODEL", "gpt-5.6-luna")
+    monkeypatch.setenv("HERMES_OXAIDE_PROVIDER", "azure-foundry")
     monkeypatch.setattr(run_agent, "AIAgent", ActiveManagedAgent)
+    resolver_kwargs = {}
+
+    def resolve_managed_runtime(**kwargs):
+        resolver_kwargs.update(kwargs)
+        return {
+            "provider": "azure-foundry",
+            "api_mode": "codex_responses",
+            "base_url": "https://resource.openai.azure.com/openai/v1",
+            "api_key": "test-key",
+            "source": "test",
+        }
+
     monkeypatch.setattr(
         runtime_provider,
         "resolve_runtime_provider",
-        lambda **_kwargs: {
-            "provider": "openrouter",
-            "api_mode": "chat_completions",
-            "base_url": "https://openrouter.ai/api/v1",
-            "api_key": "test-key",
-            "source": "test",
-        },
+        resolve_managed_runtime,
     )
 
     success, _document, _response, error = scheduler.run_job({
@@ -371,3 +379,49 @@ def test_active_managed_occurrence_hits_wall_clock_deadline(monkeypatch):
     assert error == "TimeoutError: managed_scheduled_research_timeout"
     assert agent is not None and agent._interrupted is True
     assert "execution deadline" in agent._interrupt_msg
+    assert resolver_kwargs["requested"] == "azure-foundry"
+    assert resolver_kwargs["target_model"] == "gpt-5.6-luna"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("provider", "openrouter", "unapproved provider"),
+        ("api_mode", "chat_completions", "unapproved API mode"),
+        ("base_url", "https://openrouter.ai/api/v1", "non-Azure endpoint"),
+        (
+            "base_url",
+            "https://openai.azure.com.attacker.test/openai/v1",
+            "non-Azure endpoint",
+        ),
+    ],
+)
+def test_managed_runtime_rejects_unapproved_resolution(field, value, message):
+    """Managed occurrences cannot be redirected by a bad resolver result."""
+    from cron.scheduler import _validate_oxaide_managed_runtime
+
+    runtime = {
+        "provider": "azure-foundry",
+        "api_mode": "codex_responses",
+        "base_url": "https://resource.openai.azure.com/openai/v1",
+    }
+    runtime[field] = value
+
+    with pytest.raises(RuntimeError, match=message):
+        _validate_oxaide_managed_runtime(runtime)
+
+
+def test_managed_runtime_accepts_approved_azure_hosts():
+    from cron.scheduler import _validate_oxaide_managed_runtime
+
+    for host in (
+        "https://resource.openai.azure.com/openai/v1",
+        "https://resource.services.ai.azure.com/openai/v1",
+    ):
+        _validate_oxaide_managed_runtime(
+            {
+                "provider": "azure-foundry",
+                "api_mode": "codex_responses",
+                "base_url": host,
+            }
+        )

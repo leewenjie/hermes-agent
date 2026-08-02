@@ -15,6 +15,7 @@ Key design decisions:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import random
@@ -141,11 +142,15 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 
 class ScheduledResearchOccurrenceConflict(RuntimeError):
     """An occurrence ID was replayed with different immutable content."""
+
+
+class OxaideResearchLaunchConflict(RuntimeError):
+    """A launch dispatch ID was replayed with different immutable content."""
 
 # Cap on user-controlled FTS5 query input before regex/sanitizer processing.
 # Search queries do not need to be arbitrarily large, and bounding them keeps
@@ -869,6 +874,7 @@ CREATE TABLE IF NOT EXISTS scheduled_research_occurrences (
     lease_token TEXT,
     lease_expires_at REAL,
     hermes_session_id TEXT,
+    result_artifact_id TEXT,
     billing_event_id TEXT,
     accepted_at REAL NOT NULL,
     started_at REAL,
@@ -893,6 +899,39 @@ CREATE TABLE IF NOT EXISTS scheduled_research_event_outbox (
     UNIQUE (occurrence_id, sequence)
 );
 
+CREATE TABLE IF NOT EXISTS scheduled_research_billing_outbox (
+    billing_event_id TEXT PRIMARY KEY,
+    occurrence_id TEXT NOT NULL UNIQUE REFERENCES scheduled_research_occurrences(occurrence_id),
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    available_at REAL NOT NULL,
+    last_error TEXT,
+    delivered_at REAL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    CHECK (status IN ('pending', 'delivered', 'dead_letter'))
+);
+
+CREATE TABLE IF NOT EXISTS oxaide_research_launch_dispatches (
+    dispatch_id TEXT PRIMARY KEY,
+    payload_digest TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    runtime_key TEXT NOT NULL,
+    runtime_session_id TEXT NOT NULL,
+    prompt_digest TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'accepted',
+    hermes_session_id TEXT,
+    lease_token TEXT,
+    lease_expires_at REAL,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    accepted_at REAL NOT NULL,
+    submitted_at REAL,
+    last_error TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_source_id ON sessions(source, id);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
@@ -907,6 +946,10 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_research_occurrences_claim
     ON scheduled_research_occurrences(status, lease_expires_at, accepted_at);
 CREATE INDEX IF NOT EXISTS idx_scheduled_research_event_delivery
     ON scheduled_research_event_outbox(status, available_at, occurrence_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_scheduled_research_billing_delivery
+    ON scheduled_research_billing_outbox(status, available_at, created_at);
+CREATE INDEX IF NOT EXISTS idx_oxaide_research_launch_dispatch_status
+    ON oxaide_research_launch_dispatches(status, lease_expires_at, accepted_at);
 """
 
 # Indexes that reference columns added in later schema versions must be
@@ -1333,6 +1376,194 @@ class SessionDB:
 
     # ── Managed Scheduled Research ─────────────────────────────────────
 
+    def accept_oxaide_research_launch_dispatch(
+        self,
+        payload: Dict[str, Any],
+        payload_digest: str,
+    ) -> Dict[str, Any]:
+        """Persist an immutable launch dispatch and return its durable state."""
+        now = time.time()
+        prompt_digest = hashlib.sha256(payload["prompt"].encode("utf-8")).hexdigest()
+
+        def _accept(conn: sqlite3.Connection) -> Dict[str, Any]:
+            row = conn.execute(
+                "SELECT * FROM oxaide_research_launch_dispatches WHERE dispatch_id = ?",
+                (payload["dispatch_id"],),
+            ).fetchone()
+            if row is not None:
+                immutable = (
+                    row["payload_digest"] == payload_digest
+                    and row["workspace_id"] == payload["workspace_id"]
+                    and row["user_id"] == payload["user_id"]
+                    and row["runtime_key"] == payload["runtime_key"]
+                    and row["runtime_session_id"] == payload["runtime_session_id"]
+                    and row["prompt_digest"] == prompt_digest
+                )
+                if not immutable:
+                    raise OxaideResearchLaunchConflict("research_launch_dispatch_reused")
+                result = dict(row)
+                result["replayed"] = True
+                return result
+            conn.execute(
+                """INSERT INTO oxaide_research_launch_dispatches (
+                       dispatch_id, payload_digest, workspace_id, user_id,
+                       runtime_key, runtime_session_id, prompt_digest, status,
+                       accepted_at, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, 'accepted', ?, ?, ?)""",
+                (
+                    payload["dispatch_id"], payload_digest,
+                    payload["workspace_id"], payload["user_id"],
+                    payload["runtime_key"], payload["runtime_session_id"],
+                    prompt_digest, now, now, now,
+                ),
+            )
+            return {
+                "dispatch_id": payload["dispatch_id"],
+                "status": "accepted",
+                "hermes_session_id": None,
+                "replayed": False,
+            }
+
+        return self._execute_write(_accept)
+
+    def claim_oxaide_research_launch_dispatch(
+        self,
+        dispatch_id: str,
+        *,
+        lease_seconds: int = 120,
+    ) -> Optional[str]:
+        """Claim an unsubmitted dispatch; return its lease token to the winner."""
+        now = time.time()
+        lease_token = uuid.uuid4().hex
+
+        def _claim(conn: sqlite3.Connection) -> Optional[str]:
+            updated = conn.execute(
+                """UPDATE oxaide_research_launch_dispatches
+                   SET status = 'submitting', lease_token = ?, lease_expires_at = ?,
+                       attempt_count = attempt_count + 1, updated_at = ?
+                   WHERE dispatch_id = ? AND (
+                       status = 'accepted'
+                       OR (status = 'submitting' AND lease_expires_at < ?)
+                   )""",
+                (lease_token, now + lease_seconds, now, dispatch_id, now),
+            )
+            return lease_token if updated.rowcount == 1 else None
+
+        return self._execute_write(_claim)
+
+    def attach_oxaide_research_launch_session(
+        self,
+        dispatch_id: str,
+        lease_token: str,
+        hermes_session_id: str,
+        user_id: str,
+    ) -> bool:
+        """Atomically persist and attach the session used by a launch dispatch."""
+        now = time.time()
+
+        def _attach(conn: sqlite3.Connection) -> bool:
+            conn.execute(
+                """INSERT INTO sessions (id, source, user_id, started_at)
+                   VALUES (?, 'oxaide', ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                       user_id = CASE
+                           WHEN TRIM(COALESCE(sessions.user_id, '')) = ''
+                            AND TRIM(COALESCE(excluded.user_id, '')) != ''
+                           THEN excluded.user_id
+                           ELSE sessions.user_id
+                       END""",
+                (hermes_session_id, user_id, now),
+            )
+            session = conn.execute(
+                "SELECT user_id FROM sessions WHERE id = ?",
+                (hermes_session_id,),
+            ).fetchone()
+            if session is None or str(session["user_id"] or "").strip() != user_id:
+                raise OxaideResearchLaunchConflict("research_launch_session_owner_mismatch")
+            updated = conn.execute(
+                """UPDATE oxaide_research_launch_dispatches
+                   SET hermes_session_id = COALESCE(hermes_session_id, ?), updated_at = ?
+                   WHERE dispatch_id = ? AND status = 'submitting' AND lease_token = ?
+                     AND lease_expires_at >= ?
+                     AND (hermes_session_id IS NULL OR hermes_session_id = ?)""",
+                (
+                    hermes_session_id,
+                    now,
+                    dispatch_id,
+                    lease_token,
+                    now,
+                    hermes_session_id,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise OxaideResearchLaunchConflict("research_launch_session_lease_lost")
+            return True
+
+        return self._execute_write(_attach)
+
+    def complete_oxaide_research_launch_dispatch(
+        self,
+        dispatch_id: str,
+        lease_token: str,
+    ) -> bool:
+        now = time.time()
+
+        def _complete(conn: sqlite3.Connection) -> bool:
+            updated = conn.execute(
+                """UPDATE oxaide_research_launch_dispatches
+                   SET status = 'submitted', lease_token = NULL,
+                       lease_expires_at = NULL, submitted_at = ?, last_error = NULL,
+                       updated_at = ?
+                   WHERE dispatch_id = ? AND status = 'submitting'
+                     AND lease_token = ? AND hermes_session_id IS NOT NULL""",
+                (now, now, dispatch_id, lease_token),
+            )
+            return updated.rowcount == 1
+
+        return self._execute_write(_complete)
+
+    def release_oxaide_research_launch_dispatch(
+        self,
+        dispatch_id: str,
+        lease_token: str,
+        error: str,
+    ) -> bool:
+        now = time.time()
+
+        def _release(conn: sqlite3.Connection) -> bool:
+            updated = conn.execute(
+                """UPDATE oxaide_research_launch_dispatches
+                   SET status = 'accepted', lease_token = NULL,
+                       lease_expires_at = NULL, last_error = ?, updated_at = ?
+                   WHERE dispatch_id = ? AND status = 'submitting' AND lease_token = ?""",
+                (str(error or "dispatch_failed")[:200], now, dispatch_id, lease_token),
+            )
+            return updated.rowcount == 1
+
+        return self._execute_write(_release)
+
+    def get_oxaide_research_launch_dispatch(self, dispatch_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM oxaide_research_launch_dispatches WHERE dispatch_id = ?",
+                (dispatch_id,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def oxaide_research_launch_user_turn_is_durable(self, dispatch_id: str) -> bool:
+        """Return whether the dispatch's dedicated session has a durable user turn."""
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT 1
+                   FROM oxaide_research_launch_dispatches dispatch
+                   JOIN messages message ON message.session_id = dispatch.hermes_session_id
+                   WHERE dispatch.dispatch_id = ? AND message.role = 'user'
+                     AND COALESCE(message.active, 1) = 1
+                   LIMIT 1""",
+                (dispatch_id,),
+            ).fetchone()
+            return row is not None
+
     def accept_scheduled_research_occurrence(
         self,
         payload: Dict[str, Any],
@@ -1483,6 +1714,67 @@ class SessionDB:
             )
         return json.loads(row["payload_json"])
 
+    def get_authorized_scheduled_research_result(
+        self,
+        occurrence_id: str,
+        *,
+        workspace_id: str,
+        user_id: str,
+        runtime_key: str,
+        runtime_session_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the narrow durable authorization facts for a result.
+
+        Result access is intentionally bound to the immutable occurrence
+        identity, its completed lifecycle state, the final Hermes session,
+        and the immutable artifact UUID committed by the winning lease.
+        Filesystem paths are never stored in or accepted by this method.
+
+        ``None`` is returned for unknown, mismatched, incomplete, or
+        identity-less occurrences so the HTTP boundary can expose one uniform
+        authorization failure without leaking row state.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT occurrence_id, workspace_id, user_id, runtime_key,
+                          runtime_session_id, hermes_session_id,
+                          result_artifact_id, billing_event_id, completed_at
+                   FROM scheduled_research_occurrences
+                   WHERE occurrence_id = ?
+                     AND workspace_id = ?
+                     AND user_id = ?
+                     AND runtime_key = ?
+                     AND runtime_session_id = ?
+                     AND status = 'completed'
+                     AND completed_at IS NOT NULL
+                     AND hermes_session_id IS NOT NULL
+                     AND TRIM(hermes_session_id) != ''
+                     AND result_artifact_id IS NOT NULL
+                     AND TRIM(result_artifact_id) != ''
+                     AND billing_event_id IS NOT NULL
+                     AND TRIM(billing_event_id) != ''""",
+                (
+                    occurrence_id,
+                    workspace_id,
+                    user_id,
+                    runtime_key,
+                    runtime_session_id,
+                ),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "occurrence_id": row["occurrence_id"],
+            "workspace_id": row["workspace_id"],
+            "user_id": row["user_id"],
+            "runtime_key": row["runtime_key"],
+            "runtime_session_id": row["runtime_session_id"],
+            "hermes_session_id": row["hermes_session_id"],
+            "result_artifact_id": row["result_artifact_id"],
+            "billing_event_id": row["billing_event_id"],
+            "completed_at": row["completed_at"],
+        }
+
     def finish_scheduled_research_occurrence(
         self,
         occurrence_id: str,
@@ -1491,11 +1783,30 @@ class SessionDB:
         *,
         billing_event_id: Optional[str] = None,
         hermes_session_id: Optional[str] = None,
+        result_artifact_id: Optional[str] = None,
         error_code: Optional[str] = None,
         error: Optional[str] = None,
+        terminal_event_id: Optional[str] = None,
+        terminal_event_body: Optional[str] = None,
     ) -> bool:
         if status not in {"completed", "failed", "released"}:
             raise ValueError("invalid scheduled research terminal status")
+        if status == "completed" and not result_artifact_id:
+            raise ValueError("completed scheduled research requires an artifact id")
+        if status == "completed" and not billing_event_id:
+            raise ValueError("completed scheduled research requires a billing event id")
+        if status == "completed" and not (terminal_event_id and terminal_event_body):
+            raise ValueError("completed scheduled research requires a terminal event")
+        if status == "completed":
+            try:
+                result_artifact_id = str(uuid.UUID(str(result_artifact_id)))
+                billing_event_id = str(uuid.UUID(str(billing_event_id)))
+            except (ValueError, AttributeError, TypeError) as exc:
+                raise ValueError(
+                    "completed scheduled research identities must be UUIDs"
+                ) from exc
+        if bool(terminal_event_id) != bool(terminal_event_body):
+            raise ValueError("terminal event id and body must be provided together")
         now = time.time()
 
         def _finish(conn: sqlite3.Connection) -> bool:
@@ -1504,16 +1815,44 @@ class SessionDB:
                    SET status = ?, lease_token = NULL, lease_expires_at = NULL,
                        billing_event_id = COALESCE(?, billing_event_id),
                        hermes_session_id = COALESCE(?, hermes_session_id),
+                       result_artifact_id = CASE
+                           WHEN ? = 'completed' THEN ?
+                           ELSE result_artifact_id
+                       END,
                        completed_at = ?, last_error_code = ?, last_error = ?,
                        updated_at = ?
                    WHERE occurrence_id = ? AND status = 'running'
-                     AND lease_token = ?""",
+                     AND lease_token = ? AND lease_expires_at >= ?""",
                 (
-                    status, billing_event_id, hermes_session_id, now,
-                    error_code, error, now, occurrence_id, lease_token,
+                    status, billing_event_id, hermes_session_id,
+                    status, result_artifact_id, now, error_code, error, now,
+                    occurrence_id, lease_token, now,
                 ),
             )
-            return cursor.rowcount == 1
+            finished = cursor.rowcount == 1
+            if finished and terminal_event_id and terminal_event_body:
+                conn.execute(
+                    """INSERT INTO scheduled_research_event_outbox (
+                           event_id, occurrence_id, sequence, raw_body,
+                           available_at, created_at
+                       ) VALUES (?, ?, 3, ?, ?, ?)""",
+                    (
+                        terminal_event_id,
+                        occurrence_id,
+                        terminal_event_body,
+                        now,
+                        now,
+                    ),
+                )
+            if finished and status == "completed":
+                conn.execute(
+                    """INSERT INTO scheduled_research_billing_outbox (
+                           billing_event_id, occurrence_id, status,
+                           available_at, created_at, updated_at
+                       ) VALUES (?, ?, 'pending', ?, ?, ?)""",
+                    (billing_event_id, occurrence_id, now, now, now),
+                )
+            return finished
 
         return self._execute_write(_finish)
 
@@ -1616,6 +1955,95 @@ class SessionDB:
                 )
 
         self._execute_write(_settle)
+
+    def list_pending_scheduled_research_billing(
+        self,
+        *,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """List winner settlements whose lifecycle proof is acknowledged."""
+        now = time.time()
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT billing.billing_event_id, billing.occurrence_id,
+                          billing.attempt_count, occurrence.workspace_id,
+                          occurrence.user_id, occurrence.runtime_key,
+                          occurrence.runtime_session_id,
+                          occurrence.completed_at
+                     FROM scheduled_research_billing_outbox billing
+                     JOIN scheduled_research_occurrences occurrence
+                       ON occurrence.occurrence_id = billing.occurrence_id
+                    WHERE billing.status = 'pending'
+                      AND billing.available_at <= ?
+                      AND occurrence.status = 'completed'
+                      AND occurrence.billing_event_id = billing.billing_event_id
+                      AND EXISTS (
+                          SELECT 1
+                            FROM scheduled_research_event_outbox event
+                           WHERE event.occurrence_id = billing.occurrence_id
+                             AND event.sequence = 3
+                             AND event.status = 'delivered'
+                      )
+                    ORDER BY billing.created_at, billing.billing_event_id
+                    LIMIT ?""",
+                (now, max(1, min(int(limit), 100))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def settle_scheduled_research_billing(
+        self,
+        billing_event_id: str,
+        *,
+        delivered: bool,
+        error: Optional[str] = None,
+        dead_letter: bool = False,
+    ) -> bool:
+        now = time.time()
+
+        def _settle(conn: sqlite3.Connection) -> bool:
+            if delivered:
+                cursor = conn.execute(
+                    """UPDATE scheduled_research_billing_outbox
+                          SET status = 'delivered', delivered_at = ?,
+                              last_error = NULL, updated_at = ?
+                        WHERE billing_event_id = ? AND status = 'pending'""",
+                    (now, now, billing_event_id),
+                )
+            elif dead_letter:
+                cursor = conn.execute(
+                    """UPDATE scheduled_research_billing_outbox
+                          SET status = 'dead_letter', attempt_count = attempt_count + 1,
+                              last_error = ?, updated_at = ?
+                        WHERE billing_event_id = ? AND status = 'pending'""",
+                    ((error or "billing_settlement_rejected")[:1000], now, billing_event_id),
+                )
+            else:
+                row = conn.execute(
+                    """SELECT attempt_count
+                         FROM scheduled_research_billing_outbox
+                        WHERE billing_event_id = ? AND status = 'pending'""",
+                    (billing_event_id,),
+                ).fetchone()
+                if row is None:
+                    return False
+                attempts = int(row["attempt_count"]) + 1
+                delay = min(300.0, float(2 ** min(attempts, 8)))
+                cursor = conn.execute(
+                    """UPDATE scheduled_research_billing_outbox
+                          SET attempt_count = ?, available_at = ?,
+                              last_error = ?, updated_at = ?
+                        WHERE billing_event_id = ? AND status = 'pending'""",
+                    (
+                        attempts,
+                        now + delay,
+                        (error or "billing_settlement_deferred")[:1000],
+                        now,
+                        billing_event_id,
+                    ),
+                )
+            return cursor.rowcount == 1
+
+        return self._execute_write(_settle)
 
     def _try_wal_checkpoint(self) -> None:
         """Best-effort TRUNCATE WAL checkpoint.  Never raises.

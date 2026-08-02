@@ -379,6 +379,7 @@ def test_termux_fast_cli_launch_oneshot_uses_light_parser(monkeypatch, main_mod)
         "model": "gpt-test",
         "provider": "openai",
         "toolsets": None,
+        "skills": None,
         "usage_file": None,
     }
 
@@ -618,6 +619,7 @@ def test_main_top_level_oneshot_accepts_toolsets(monkeypatch, main_mod):
         "model": None,
         "provider": None,
         "toolsets": "web,terminal",
+        "skills": None,
         "usage_file": None,
     }
 
@@ -690,7 +692,7 @@ def test_oneshot_exit_code_when_failed_without_response(monkeypatch):
     assert run_oneshot("hi") == 2
 
 
-def test_oneshot_exit_code_zero_when_failed_with_error_text(monkeypatch, capsys):
+def test_oneshot_exit_code_nonzero_when_failed_with_error_text(monkeypatch, capsys):
     from hermes_cli.oneshot import run_oneshot
 
     monkeypatch.setattr(
@@ -700,8 +702,58 @@ def test_oneshot_exit_code_zero_when_failed_with_error_text(monkeypatch, capsys)
             {"failed": True, "partial": False},
         ),
     )
-    assert run_oneshot("hi") == 0
+    assert run_oneshot("hi") == 2
     assert "HTTP 404" in capsys.readouterr().out
+
+
+def test_oneshot_passes_preloaded_skills_as_system_guidance(monkeypatch):
+    import hermes_cli.oneshot as oneshot_mod
+
+    captured = {}
+
+    class FakeAgent:
+        session_id = "oneshot-session"
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def run_conversation(self, prompt, system_message=None):
+            captured.update({"prompt": prompt, "system_message": system_message})
+            return {"final_response": "done"}
+
+    monkeypatch.setattr(oneshot_mod, "_create_session_db_for_oneshot", lambda: None)
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"model": {"default": "test-model"}})
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda **_kwargs: {
+            "api_key": "test-key",
+            "base_url": "https://example.invalid/v1",
+            "provider": "custom",
+            "api_mode": "chat_completions",
+            "credential_pool": None,
+        },
+    )
+    monkeypatch.setattr("run_agent.AIAgent", FakeAgent)
+    monkeypatch.setattr(
+        "agent.skill_commands.build_preloaded_skills_prompt",
+        lambda identifiers, task_id=None: (
+            f"loaded:{','.join(identifiers)}:{task_id}",
+            identifiers,
+            [],
+        ),
+    )
+
+    response, _result = oneshot_mod._run_agent(
+        "research this",
+        skills=["investment-research,stocks"],
+        use_config_toolsets=False,
+    )
+
+    assert response == "done"
+    assert captured == {
+        "prompt": "research this",
+        "system_message": "loaded:investment-research,stocks:oneshot-session",
+    }
 
 
 def test_oneshot_reraises_keyboard_interrupt(monkeypatch):

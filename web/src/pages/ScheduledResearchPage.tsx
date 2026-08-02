@@ -20,19 +20,26 @@ import { Toast } from "@nous-research/ui/ui/components/toast";
 import { H2 } from "@nous-research/ui/ui/components/typography/h2";
 import { useToast } from "@nous-research/ui/hooks/use-toast";
 import { ScheduleBuilder } from "@/components/ScheduleBuilder";
+import { useAuth } from "@/components/auth-context";
 import { usePageHeader } from "@/contexts/usePageHeader";
-import { api, type ResearchSchedule, type ResearchScheduleOccurrence } from "@/lib/api";
-import { managedFilePreviewUrl } from "@/lib/file-preview";
+import {
+  api,
+  type ResearchSchedule,
+  type ResearchScheduleOccurrence,
+  type ScheduledResearchEmailConsent,
+} from "@/lib/api";
 import {
   buildScheduleString,
   DEFAULT_SCHEDULE_STATE,
   parseScheduleString,
   type ScheduleBuilderState,
 } from "@/lib/schedule";
+import { openScheduledResearchResult } from "@/lib/scheduled-research-result";
 
 const EMPTY_FORM = {
   name: "",
   prompt: "",
+  completion_email_enabled: false,
 };
 
 function formatTimestamp(value: string | null | undefined): string {
@@ -66,8 +73,11 @@ function readableSchedule(schedule: ResearchSchedule): string {
 export default function ScheduledResearchPage() {
   const [schedules, setSchedules] = useState<ResearchSchedule[]>([]);
   const [occurrences, setOccurrences] = useState<ResearchScheduleOccurrence[]>([]);
+  const [emailConsent, setEmailConsent] = useState<ScheduledResearchEmailConsent | null>(null);
   const [loading, setLoading] = useState(true);
+  const [consentLoading, setConsentLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [consentSaving, setConsentSaving] = useState(false);
   const [workingId, setWorkingId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState(EMPTY_FORM);
@@ -79,6 +89,8 @@ export default function ScheduledResearchPage() {
   });
   const { toast, showToast } = useToast();
   const { setTitle } = usePageHeader();
+  const { me } = useAuth();
+  const confirmedAccountEmail = me?.email?.trim() || "";
 
   useEffect(() => {
     setTitle("Scheduled research");
@@ -92,27 +104,35 @@ export default function ScheduledResearchPage() {
 
   const load = useCallback(async () => {
     try {
-      const [scheduleItems, history] = await Promise.all([
+      const [scheduleItems, history, consent] = await Promise.all([
         api.getResearchSchedules(),
         api.getResearchScheduleOccurrences(),
+        api.getScheduledResearchEmailConsent(),
       ]);
       setSchedules(scheduleItems);
       setOccurrences(history.occurrences);
+      setEmailConsent(consent);
     } catch (error) {
       showToast(`Could not load scheduled research: ${error}`, "error");
     } finally {
       setLoading(false);
+      setConsentLoading(false);
     }
   }, [showToast]);
 
   useEffect(() => {
     let active = true;
 
-    void Promise.all([api.getResearchSchedules(), api.getResearchScheduleOccurrences()])
-      .then(([items, history]) => {
+    void Promise.all([
+      api.getResearchSchedules(),
+      api.getResearchScheduleOccurrences(),
+      api.getScheduledResearchEmailConsent(),
+    ])
+      .then(([items, history, consent]) => {
         if (active) {
           setSchedules(items);
           setOccurrences(history.occurrences);
+          setEmailConsent(consent);
         }
       })
       .catch((error) => {
@@ -121,7 +141,10 @@ export default function ScheduledResearchPage() {
         }
       })
       .finally(() => {
-        if (active) setLoading(false);
+        if (active) {
+          setLoading(false);
+          setConsentLoading(false);
+        }
       });
 
     return () => {
@@ -141,7 +164,11 @@ export default function ScheduledResearchPage() {
 
   const startEditing = useCallback((item: ResearchSchedule) => {
     setEditingId(item.id);
-    setForm({ name: item.name, prompt: item.prompt });
+    setForm({
+      name: item.name,
+      prompt: item.prompt,
+      completion_email_enabled: item.completion_email_enabled,
+    });
     setScheduleState(parseScheduleString(item.schedule_input));
     window.scrollTo({ top: 0, behavior: "smooth" });
   }, []);
@@ -152,9 +179,21 @@ export default function ScheduledResearchPage() {
       showToast("Add research instructions and a valid schedule.", "error");
       return;
     }
+    if (form.completion_email_enabled) {
+      if (!confirmedAccountEmail) {
+        showToast("Email notifications require a confirmed account email.", "error");
+        return;
+      }
+    }
     setSaving(true);
     try {
-      const fingerprint = JSON.stringify({ editingId, name: form.name.trim(), prompt, schedule: scheduleValue });
+      const fingerprint = JSON.stringify({
+        editingId,
+        name: form.name.trim(),
+        prompt,
+        schedule: scheduleValue,
+        completion_email_enabled: form.completion_email_enabled,
+      });
       const requestId = pendingMutation?.fingerprint === fingerprint
         ? pendingMutation.requestId
         : crypto.randomUUID();
@@ -163,6 +202,7 @@ export default function ScheduledResearchPage() {
         name: form.name.trim(),
         prompt,
         schedule: scheduleValue,
+        completion_email_enabled: form.completion_email_enabled,
         request_id: requestId,
       };
       if (editingId) {
@@ -181,6 +221,28 @@ export default function ScheduledResearchPage() {
       setSaving(false);
     }
   }, [editingId, form, load, pendingMutation, resetForm, scheduleValue, showToast]);
+
+  const toggleEmailConsent = useCallback(async (enabled: boolean) => {
+    if (!confirmedAccountEmail) {
+      showToast("Email consent requires a confirmed account email.", "error");
+      return;
+    }
+    setConsentSaving(true);
+    try {
+      const consent = await api.setScheduledResearchEmailConsent(enabled);
+      setEmailConsent(consent);
+      showToast(
+        enabled
+          ? "Scheduled research completion emails enabled"
+          : "Scheduled research completion emails withdrawn",
+        "success",
+      );
+    } catch (error) {
+      showToast(`Could not update email consent: ${error}`, "error");
+    } finally {
+      setConsentSaving(false);
+    }
+  }, [confirmedAccountEmail, showToast]);
 
   const toggle = useCallback(
     async (item: ResearchSchedule) => {
@@ -290,6 +352,60 @@ export default function ScheduledResearchPage() {
 
           <ScheduleBuilder value={scheduleState} onChange={setScheduleState} />
 
+          <div className="grid gap-3 rounded border border-border bg-background/30 p-4">
+            <div>
+              <Label>Completion email identity</Label>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                Private completion links are sent only to this confirmed Oxaide account email.
+              </p>
+            </div>
+            <div
+              aria-label="Confirmed account email"
+              aria-readonly="true"
+              className="border border-border bg-background/60 px-3 py-2 text-sm text-foreground"
+              role="textbox"
+            >
+              {confirmedAccountEmail || "Confirmed account email unavailable"}
+            </div>
+            <label className="flex items-start gap-3 border-t border-border pt-3 text-sm">
+              <input
+                type="checkbox"
+                className="mt-1 h-4 w-4 accent-primary"
+                checked={emailConsent?.active === true}
+                disabled={!confirmedAccountEmail || consentLoading || consentSaving}
+                onChange={(event) => void toggleEmailConsent(event.target.checked)}
+              />
+              <span>
+                <span className="font-medium">Allow scheduled research completion emails</span>
+                <span className="mt-1 block text-xs leading-5 text-muted-foreground">
+                  {emailConsent?.active === true
+                    ? "Global consent is active for this confirmed account email."
+                    : "Global consent is required before any scheduled completion email can be sent."}
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-3 text-sm">
+              <input
+                type="checkbox"
+                className="mt-1 h-4 w-4 accent-primary"
+                checked={form.completion_email_enabled}
+                disabled={!confirmedAccountEmail}
+                onChange={(event) => setForm((current) => ({
+                  ...current,
+                  completion_email_enabled: event.target.checked,
+                }))}
+              />
+              <span>
+                <span className="font-medium">Email me when each research run completes</span>
+                <span className="mt-1 block text-xs leading-5 text-muted-foreground">
+                  {confirmedAccountEmail
+                    ? "This schedule is opted in independently; global consent above is also required."
+                    : "Sign in with a confirmed account to enable email notifications."}
+                </span>
+              </span>
+            </label>
+          </div>
+
           <div className="flex flex-wrap justify-end gap-2">
             {editingId ? (
               <Button outlined disabled={saving} onClick={resetForm}>Cancel</Button>
@@ -389,12 +505,12 @@ export default function ScheduledResearchPage() {
                       {occurrence.error_message ? ` · ${occurrence.error_message}` : ""}
                     </p>
                   </div>
-                  {occurrence.result_artifact_ref ? (
+                  {occurrence.result_url ? (
                     <Button
                       outlined
                       size="sm"
                       prefix={<FileText />}
-                      onClick={() => window.location.assign(managedFilePreviewUrl(occurrence.result_artifact_ref || ""))}
+                      onClick={() => openScheduledResearchResult(occurrence.result_url!)}
                     >
                       Open result
                     </Button>

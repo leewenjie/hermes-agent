@@ -31,6 +31,16 @@ def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
 
 
+def _git_text(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
 @pytest.fixture
 def repo(tmp_path):
     root = tmp_path / "repo"
@@ -46,6 +56,27 @@ def repo(tmp_path):
     (root / "a.txt").write_text("one\ntwo\nthree\n")
     (root / "new.py").write_text("print(1)\nprint(2)\n")
     return root
+
+
+@pytest.fixture
+def hosted_repo(client, monkeypatch, tmp_path):
+    root = tmp_path / "data"
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "t@example.com")
+    _git(root, "config", "user.name", "Test")
+    (root / "a.txt").write_text("one\ntwo\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "init")
+
+    (root / "a.txt").write_text("one\ntwo\nthree\n")
+    (root / "new.py").write_text("print('safe')\n")
+    results = root / "research-results"
+    results.mkdir()
+    artifact = results / "private.md"
+    artifact.write_text("TOP SECRET RESULT\n")
+    monkeypatch.setenv("HERMES_DASHBOARD_FILES_ROOT", str(root))
+    return root, artifact
 
 
 def test_status_reports_branch_and_change_counts(client, repo):
@@ -175,3 +206,297 @@ def test_git_endpoints_require_auth(repo):
 
     assert unauth.get("/api/git/status", params={"path": str(repo)}).status_code == 401
     assert unauth.post("/api/git/review/stage", json={"path": str(repo)}).status_code == 401
+
+
+def test_hosted_status_review_and_context_hide_results(client, hosted_repo):
+    root, artifact = hosted_repo
+    _git(root, "add", "--", "research-results/private.md")
+    _git(root, "commit", "-qm", "historical private artifact")
+    artifact.write_text("UPDATED TOP SECRET RESULT\n")
+
+    status = client.get("/api/git/status", params={"path": str(root)})
+    review = client.get("/api/git/review/list", params={"path": str(root)})
+    context = client.get(
+        "/api/git/review/commit-context",
+        params={"path": str(root)},
+    )
+
+    assert status.status_code == 200
+    assert {item["path"] for item in status.json()["files"]} == {"a.txt", "new.py"}
+    assert review.status_code == 200
+    assert {item["path"] for item in review.json()["files"]} == {"a.txt", "new.py"}
+    assert context.status_code == 200
+    assert "+three" in context.json()["diff"]
+    assert "new.py" in context.json()["diff"]
+    assert context.json()["recent"] == ""
+    for response in (status, review, context):
+        assert artifact.name not in response.text
+        assert "research-results" not in response.text
+        assert "TOP SECRET RESULT" not in response.text
+
+
+def test_hosted_git_rejects_result_paths_aliases_and_traversal(client, hosted_repo, tmp_path):
+    root, artifact = hosted_repo
+    alias = root / "ordinary.md"
+    try:
+        alias.symlink_to(artifact)
+    except OSError:
+        pytest.skip("filesystem does not allow file symlinks")
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside secret")
+
+    responses = (
+        client.get(
+            "/api/git/review/diff",
+            params={"path": str(root), "file": "research-results/private.md"},
+        ),
+        client.get(
+            "/api/git/review/diff",
+            params={"path": str(root), "file": "ordinary.md"},
+        ),
+        client.get(
+            "/api/git/file-diff",
+            params={"path": str(root), "file": "../outside.md"},
+        ),
+        client.post(
+            "/api/git/review/stage",
+            json={"path": str(root), "file": "research-results/private.md"},
+        ),
+        client.get(
+            "/api/git/review/rev-parse",
+            params={
+                "path": str(root),
+                "ref": "HEAD:research-results/private.md",
+            },
+        ),
+    )
+
+    assert {response.status_code for response in responses} == {400}
+    for response in responses:
+        assert "TOP SECRET RESULT" not in response.text
+        assert str(root) not in response.text
+
+
+def test_hosted_git_reservation_is_top_level_and_exact(client, hosted_repo):
+    root, _artifact = hosted_repo
+    similarly_named = root / "research-results-copy" / "report.md"
+    nested = root / "projects" / "research-results" / "report.md"
+    for path in (similarly_named, nested):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("ordinary file\n")
+
+    response = client.get("/api/git/status", params={"path": str(root)})
+
+    assert response.status_code == 200
+    paths = {item["path"] for item in response.json()["files"]}
+    assert "research-results-copy/" in paths
+    assert "projects/" in paths
+    for file_path in (
+        "research-results-copy/report.md",
+        "projects/research-results/report.md",
+    ):
+        diff = client.get(
+            "/api/git/review/diff",
+            params={"path": str(root), "file": file_path},
+        )
+        assert diff.status_code == 200
+        assert "+ordinary file" in diff.json()["diff"]
+
+
+def test_hosted_broad_stage_commit_and_revert_preserve_results(client, hosted_repo):
+    root, artifact = hosted_repo
+    _git(root, "add", "--", "research-results/private.md")
+    _git(root, "commit", "-qm", "historical private artifact")
+
+    staged = client.post(
+        "/api/git/review/stage",
+        json={"path": str(root), "file": None},
+    )
+    assert staged.status_code == 200
+    staged_paths = set(_git_text(root, "diff", "--cached", "--name-only").splitlines())
+    assert staged_paths == {"a.txt", "new.py"}
+
+    committed = client.post(
+        "/api/git/review/commit",
+        json={"path": str(root), "message": "safe changes", "push": False},
+    )
+    assert committed.status_code == 200
+    assert artifact.read_text() == "TOP SECRET RESULT\n"
+    assert "research-results/private.md" in _git_text(root, "ls-files").splitlines()
+
+    artifact.write_text("UPDATED TOP SECRET RESULT\n")
+    disposable = root / "disposable.txt"
+    disposable.write_text("remove me")
+    reverted = client.post(
+        "/api/git/review/revert",
+        json={"path": str(root), "file": None},
+    )
+    assert reverted.status_code == 200
+    assert not disposable.exists()
+    assert artifact.read_text() == "UPDATED TOP SECRET RESULT\n"
+
+
+def test_hosted_commit_rejects_pre_staged_result(client, hosted_repo):
+    root, artifact = hosted_repo
+    _git(root, "add", "--", "research-results/private.md")
+    before = _git_text(root, "rev-parse", "HEAD").strip()
+
+    status = client.get("/api/git/status", params={"path": str(root)})
+    committed = client.post(
+        "/api/git/review/commit",
+        json={"path": str(root), "message": "must not commit", "push": False},
+    )
+
+    assert status.status_code == 200
+    assert artifact.name not in status.text
+    assert committed.status_code == 400
+    assert "TOP SECRET RESULT" not in committed.text
+    assert _git_text(root, "rev-parse", "HEAD").strip() == before
+    assert "research-results/private.md" in _git_text(
+        root,
+        "diff",
+        "--cached",
+        "--name-only",
+    ).splitlines()
+
+
+def test_hosted_disables_external_diff_and_commit_hooks(client, hosted_repo, monkeypatch):
+    root, _artifact = hosted_repo
+    marker = root / ".git" / "executed"
+    executable = root / ".git" / "unexpected-command.sh"
+    executable.write_text(f"#!/bin/sh\nprintf ran > {marker}\n")
+    executable.chmod(0o700)
+    hook = root / ".git" / "hooks" / "pre-commit"
+    hook.write_text(executable.read_text())
+    hook.chmod(0o700)
+    _git(root, "config", "diff.external", str(executable))
+    monkeypatch.setenv("GIT_EXTERNAL_DIFF", str(executable))
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "filter.inherited.clean")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(executable))
+    (root / ".gitattributes").write_text("a.txt filter=inherited\n")
+
+    diff = client.get(
+        "/api/git/review/diff",
+        params={"path": str(root), "file": "a.txt"},
+    )
+    staged = client.post(
+        "/api/git/review/stage",
+        json={"path": str(root), "file": "a.txt"},
+    )
+    committed = client.post(
+        "/api/git/review/commit",
+        json={"path": str(root), "message": "hooks disabled", "push": False},
+    )
+
+    assert diff.status_code == 200
+    assert "+three" in diff.json()["diff"]
+    assert staged.status_code == 200
+    assert committed.status_code == 200
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("metadata_kind", ["include", "alternates"])
+def test_hosted_rejects_git_metadata_that_can_read_other_files(
+    client,
+    hosted_repo,
+    metadata_kind,
+):
+    root, artifact = hosted_repo
+    if metadata_kind == "include":
+        artifact.write_text("[core]\n\tbare = false\n")
+        with (root / ".git" / "config").open("a") as config:
+            config.write(f"\n[include]\n\tpath = {artifact}\n")
+    else:
+        alternates = root / ".git" / "objects" / "info" / "alternates"
+        alternates.parent.mkdir(parents=True, exist_ok=True)
+        alternates.write_text(f"{artifact}\n")
+
+    response = client.get("/api/git/status", params={"path": str(root)})
+
+    assert response.status_code == 200
+    assert response.json() is None
+    assert "TOP SECRET RESULT" not in response.text
+
+
+def test_hosted_rejects_executable_clean_filters(client, hosted_repo):
+    root, _artifact = hosted_repo
+    marker = root / ".git" / "filter-executed"
+    executable = root / ".git" / "filter.sh"
+    executable.write_text(f"#!/bin/sh\nprintf ran > {marker}\ncat\n")
+    executable.chmod(0o700)
+    _git(root, "config", "filter.evil.clean", str(executable))
+    (root / ".gitattributes").write_text("a.txt filter=evil\n")
+
+    response = client.post(
+        "/api/git/review/stage",
+        json={"path": str(root), "file": "a.txt"},
+    )
+
+    assert response.status_code == 400
+    assert not marker.exists()
+
+
+def test_hosted_blocks_outbound_branch_and_worktree_mutations(client, hosted_repo):
+    root, _artifact = hosted_repo
+    before = _git_text(root, "rev-parse", "HEAD").strip()
+
+    blocked = (
+        client.post("/api/git/review/push", json={"path": str(root)}),
+        client.post("/api/git/review/create-pr", json={"path": str(root)}),
+        client.post(
+            "/api/git/review/commit",
+            json={"path": str(root), "message": "no push", "push": True},
+        ),
+        client.post(
+            "/api/git/branch/switch",
+            json={"path": str(root), "branch": "feature/x"},
+        ),
+        client.post(
+            "/api/git/worktree/add",
+            json={"path": str(root), "branch": "feature/x"},
+        ),
+        client.post(
+            "/api/git/worktree/remove",
+            json={
+                "path": str(root),
+                "worktreePath": str(root / ".worktrees" / "feature-x"),
+                "force": True,
+            },
+        ),
+    )
+
+    assert {response.status_code for response in blocked} == {400}
+    assert _git_text(root, "rev-parse", "HEAD").strip() == before
+    ship = client.get("/api/git/review/ship-info", params={"path": str(root)})
+    assert ship.status_code == 200
+    assert ship.json() == {"ghReady": False, "pr": None}
+
+
+def test_hosted_gitdir_pointer_is_rejected_before_git_runs(
+    client,
+    monkeypatch,
+    tmp_path,
+):
+    root = tmp_path / "data"
+    project = root / "project"
+    outside = tmp_path / "outside"
+    project.mkdir(parents=True)
+    outside.mkdir()
+    _git(outside, "init", "-q")
+    (project / ".git").write_text(f"gitdir: {outside / '.git'}\n")
+    monkeypatch.setenv("HERMES_DASHBOARD_FILES_ROOT", str(root))
+    original_run = subprocess.run
+    calls = []
+
+    def recording_run(*args, **kwargs):
+        calls.append(args[0])
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(web_server._web_git.subprocess, "run", recording_run)
+
+    response = client.get("/api/git/status", params={"path": str(project)})
+
+    assert response.status_code == 200
+    assert response.json() is None
+    assert calls == []

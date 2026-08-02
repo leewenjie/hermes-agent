@@ -82,6 +82,14 @@ from hermes_cli.config import (
     write_platform_config_field,
     _deep_merge,
 )
+from hermes_cli.scheduled_research_results import (
+    HOSTED_MANAGED_FILES_ROOT as _HOSTED_MANAGED_FILES_ROOT,
+    MANAGED_FILES_ROOT_ENV as _MANAGED_FILES_ROOT_ENV,
+    ReservedScheduledResearchPath,
+    default_hermes_root_is_hosted,
+    hosted_files_root,
+    reject_reserved_result_path,
+)
 from gateway.status import (
     derive_gateway_busy,
     derive_gateway_drainable,
@@ -101,7 +109,7 @@ try:
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
     from fastapi.staticfiles import StaticFiles
-    from pydantic import BaseModel
+    from pydantic import BaseModel, StrictBool
     from starlette.concurrency import run_in_threadpool
 except ImportError:
     # First try lazy-installing the dashboard extras. Only the user actually
@@ -117,7 +125,7 @@ except ImportError:
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
         from fastapi.staticfiles import StaticFiles
-        from pydantic import BaseModel
+        from pydantic import BaseModel, StrictBool
         from starlette.concurrency import run_in_threadpool
     except Exception:
         raise SystemExit(
@@ -655,10 +663,13 @@ async def _token_auth_seam(request: Request, call_next):
 
 @app.middleware("http")
 async def scheduled_research_machine_auth_seam(request: Request, call_next):
-    """Let the exact HMAC-protected occurrence route bypass browser auth."""
+    """Let exact HMAC-protected machine routes bypass browser auth."""
     if (
         request.method == "POST"
-        and request.url.path == "/api/research-schedules/occurrences"
+        and request.url.path in {
+            "/api/research-schedules/occurrences",
+            "/api/oxaide/turn-dispatch",
+        }
     ):
         request.state.token_authenticated = True
     return await call_next(request)
@@ -739,6 +750,8 @@ _OXAIDE_RESEARCH_STATIC_API_METHODS = frozenset({
     ("GET", "/api/research-schedules"),
     ("POST", "/api/research-schedules"),
     ("GET", "/api/research-schedules/occurrences"),
+    ("GET", "/api/research-schedules/consent"),
+    ("PUT", "/api/research-schedules/consent"),
 })
 
 _OXAIDE_RESERVED_SESSION_PATH_PARTS = frozenset({
@@ -768,6 +781,8 @@ def _oxaide_research_api_allowed(
 ) -> bool:
     if method == "HEAD":
         method = "GET"
+    if path == "/api/research-schedules/consent":
+        return scheduled_research_enabled and method in {"GET", "PUT"}
     if path == "/api/research-schedules" and not scheduled_research_enabled:
         return False
     if (method, path) in _OXAIDE_RESEARCH_STATIC_API_METHODS:
@@ -804,7 +819,10 @@ async def oxaide_research_boundary_middleware(request: Request, call_next):
     if (
         _dashboard_branding_settings().get("product") == "oxaide"
         and path.startswith("/api/")
-        and path != "/api/research-schedules/occurrences"
+        and path not in {
+            "/api/research-schedules/occurrences",
+            "/api/oxaide/turn-dispatch",
+        }
         and not (
             hosted_runtime_bridge.enabled()
             and hosted_runtime_bridge.matches_path(path)
@@ -1191,6 +1209,37 @@ def _require_hosted_runtime_secret(request: Request) -> None:
         raise HTTPException(status_code=404, detail="Not found")
     if not _hosted_runtime_authorized(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+_SCHEDULED_RESEARCH_RESULT_IDENTITY_HEADERS = {
+    "workspace_id": "X-Hermes-Scheduled-Research-Workspace-ID",
+    "user_id": "X-Hermes-Scheduled-Research-User-ID",
+    "runtime_key": "X-Hermes-Scheduled-Research-Runtime-Key",
+    "runtime_session_id": "X-Hermes-Scheduled-Research-Runtime-Session-ID",
+}
+_SCHEDULED_RESEARCH_RUNTIME_KEY_RE = re.compile(r"^[a-z0-9]{20,64}$")
+_SCHEDULED_RESEARCH_RUNTIME_SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{3,200}$")
+
+
+def _scheduled_research_result_identity(request: Request) -> dict[str, str]:
+    identity = {
+        field: str(request.headers.get(header, "") or "").strip()
+        for field, header in _SCHEDULED_RESEARCH_RESULT_IDENTITY_HEADERS.items()
+    }
+    if any(not value for value in identity.values()):
+        raise HTTPException(
+            status_code=400,
+            detail="Complete scheduled research identity headers are required",
+        )
+    if len(identity["workspace_id"]) > 200 or len(identity["user_id"]) > 200:
+        raise HTTPException(status_code=400, detail="Invalid scheduled research identity")
+    if not _SCHEDULED_RESEARCH_RUNTIME_KEY_RE.fullmatch(identity["runtime_key"]):
+        raise HTTPException(status_code=400, detail="Invalid scheduled research identity")
+    if not _SCHEDULED_RESEARCH_RUNTIME_SESSION_RE.fullmatch(
+        identity["runtime_session_id"]
+    ):
+        raise HTTPException(status_code=400, detail="Invalid scheduled research identity")
+    return identity
 
 
 def _hosted_runtime_effective_toolsets(entitlements: Dict[str, Any]) -> List[str]:
@@ -1606,9 +1655,7 @@ _MEDIA_CONTENT_TYPES = {
     ".ico": "image/x-icon",
 }
 _MEDIA_MAX_BYTES = 25 * 1024 * 1024
-_MANAGED_FILES_ROOT_ENV = "HERMES_DASHBOARD_FILES_ROOT"
 _MANAGED_FILE_MAX_BYTES = 100 * 1024 * 1024
-_HOSTED_MANAGED_FILES_ROOT = Path("/opt/data")
 
 
 @dataclass(frozen=True)
@@ -1789,12 +1836,24 @@ def _hosted_fs_root() -> Path | None:
     routes must share that boundary; otherwise an authenticated hosted user can
     bypass the Files API and read Hermes state or credentials directly.
     """
-    raw_forced_root = os.environ.get(_MANAGED_FILES_ROOT_ENV, "").strip()
-    if raw_forced_root:
-        return _canonical_path(Path(raw_forced_root))
-    if _default_hermes_root_is_opt_data():
-        return _HOSTED_MANAGED_FILES_ROOT
-    return None
+    return hosted_files_root()
+
+
+def _ensure_not_reserved_result_path(
+    root: Path | None,
+    lexical_path: Path,
+    *,
+    resolved_path: Path | None = None,
+) -> None:
+    """Hide hosted occurrence artifacts from every generic filesystem API."""
+    try:
+        reject_reserved_result_path(
+            root,
+            lexical_path,
+            canonical_path=resolved_path,
+        )
+    except ReservedScheduledResearchPath as exc:
+        raise HTTPException(status_code=404, detail="Path not found") from exc
 
 
 def _fs_path(raw_path: str, *, for_write: bool = False) -> Path:
@@ -1824,6 +1883,11 @@ def _fs_path(raw_path: str, *, for_write: bool = False) -> Path:
             resolved = candidate.resolve(strict=False)
 
         root = _hosted_fs_root()
+        _ensure_not_reserved_result_path(
+            root,
+            candidate,
+            resolved_path=resolved,
+        )
         if root is not None and not _path_is_under(root, resolved):
             raise HTTPException(status_code=403, detail="Path outside managed files root")
         if root is not None and _is_sensitive_path(resolved):
@@ -1873,11 +1937,16 @@ def _fs_regular_file(path: Path) -> tuple[Path, os.stat_result]:
 
 def _fs_find_git_root(start: Path) -> str | None:
     directory = start
+    root = _hosted_fs_root()
     for _ in range(50):
+        if root is not None and not _path_is_under(root, directory):
+            return None
         try:
             if (directory / ".git").exists():
                 return str(directory)
         except OSError:
+            return None
+        if root is not None and directory == root:
             return None
         parent = directory.parent
         if parent == directory:
@@ -1891,11 +1960,10 @@ def _fs_default_cwd() -> str:
     raw = str(cfg_terminal.get("cwd") or os.environ.get("TERMINAL_CWD") or "").strip()
     if raw and raw not in {".", "auto", "cwd"}:
         try:
-            candidate = Path(raw).expanduser().resolve(strict=False)
-            root = _hosted_fs_root()
-            if candidate.is_dir() and (root is None or _path_is_under(root, candidate)):
+            candidate = _fs_path(raw)
+            if candidate.is_dir():
                 return str(candidate)
-        except (OSError, RuntimeError):
+        except (HTTPException, OSError, RuntimeError):
             pass
     root = _hosted_fs_root()
     if root is not None:
@@ -1934,10 +2002,17 @@ def _media_serve_roots() -> list[Path]:
     home = get_hermes_home()
     roots = [home / "images", home / "screenshots", home / "cache"]
     out: list[Path] = []
+    hosted_root = _hosted_fs_root()
     for root in roots:
         try:
-            out.append(root.resolve())
-        except (OSError, RuntimeError):
+            resolved = root.resolve()
+            _ensure_not_reserved_result_path(
+                hosted_root,
+                root,
+                resolved_path=resolved,
+            )
+            out.append(resolved)
+        except (HTTPException, OSError, RuntimeError):
             continue
     return out
 
@@ -1955,9 +2030,16 @@ async def get_media(path: str):
     (resolved, symlink-safe) so it can't be used to read arbitrary files.
     """
     try:
-        target = Path(path).expanduser().resolve()
+        lexical_target = Path(path).expanduser()
+        target = lexical_target.resolve()
     except (OSError, RuntimeError):
         raise HTTPException(status_code=400, detail="Invalid path")
+
+    _ensure_not_reserved_result_path(
+        _hosted_fs_root(),
+        lexical_target,
+        resolved_path=target,
+    )
 
     if target.suffix.lower() not in _MEDIA_CONTENT_TYPES:
         raise HTTPException(status_code=415, detail="Unsupported media type")
@@ -2019,16 +2101,7 @@ def _local_dashboard_request(request: Request) -> bool:
 
 
 def _default_hermes_root_is_opt_data() -> bool:
-    raw = os.environ.get("HERMES_HOME", "").strip()
-    if not raw:
-        return False
-    try:
-        from hermes_constants import get_default_hermes_root
-
-        root = get_default_hermes_root().expanduser().resolve(strict=False)
-    except (OSError, RuntimeError):
-        root = Path(raw).expanduser().resolve(strict=False)
-    return root == _HOSTED_MANAGED_FILES_ROOT
+    return default_hermes_root_is_hosted()
 
 
 def _dashboard_local_update_managed_externally() -> bool:
@@ -2131,6 +2204,11 @@ def _resolve_managed_path(
     else:
         resolved = _canonical_path(candidate, require_exists=not for_write)
 
+    _ensure_not_reserved_result_path(
+        root,
+        candidate,
+        resolved_path=resolved,
+    )
     if root is not None and not _path_is_under(root, resolved):
         raise HTTPException(status_code=403, detail="Path outside managed files root")
 
@@ -2165,6 +2243,11 @@ def _managed_file_entry(policy: ManagedFilesPolicy, target: Path) -> Dict[str, A
         resolved = target.resolve()
     except (OSError, RuntimeError):
         raise HTTPException(status_code=400, detail="Invalid path")
+    _ensure_not_reserved_result_path(
+        policy.locked_root,
+        target,
+        resolved_path=resolved,
+    )
     if policy.locked_root is not None and not _path_is_under(policy.locked_root, resolved):
         raise HTTPException(status_code=403, detail="Path outside managed files root")
 
@@ -2607,9 +2690,18 @@ async def fs_list(path: str):
             for entry in scan:
                 if entry.name in _FS_READDIR_HIDDEN:
                     continue
+                entry_path = target / entry.name
+                try:
+                    _ensure_not_reserved_result_path(
+                        _hosted_fs_root(),
+                        entry_path,
+                        resolved_path=entry_path.resolve(strict=False),
+                    )
+                except HTTPException:
+                    continue
                 entries.append({
                     "name": entry.name,
-                    "path": str(target / entry.name),
+                    "path": str(entry_path),
                     "isDirectory": entry.is_dir(follow_symlinks=False),
                 })
         entries.sort(key=lambda item: (not item["isDirectory"], item["name"].lower(), item["name"]))
@@ -3303,6 +3395,65 @@ async def hosted_runtime_health(request: Request):
         "live_session_binding": False,
         "session_count": session_count,
     }
+
+
+@app.get("/api/hosted/runtime/scheduled-research/results/{occurrence_id}")
+async def hosted_runtime_scheduled_research_result(
+    request: Request,
+    occurrence_id: str,
+):
+    """Return one completed occurrence result through the hosted boundary.
+
+    This route deliberately does not accept a filesystem path and never calls
+    the generic managed-file handlers.  Durable occurrence identity and
+    completion state authorize access first; only then is the UUID-derived
+    artifact opened.
+    """
+    _require_hosted_runtime_secret(request)
+    import uuid
+
+    try:
+        normalized_occurrence_id = str(uuid.UUID(occurrence_id))
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail="occurrence_id must be a UUID") from exc
+
+    identity = _scheduled_research_result_identity(request)
+    from hermes_cli.scheduled_research_results import (
+        ScheduledResearchResultUnavailable,
+        read_result_text,
+    )
+    from hermes_state import SessionDB
+
+    db = SessionDB(get_hermes_home() / "state.db")
+    try:
+        authorized = db.get_authorized_scheduled_research_result(
+            normalized_occurrence_id,
+            workspace_id=identity["workspace_id"],
+            user_id=identity["user_id"],
+            runtime_key=identity["runtime_key"],
+            runtime_session_id=identity["runtime_session_id"],
+        )
+    finally:
+        db.close()
+    if authorized is None:
+        raise HTTPException(status_code=404, detail="Scheduled research result not found")
+
+    try:
+        content = read_result_text(authorized["result_artifact_id"])
+    except ScheduledResearchResultUnavailable as exc:
+        raise HTTPException(status_code=404, detail="Scheduled research result not found") from exc
+
+    return Response(
+        content=content,
+        media_type="text/plain",
+        headers={
+            "Cache-Control": "private, no-store, max-age=0",
+            "Content-Security-Policy": (
+                "default-src 'none'; base-uri 'none'; form-action 'none'; "
+                "frame-ancestors 'none'"
+            ),
+        },
+    )
 
 
 @app.post("/api/hosted/runtime/bootstrap")
@@ -11310,6 +11461,7 @@ class ResearchScheduleMutation(BaseModel):
     name: str = ""
     prompt: str
     schedule: str
+    completion_email_enabled: bool = False
     request_id: Optional[str] = None
 
     class Config:
@@ -11317,6 +11469,14 @@ class ResearchScheduleMutation(BaseModel):
 
 
 class ResearchScheduleAction(BaseModel):
+    request_id: Optional[str] = None
+
+    class Config:
+        extra = "forbid"
+
+
+class ResearchScheduleConsentMutation(BaseModel):
+    enabled: StrictBool
     request_id: Optional[str] = None
 
     class Config:
@@ -11373,6 +11533,7 @@ def _project_research_schedule(job: Dict[str, Any]) -> Dict[str, Any]:
         "schedule": job.get("schedule") if isinstance(job.get("schedule"), dict) else {},
         "schedule_input": _research_schedule_input(job),
         "schedule_display": str(job.get("schedule_display") or ""),
+        "completion_email_enabled": bool(job.get("completion_email_enabled", False)),
         "enabled": bool(job.get("enabled", True)),
         "state": str(job.get("state") or ("scheduled" if job.get("enabled", True) else "paused")),
         "created_at": job.get("created_at"),
@@ -11397,6 +11558,14 @@ def _validate_research_schedule_body(body: ResearchScheduleMutation) -> Tuple[st
     return name, prompt, schedule
 
 
+def _reject_local_completion_email(body: ResearchScheduleMutation) -> None:
+    if body.completion_email_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="completion_email_not_supported_in_local_mode",
+        )
+
+
 def _require_research_schedule(job_id: str) -> Dict[str, Any]:
     job = _call_cron_for_active_home("get_job", job_id)
     if not _is_oxaide_research_schedule(job):
@@ -11413,6 +11582,7 @@ def _list_research_schedules_sync() -> List[Dict[str, Any]]:
 
 def _create_research_schedule_sync(body: ResearchScheduleMutation) -> Dict[str, Any]:
     name, prompt, schedule = _validate_research_schedule_body(body)
+    _reject_local_completion_email(body)
     try:
         job = _call_cron_for_active_home(
             "create_job",
@@ -11437,6 +11607,7 @@ def _update_research_schedule_sync(
 ) -> Dict[str, Any]:
     _require_research_schedule(job_id)
     name, prompt, schedule = _validate_research_schedule_body(body)
+    _reject_local_completion_email(body)
     try:
         job = _call_cron_for_active_home(
             "update_job",
@@ -11516,7 +11687,12 @@ def _hosted_schedule_control_sync(
                 user_id,
                 "create",
                 request_id=body.request_id,
-                mutation=build_mutation(name, prompt, schedule_input),
+                mutation=build_mutation(
+                    name,
+                    prompt,
+                    schedule_input,
+                    completion_email_enabled=body.completion_email_enabled,
+                ),
             )
         expected_revision = int(current.get("revision") or 0)
         if action == "update":
@@ -11530,7 +11706,12 @@ def _hosted_schedule_control_sync(
                 request_id=body.request_id,
                 schedule_id=job_id,
                 expected_revision=expected_revision,
-                mutation=build_mutation(name, prompt, schedule_input),
+                mutation=build_mutation(
+                    name,
+                    prompt,
+                    schedule_input,
+                    completion_email_enabled=body.completion_email_enabled,
+                ),
             )
         fields: Dict[str, Any] = {
             "schedule_id": job_id,
@@ -11541,6 +11722,36 @@ def _hosted_schedule_control_sync(
         if not request_id:
             raise HTTPException(status_code=400, detail="Stable request ID is required")
         return request_control(user_id, action, request_id=request_id, **fields)
+    except ScheduledResearchControlError as exc:
+        status = 409 if exc.status == 409 else exc.status
+        raise HTTPException(status_code=status, detail=exc.code) from exc
+
+
+def _hosted_research_consent_control_sync(
+    user_id: str,
+    action: str,
+    *,
+    enabled: Optional[bool] = None,
+    request_id: Optional[str] = None,
+) -> Any:
+    from hermes_cli.oxaide_scheduled_research_control import (
+        ScheduledResearchControlError,
+        request_control,
+    )
+
+    try:
+        if action == "get_consent":
+            return request_control(user_id, "get_consent")
+        if action != "set_consent":
+            raise HTTPException(status_code=400, detail="Unsupported consent action")
+        import uuid
+
+        return request_control(
+            user_id,
+            "set_consent",
+            request_id=request_id or str(uuid.uuid4()),
+            enabled=bool(enabled),
+        )
     except ScheduledResearchControlError as exc:
         status = 409 if exc.status == 409 else exc.status
         raise HTTPException(status_code=status, detail=exc.code) from exc
@@ -11565,6 +11776,33 @@ async def list_research_schedule_occurrences(request: Request):
         _hosted_schedule_control_sync,
         _hosted_research_user_id(request),
         "list_occurrences",
+    )
+
+
+@app.get("/api/research-schedules/consent")
+async def get_research_schedule_consent(request: Request):
+    if not _is_oxaide_hosted_runtime():
+        raise HTTPException(status_code=404, detail="Scheduled research email consent unavailable")
+    return await run_in_threadpool(
+        _hosted_research_consent_control_sync,
+        _hosted_research_user_id(request),
+        "get_consent",
+    )
+
+
+@app.put("/api/research-schedules/consent")
+async def set_research_schedule_consent(
+    request: Request,
+    body: ResearchScheduleConsentMutation,
+):
+    if not _is_oxaide_hosted_runtime():
+        raise HTTPException(status_code=404, detail="Scheduled research email consent unavailable")
+    return await run_in_threadpool(
+        _hosted_research_consent_control_sync,
+        _hosted_research_user_id(request),
+        "set_consent",
+        enabled=body.enabled,
+        request_id=body.request_id,
     )
 
 
@@ -11614,6 +11852,56 @@ async def accept_research_schedule_occurrence(request: Request):
     }
     response["started" if is_start else "accepted"] = True
     return response
+
+
+@app.post("/api/oxaide/turn-dispatch")
+async def accept_oxaide_research_launch_turn(request: Request):
+    from hermes_cli.oxaide_research_launch import (
+        InvalidResearchLaunchDispatch,
+        ResearchLaunchDispatchInProgress,
+        accept_research_launch_dispatch,
+        parse_research_launch_dispatch,
+        verify_research_launch_dispatch,
+    )
+    from hermes_state import OxaideResearchLaunchConflict
+
+    raw_body = await request.body()
+    timestamp = request.headers.get("x-oxaide-research-launch-timestamp", "")
+    signature = request.headers.get("x-oxaide-research-launch-signature", "")
+    if not verify_research_launch_dispatch(raw_body, timestamp, signature):
+        return JSONResponse(
+            status_code=401,
+            content={"ok": False, "code": "research_launch_signature_invalid"},
+        )
+    try:
+        payload = parse_research_launch_dispatch(raw_body)
+        result = await run_in_threadpool(
+            accept_research_launch_dispatch,
+            payload,
+            raw_body,
+        )
+    except InvalidResearchLaunchDispatch as exc:
+        return JSONResponse(
+            status_code=422,
+            content={"ok": False, "code": str(exc)},
+        )
+    except OxaideResearchLaunchConflict:
+        return JSONResponse(
+            status_code=409,
+            content={"ok": False, "code": "research_launch_dispatch_reused"},
+        )
+    except ResearchLaunchDispatchInProgress:
+        return JSONResponse(
+            status_code=409,
+            content={"ok": False, "code": "research_launch_dispatch_in_progress"},
+        )
+    except Exception:
+        logger.exception("Oxaide research launch dispatch failed")
+        return JSONResponse(
+            status_code=503,
+            content={"ok": False, "code": "research_launch_dispatch_unavailable"},
+        )
+    return {"ok": True, **result}
 
 
 @app.post("/api/research-schedules")

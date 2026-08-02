@@ -696,3 +696,69 @@ def test_placeholder_runtime_credentials_are_rejected(gated_app, monkeypatch):
 
     assert launch.status_code == 503
     assert hosted.status_code == 401
+
+
+def test_gated_cookie_session_can_read_and_change_scheduled_research_consent(
+    gated_app, monkeypatch
+):
+    client, secret = gated_app
+    monkeypatch.setenv(
+        "HERMES_OXAIDE_SCHEDULED_RESEARCH_SIGNING_SECRET",
+        "scheduled-research-signing-secret-at-least-32-bytes",
+    )
+
+    from hermes_cli import oxaide_scheduled_research_control as control
+
+    calls = []
+    consent = {
+        "consentType": "scheduled_research_emails",
+        "granted": True,
+        "active": True,
+        "confirmedEmail": "owner@example.com",
+        "grantedAt": None,
+        "withdrawnAt": None,
+        "expiresAt": None,
+        "method": "explicit",
+        "legalBasis": "consent",
+    }
+
+    def fake_request(user_id, action, **fields):
+        calls.append((user_id, action, fields))
+        return consent
+
+    monkeypatch.setattr(control, "request_control", fake_request)
+
+    launch = client.get(
+        f"/auth/oxaide-launch?token={_launch_token(secret)}&next=/chat",
+        follow_redirects=False,
+    )
+    assert launch.status_code == 302
+
+    read_response = client.get("/api/research-schedules/consent")
+    write_response = client.put(
+        "/api/research-schedules/consent",
+        json={
+            "enabled": False,
+            "request_id": "00000000-0000-4000-8000-000000000099",
+        },
+    )
+
+    assert read_response.status_code == 200
+    assert write_response.status_code == 200
+    assert calls == [
+        ("oxaide-user-1", "get_consent", {}),
+        (
+            "oxaide-user-1",
+            "set_consent",
+            {
+                "enabled": False,
+                "request_id": "00000000-0000-4000-8000-000000000099",
+            },
+        ),
+    ]
+
+    malformed = client.put(
+        "/api/research-schedules/consent",
+        json={"enabled": "false"},
+    )
+    assert malformed.status_code == 422

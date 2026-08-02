@@ -1,17 +1,25 @@
-import asyncio
 import hashlib
 import json
 import threading
 import time
-from types import SimpleNamespace
+import uuid
 
 import pytest
-from starlette.requests import Request
 from starlette.testclient import TestClient
 
 from hermes_cli import oxaide_scheduled_research as managed
+from hermes_cli import hosted_runtime_bridge
 from hermes_cli import web_server
+from hermes_cli.scheduled_research_results import (
+    RESULT_MAX_BYTES,
+    ScheduledResearchResultTooLarge,
+    ScheduledResearchResultUnavailable,
+)
 from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+
+_ARTIFACT_ID = "00000000-0000-4000-8000-000000000010"
+_BILLING_ID = "00000000-0000-4000-8000-000000000011"
 
 
 @pytest.fixture
@@ -87,57 +95,402 @@ def _start_payload(payload):
     }
 
 
-def _managed_file_request() -> Request:
-    return Request({
-        "type": "http",
-        "http_version": "1.1",
-        "method": "GET",
-        "scheme": "http",
-        "path": "/api/files/read",
-        "raw_path": b"/api/files/read",
-        "query_string": b"",
-        "headers": [],
-        "client": ("testclient", 50000),
-        "server": ("testserver", 80),
-        "app": SimpleNamespace(state=SimpleNamespace(auth_required=False)),
-    })
-
-
 def test_completed_result_is_persisted_as_opaque_managed_artifact(monkeypatch, tmp_path):
     managed_root = tmp_path / "workspace"
     monkeypatch.setenv("HERMES_DASHBOARD_FILES_ROOT", str(managed_root))
     occurrence_id = "00000000-0000-4000-8000-000000000001"
 
     reference = managed._persist_occurrence_result(
-        occurrence_id,
+        _ARTIFACT_ID,
         "# Research result\n\nEvidence changed.",
         "fallback",
     )
 
-    assert reference == f"/research-results/{occurrence_id}.md"
-    result = managed_root / reference.removeprefix("/")
+    assert reference == _ARTIFACT_ID
+    assert reference != occurrence_id
+    result = managed.scheduled_research_result_path(reference)
     assert result.read_text(encoding="utf-8") == "# Research result\n\nEvidence changed."
     assert result.stat().st_mode & 0o777 == 0o600
 
 
-def test_completed_result_reference_resolves_through_managed_files_route(
-    monkeypatch, tmp_path
+def test_result_persistence_enforces_utf8_byte_limit_before_writing(monkeypatch, tmp_path):
+    managed_root = tmp_path / "workspace"
+    monkeypatch.setenv("HERMES_DASHBOARD_FILES_ROOT", str(managed_root))
+    managed._persist_occurrence_result(_ARTIFACT_ID, "x" * RESULT_MAX_BYTES, None)
+    target = managed.scheduled_research_result_path(_ARTIFACT_ID)
+    assert target.stat().st_size == RESULT_MAX_BYTES
+
+    with pytest.raises(ScheduledResearchResultTooLarge):
+        managed._persist_occurrence_result(
+            _ARTIFACT_ID,
+            "x" * (RESULT_MAX_BYTES + 1),
+            None,
+        )
+    assert target.stat().st_size == RESULT_MAX_BYTES
+    assert not list(target.parent.glob("*.tmp"))
+
+    with pytest.raises(UnicodeEncodeError):
+        managed._persist_occurrence_result(_ARTIFACT_ID, "invalid-\ud800", None)
+    assert target.stat().st_size == RESULT_MAX_BYTES
+
+
+def test_result_persistence_rejects_symlink_parent(monkeypatch, tmp_path):
+    managed_root = tmp_path / "workspace"
+    managed_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    results = managed_root / "research-results"
+    try:
+        results.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("filesystem does not allow directory symlinks")
+    monkeypatch.setenv("HERMES_DASHBOARD_FILES_ROOT", str(managed_root))
+
+    with pytest.raises(OSError):
+        managed._persist_occurrence_result(
+            "00000000-0000-4000-8000-000000000001",
+            "must not escape",
+            None,
+        )
+
+    assert list(outside.iterdir()) == []
+
+
+def test_result_persistence_rejects_existing_leaf_without_following_it(
+    monkeypatch,
+    tmp_path,
+):
+    managed_root = tmp_path / "workspace"
+    results = managed_root / "research-results"
+    results.mkdir(parents=True)
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside secret")
+    target = results / f"{_ARTIFACT_ID}.md"
+    try:
+        target.symlink_to(outside)
+    except OSError:
+        pytest.skip("filesystem does not allow file symlinks")
+    monkeypatch.setenv("HERMES_DASHBOARD_FILES_ROOT", str(managed_root))
+
+    with pytest.raises(ScheduledResearchResultUnavailable):
+        managed._persist_occurrence_result(_ARTIFACT_ID, "private result", None)
+
+    assert target.is_symlink()
+    assert outside.read_text() == "outside secret"
+
+
+def _result_headers(payload, secret="hosted-runtime-test-secret-at-least-32-bytes", **overrides):
+    identity = {
+        "workspace_id": payload["workspace_id"],
+        "user_id": payload["user_id"],
+        "runtime_key": payload["runtime_key"],
+        "runtime_session_id": payload["runtime_session_id"],
+        **overrides,
+    }
+    headers = {"X-Hermes-Hosted-Secret": secret}
+    headers.update({
+        web_server._SCHEDULED_RESEARCH_RESULT_IDENTITY_HEADERS[field]: value
+        for field, value in identity.items()
+    })
+    return headers
+
+
+def _complete_occurrence(db, payload, *, hermes_session_id="cron_final_session"):
+    claim = _claim_occurrence(db, payload)
+    assert claim is not None
+    assert db.finish_scheduled_research_occurrence(
+        payload["occurrence_id"],
+        claim["lease_token"],
+        "completed",
+        result_artifact_id=_ARTIFACT_ID,
+        billing_event_id=_BILLING_ID,
+        hermes_session_id=hermes_session_id,
+        terminal_event_id="terminal-event",
+        terminal_event_body='{"status":"completed"}',
+    )
+
+
+def test_completed_result_is_only_available_through_protected_route(
+    occurrence_client, monkeypatch, tmp_path
 ):
     managed_root = tmp_path / "workspace"
     monkeypatch.setenv("HERMES_DASHBOARD_FILES_ROOT", str(managed_root))
+    monkeypatch.setenv(
+        "HERMES_HOSTED_RUNTIME_SHARED_SECRET",
+        "hosted-runtime-test-secret-at-least-32-bytes",
+    )
+    monkeypatch.setattr(
+        hosted_runtime_bridge,
+        "load_config",
+        lambda: {"hosted_runtime_bridge": {"enabled": True}},
+    )
+    payload = _payload()
     occurrence_id = "00000000-0000-4000-8000-000000000001"
-    reference = managed._persist_occurrence_result(
-        occurrence_id,
-        "# Routed research result",
-        None,
+    db = managed._session_db()
+    try:
+        _complete_occurrence(db, payload)
+    finally:
+        db.close()
+    managed._persist_occurrence_result(_ARTIFACT_ID, "# Routed research result", None)
+
+    response = occurrence_client.get(
+        f"/api/hosted/runtime/scheduled-research/results/{occurrence_id}",
+        headers=_result_headers(payload),
+        follow_redirects=False,
     )
 
-    response = asyncio.run(
-        web_server.read_managed_file(_managed_file_request(), reference)
-    )
+    assert response.status_code == 200
+    assert response.text == "# Routed research result"
+    assert response.headers["content-type"].startswith("text/plain")
+    assert response.headers["cache-control"] == "private, no-store, max-age=0"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-robots-tag"] == "noindex, nofollow, noarchive"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert "default-src 'none'" in response.headers["content-security-policy"]
+    assert "location" not in response.headers
 
-    assert response["path"] == reference
-    assert response["name"] == f"{occurrence_id}.md"
+
+def test_protected_result_route_rejects_oversize_invalid_and_aliased_artifacts(
+    occurrence_client,
+    monkeypatch,
+    tmp_path,
+):
+    managed_root = tmp_path / "workspace"
+    results = managed_root / "research-results"
+    results.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_DASHBOARD_FILES_ROOT", str(managed_root))
+    monkeypatch.setenv(
+        "HERMES_HOSTED_RUNTIME_SHARED_SECRET",
+        "hosted-runtime-test-secret-at-least-32-bytes",
+    )
+    monkeypatch.setattr(
+        hosted_runtime_bridge,
+        "load_config",
+        lambda: {"hosted_runtime_bridge": {"enabled": True}},
+    )
+    payload = _payload()
+    occurrence_id = payload["occurrence_id"]
+    target = results / f"{_ARTIFACT_ID}.md"
+    db = managed._session_db()
+    try:
+        _complete_occurrence(db, payload)
+    finally:
+        db.close()
+    url = f"/api/hosted/runtime/scheduled-research/results/{occurrence_id}"
+    headers = _result_headers(payload)
+
+    target.write_bytes(b"x" * (RESULT_MAX_BYTES + 1))
+    oversized = occurrence_client.get(url, headers=headers, follow_redirects=False)
+    target.write_bytes(b"invalid-utf8-\xff")
+    invalid_utf8 = occurrence_client.get(url, headers=headers, follow_redirects=False)
+    target.unlink()
+    target.mkdir()
+    non_regular = occurrence_client.get(url, headers=headers, follow_redirects=False)
+    target.rmdir()
+
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside secret")
+    try:
+        target.symlink_to(outside)
+    except OSError:
+        pytest.skip("filesystem does not allow file symlinks")
+    aliased_leaf = occurrence_client.get(url, headers=headers, follow_redirects=False)
+    target.unlink()
+    results.rmdir()
+    outside_results = tmp_path / "outside-results"
+    outside_results.mkdir()
+    (outside_results / target.name).write_text("parent alias secret")
+    try:
+        results.symlink_to(outside_results, target_is_directory=True)
+    except OSError:
+        pytest.skip("filesystem does not allow directory symlinks")
+    aliased_parent = occurrence_client.get(url, headers=headers, follow_redirects=False)
+
+    responses = (
+        oversized,
+        invalid_utf8,
+        non_regular,
+        aliased_leaf,
+        aliased_parent,
+    )
+    assert {response.status_code for response in responses} == {404}
+    assert len({response.text for response in responses}) == 1
+    for response in responses:
+        assert "outside secret" not in response.text
+        assert "parent alias secret" not in response.text
+
+
+def test_protected_result_route_rejects_bad_auth_and_identity(
+    occurrence_client, monkeypatch
+):
+    monkeypatch.setenv(
+        "HERMES_HOSTED_RUNTIME_SHARED_SECRET",
+        "hosted-runtime-test-secret-at-least-32-bytes",
+    )
+    monkeypatch.setattr(
+        hosted_runtime_bridge,
+        "load_config",
+        lambda: {"hosted_runtime_bridge": {"enabled": True}},
+    )
+    payload = _payload()
+    url = f"/api/hosted/runtime/scheduled-research/results/{payload['occurrence_id']}"
+
+    missing_secret = occurrence_client.get(
+        url, headers=_result_headers(payload, secret=""), follow_redirects=False
+    )
+    assert missing_secret.status_code == 401
+
+    invalid_secret = occurrence_client.get(
+        url,
+        headers=_result_headers(payload, secret="wrong-secret-at-least-32-bytes"),
+        follow_redirects=False,
+    )
+    assert invalid_secret.status_code == 401
+
+    missing_identity = occurrence_client.get(
+        url,
+        headers={"X-Hermes-Hosted-Secret": "hosted-runtime-test-secret-at-least-32-bytes"},
+        follow_redirects=False,
+    )
+    assert missing_identity.status_code == 400
+
+    malformed_uuid = occurrence_client.get(
+        "/api/hosted/runtime/scheduled-research/results/not-a-uuid",
+        headers=_result_headers(payload),
+        follow_redirects=False,
+    )
+    assert malformed_uuid.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "identity_field",
+    ["workspace_id", "user_id", "runtime_key", "runtime_session_id"],
+)
+def test_protected_result_route_rejects_identity_mismatch(
+    occurrence_client, monkeypatch, tmp_path, identity_field
+):
+    managed_root = tmp_path / "workspace"
+    monkeypatch.setenv("HERMES_DASHBOARD_FILES_ROOT", str(managed_root))
+    monkeypatch.setenv(
+        "HERMES_HOSTED_RUNTIME_SHARED_SECRET",
+        "hosted-runtime-test-secret-at-least-32-bytes",
+    )
+    monkeypatch.setattr(
+        hosted_runtime_bridge,
+        "load_config",
+        lambda: {"hosted_runtime_bridge": {"enabled": True}},
+    )
+    payload = _payload()
+    db = managed._session_db()
+    try:
+        _complete_occurrence(db, payload)
+    finally:
+        db.close()
+    managed._persist_occurrence_result(_ARTIFACT_ID, "private result", None)
+
+    mismatched = {
+        "workspace_id": "workspace-other",
+        "user_id": "user-other",
+        "runtime_key": "otherruntimekey1234567890abcd",
+        "runtime_session_id": "rt_other",
+    }
+    response = occurrence_client.get(
+        f"/api/hosted/runtime/scheduled-research/results/{payload['occurrence_id']}",
+        headers=_result_headers(payload, **{identity_field: mismatched[identity_field]}),
+        follow_redirects=False,
+    )
+    assert response.status_code == 404
+
+
+def test_protected_result_route_requires_completed_identity_and_artifact(
+    occurrence_client, monkeypatch, tmp_path
+):
+    managed_root = tmp_path / "workspace"
+    monkeypatch.setenv("HERMES_DASHBOARD_FILES_ROOT", str(managed_root))
+    monkeypatch.setenv(
+        "HERMES_HOSTED_RUNTIME_SHARED_SECRET",
+        "hosted-runtime-test-secret-at-least-32-bytes",
+    )
+    monkeypatch.setattr(
+        hosted_runtime_bridge,
+        "load_config",
+        lambda: {"hosted_runtime_bridge": {"enabled": True}},
+    )
+    payload = _payload()
+    db = managed._session_db()
+    try:
+        _complete_occurrence(db, payload)
+    finally:
+        db.close()
+
+    url = f"/api/hosted/runtime/scheduled-research/results/{payload['occurrence_id']}"
+    missing_artifact = occurrence_client.get(
+        url, headers=_result_headers(payload), follow_redirects=False
+    )
+    assert missing_artifact.status_code == 404
+
+
+def test_protected_result_route_hides_unknown_and_incomplete_occurrences(
+    occurrence_client, monkeypatch
+):
+    monkeypatch.setenv(
+        "HERMES_HOSTED_RUNTIME_SHARED_SECRET",
+        "hosted-runtime-test-secret-at-least-32-bytes",
+    )
+    monkeypatch.setattr(
+        hosted_runtime_bridge,
+        "load_config",
+        lambda: {"hosted_runtime_bridge": {"enabled": True}},
+    )
+    payload = _payload()
+    db = managed._session_db()
+    try:
+        raw = json.dumps(payload, separators=(",", ":")).encode()
+        db.accept_scheduled_research_occurrence(
+            payload, hashlib.sha256(raw).hexdigest()
+        )
+        db.authorize_scheduled_research_occurrence(payload)
+    finally:
+        db.close()
+
+    base_url = "/api/hosted/runtime/scheduled-research/results/"
+    incomplete = occurrence_client.get(
+        base_url + payload["occurrence_id"],
+        headers=_result_headers(payload),
+        follow_redirects=False,
+    )
+    unknown_payload = _payload(
+        occurrence_id="00000000-0000-4000-8000-000000000099"
+    )
+    unknown = occurrence_client.get(
+        base_url + unknown_payload["occurrence_id"],
+        headers=_result_headers(unknown_payload),
+        follow_redirects=False,
+    )
+    assert incomplete.status_code == 404
+    assert unknown.status_code == 404
+    assert incomplete.json() == unknown.json()
+
+
+def test_protected_result_route_is_disabled_without_bridge(
+    occurrence_client, monkeypatch
+):
+    monkeypatch.setenv(
+        "HERMES_HOSTED_RUNTIME_SHARED_SECRET",
+        "hosted-runtime-test-secret-at-least-32-bytes",
+    )
+    monkeypatch.setattr(
+        hosted_runtime_bridge,
+        "load_config",
+        lambda: {"hosted_runtime_bridge": {"enabled": False}},
+    )
+    payload = _payload()
+    response = occurrence_client.get(
+        f"/api/hosted/runtime/scheduled-research/results/{payload['occurrence_id']}",
+        headers=_result_headers(payload),
+        follow_redirects=False,
+    )
+    assert response.status_code == 404
 
 
 def test_occurrence_ingress_accepts_without_browser_session_and_replays(occurrence_client):
@@ -248,11 +601,13 @@ def test_managed_occurrence_has_hard_deadline_and_terminal_callback(
 
     class FakeClient:
         @classmethod
-        def from_scheduled_occurrence(cls, **_kwargs):
+        def from_scheduled_occurrence(cls, **kwargs):
+            assert kwargs["occurrence_id"] == payload["occurrence_id"]
             return cls()
 
         def authorize(self, _on_revoke, *, event_id):
-            assert event_id == payload["occurrence_id"]
+            uuid.UUID(event_id)
+            assert event_id != payload["occurrence_id"]
             return turn
 
     monkeypatch.setattr(
@@ -284,6 +639,239 @@ def test_managed_occurrence_has_hard_deadline_and_terminal_callback(
     ]
     assert json.loads(events[-1]["raw_body"])["error_code"] == "execution_timeout"
     assert turn.released is True
+
+
+def test_successful_occurrence_emits_result_and_final_session_evidence(
+    occurrence_client,
+    monkeypatch,
+    tmp_path,
+):
+    del occurrence_client
+    managed_root = tmp_path / "workspace"
+    monkeypatch.setenv("HERMES_DASHBOARD_FILES_ROOT", str(managed_root))
+    payload = _payload()
+    db = managed._session_db()
+    claim = _claim_occurrence(db, payload)
+    assert claim is not None
+    monkeypatch.setattr(managed, "flush_occurrence_events", lambda db=None: None)
+
+    class FakeTurn:
+        def __init__(self):
+            self.completed = None
+
+        def release(self):
+            raise AssertionError("successful work must complete billing")
+
+        def complete(self, metadata):
+            self.completed = metadata
+
+    turn = FakeTurn()
+
+    class FakeClient:
+        def __init__(self):
+            self.stopped = False
+
+        @classmethod
+        def from_scheduled_occurrence(cls, **kwargs):
+            assert kwargs["occurrence_id"] == payload["occurrence_id"]
+            return cls()
+
+        def authorize(self, _on_revoke, *, event_id):
+            uuid.UUID(event_id)
+            assert event_id != payload["occurrence_id"]
+            return turn
+
+        def stop_heartbeat(self):
+            self.stopped = True
+
+    monkeypatch.setattr("tui_gateway.oxaide_turns.OxaideTurnClient", FakeClient)
+
+    def successful_job(
+        _job,
+        *,
+        cancel_requested,
+        final_session_id,
+    ):
+        assert cancel_requested() is False
+        final_session_id.append("cron_final_session")
+        return True, "# Completed research", "fallback", None
+
+    monkeypatch.setattr("cron.scheduler.run_job", successful_job)
+
+    managed._run_occurrence(db, claim)
+
+    row = db._conn.execute(
+        "SELECT status, hermes_session_id, result_artifact_id, billing_event_id "
+        "FROM scheduled_research_occurrences "
+        "WHERE occurrence_id = ?",
+        (payload["occurrence_id"],),
+    ).fetchone()
+    terminal_event = db._conn.execute(
+        "SELECT raw_body FROM scheduled_research_event_outbox "
+        "WHERE occurrence_id = ? AND sequence = 3",
+        (payload["occurrence_id"],),
+    ).fetchone()
+    billing = db._conn.execute(
+        "SELECT billing_event_id, status FROM scheduled_research_billing_outbox "
+        "WHERE occurrence_id = ?",
+        (payload["occurrence_id"],),
+    ).fetchone()
+    db.close()
+
+    assert row["status"] == "completed"
+    assert row["hermes_session_id"] == "cron_final_session"
+    uuid.UUID(row["result_artifact_id"])
+    uuid.UUID(row["billing_event_id"])
+    assert row["result_artifact_id"] != payload["occurrence_id"]
+    assert row["billing_event_id"] != payload["occurrence_id"]
+    event = json.loads(terminal_event["raw_body"])
+    assert event["status"] == "completed"
+    assert event["result_artifact_ref"] == (
+        f"/research-results/{row['result_artifact_id']}.md"
+    )
+    assert event["billing_event_id"] == row["billing_event_id"]
+    assert event["result_session_id"] == "cron_final_session"
+    assert dict(billing) == {
+        "billing_event_id": row["billing_event_id"],
+        "status": "pending",
+    }
+    assert turn.completed is None
+    assert managed.scheduled_research_result_path(
+        row["result_artifact_id"]
+    ).read_text() == "# Completed research"
+
+
+def test_successful_attempt_cleans_artifact_and_releases_turn_on_commit_failure(
+    occurrence_client,
+    monkeypatch,
+    tmp_path,
+):
+    del occurrence_client
+    managed_root = tmp_path / "workspace"
+    monkeypatch.setenv("HERMES_DASHBOARD_FILES_ROOT", str(managed_root))
+    payload = _payload()
+    db = managed._session_db()
+    claim = _claim_occurrence(db, payload)
+    assert claim is not None
+    monkeypatch.setattr(managed, "flush_occurrence_events", lambda db=None: None)
+
+    class FakeTurn:
+        def __init__(self):
+            self.released = False
+
+        def release(self):
+            self.released = True
+
+    turn = FakeTurn()
+
+    class FakeClient:
+        @classmethod
+        def from_scheduled_occurrence(cls, **_kwargs):
+            return cls()
+
+        def authorize(self, _on_revoke, *, event_id):
+            uuid.UUID(event_id)
+            return turn
+
+        def stop_heartbeat(self):
+            raise AssertionError("an uncommitted attempt cannot become the winner")
+
+    monkeypatch.setattr("tui_gateway.oxaide_turns.OxaideTurnClient", FakeClient)
+
+    def successful_job(_job, *, cancel_requested, final_session_id):
+        assert cancel_requested() is False
+        final_session_id.append("cron_final_session")
+        return True, "private result", None, None
+
+    monkeypatch.setattr("cron.scheduler.run_job", successful_job)
+    monkeypatch.setattr(
+        db,
+        "finish_scheduled_research_occurrence",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("simulated transaction failure")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="simulated transaction failure"):
+        managed._run_occurrence(db, claim)
+
+    occurrence = db._conn.execute(
+        "SELECT status, result_artifact_id, billing_event_id "
+        "FROM scheduled_research_occurrences WHERE occurrence_id = ?",
+        (payload["occurrence_id"],),
+    ).fetchone()
+    billing_count = db._conn.execute(
+        "SELECT COUNT(*) FROM scheduled_research_billing_outbox"
+    ).fetchone()[0]
+    db.close()
+
+    assert dict(occurrence) == {
+        "status": "running",
+        "result_artifact_id": None,
+        "billing_event_id": None,
+    }
+    assert billing_count == 0
+    assert turn.released is True
+    results = managed_root / "research-results"
+    assert not results.exists() or list(results.iterdir()) == []
+
+
+def test_remote_billing_ack_is_retried_after_local_ack_crash(
+    occurrence_client,
+    monkeypatch,
+):
+    del occurrence_client
+    payload = _payload()
+    db = managed._session_db()
+    _complete_occurrence(db, payload)
+    db.settle_scheduled_research_event("terminal-event", delivered=True)
+    remote_calls = []
+
+    class FakeClient:
+        @classmethod
+        def from_scheduled_occurrence(cls, **kwargs):
+            assert kwargs["occurrence_id"] == payload["occurrence_id"]
+            return cls()
+
+        def complete_scheduled_occurrence(
+            self,
+            billing_event_id,
+            *,
+            completed_at,
+            details,
+        ):
+            remote_calls.append((billing_event_id, completed_at, details))
+
+        @staticmethod
+        def _is_terminal_settlement_error(_exc):
+            return False
+
+    monkeypatch.setattr("tui_gateway.oxaide_turns.OxaideTurnClient", FakeClient)
+    settle_locally = db.settle_scheduled_research_billing
+
+    def crash_before_local_ack(*_args, **_kwargs):
+        raise RuntimeError("simulated crash after remote acknowledgement")
+
+    monkeypatch.setattr(
+        db,
+        "settle_scheduled_research_billing",
+        crash_before_local_ack,
+    )
+    with pytest.raises(RuntimeError, match="after remote acknowledgement"):
+        managed.flush_occurrence_billing(db)
+    assert [call[0] for call in remote_calls] == [_BILLING_ID]
+
+    monkeypatch.setattr(db, "settle_scheduled_research_billing", settle_locally)
+    managed.flush_occurrence_billing(db)
+    billing = db._conn.execute(
+        "SELECT status FROM scheduled_research_billing_outbox "
+        "WHERE billing_event_id = ?",
+        (_BILLING_ID,),
+    ).fetchone()
+    db.close()
+
+    assert [call[0] for call in remote_calls] == [_BILLING_ID, _BILLING_ID]
+    assert billing["status"] == "delivered"
 
 
 def test_expired_running_occurrence_is_reclaimed_without_duplicate_running_event(

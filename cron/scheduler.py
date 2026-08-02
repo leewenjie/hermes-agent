@@ -44,9 +44,40 @@ from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.config import load_config, _expand_env_vars
 from hermes_cli.fallback_config import get_fallback_chain
 from hermes_time import now as _hermes_now
+from utils import base_url_host_matches
 
 logger = logging.getLogger(__name__)
 _OXAIDE_MANAGED_EXECUTION_TIMEOUT_SECONDS = 180.0
+_OXAIDE_MANAGED_MODEL = "gpt-5.6-luna"
+_OXAIDE_MANAGED_PROVIDER = "azure-foundry"
+_OXAIDE_MANAGED_API_MODE = "codex_responses"
+
+
+def _validate_oxaide_managed_runtime(runtime: dict[str, Any]) -> None:
+    """Fail closed unless a managed run resolved to the approved backend."""
+    if not isinstance(runtime, dict):
+        raise RuntimeError("Managed Scheduled Research resolved an invalid runtime")
+
+    if str(runtime.get("provider") or "").strip().lower() != _OXAIDE_MANAGED_PROVIDER:
+        raise RuntimeError(
+            "Managed Scheduled Research resolved an unapproved provider; "
+            "only Azure Foundry is allowed"
+        )
+    if str(runtime.get("api_mode") or "").strip().lower() != _OXAIDE_MANAGED_API_MODE:
+        raise RuntimeError(
+            "Managed Scheduled Research resolved an unapproved API mode; "
+            "codex_responses is required"
+        )
+
+    base_url = str(runtime.get("base_url") or "").strip()
+    if not (
+        base_url_host_matches(base_url, "openai.azure.com")
+        or base_url_host_matches(base_url, "services.ai.azure.com")
+    ):
+        raise RuntimeError(
+            "Managed Scheduled Research resolved a non-Azure endpoint; "
+            "custom and OpenRouter endpoints are not allowed"
+        )
 
 
 def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
@@ -2488,6 +2519,7 @@ def run_job(
     *,
     defer_agent_teardown: Optional[list] = None,
     cancel_requested: Optional[Callable[[], bool]] = None,
+    final_session_id: Optional[list] = None,
 ) -> tuple[bool, str, str, Optional[str]]:
     """
     Execute a single cron job.
@@ -2501,6 +2533,11 @@ def run_job(
     torn-down async client (defense-in-depth alongside the interpreter-shutdown
     guard). When ``None`` (the default) teardown happens inline as before, so
     every existing caller is unchanged.
+
+    ``final_session_id``: when a caller passes a list, ``run_job`` appends the
+    agent's authoritative final session ID during cleanup, after any context
+    compression/session rotation has completed and before the agent is closed.
+    This is a capture seam only; the four-value return contract is unchanged.
 
     Returns:
         Tuple of (success, full_output_doc, final_response, error_message)
@@ -2817,9 +2854,13 @@ def run_job(
         # ``cronjob action=update model=...`` after a failed run takes effect
         # on the next tick — there is no in-memory cache.
         if _is_oxaide_managed_occurrence:
-            model = os.getenv("HERMES_OXAIDE_MODEL", "").strip()
-            if not model:
-                raise RuntimeError("Managed Scheduled Research model is not configured")
+            configured_model = os.getenv("HERMES_OXAIDE_MODEL", "").strip()
+            if configured_model != _OXAIDE_MANAGED_MODEL:
+                raise RuntimeError(
+                    "Managed Scheduled Research requires "
+                    f"HERMES_OXAIDE_MODEL={_OXAIDE_MANAGED_MODEL!r}"
+                )
+            model = _OXAIDE_MANAGED_MODEL
         else:
             model = job.get("model") or os.getenv("HERMES_MODEL") or ""
 
@@ -2916,6 +2957,12 @@ def run_job(
 
         # Provider routing
         pr = _cfg.get("provider_routing") or {}
+        if _is_oxaide_managed_occurrence:
+            # These knobs are OpenRouter-specific. Keep ordinary cron jobs
+            # fully configurable, but do not let managed runs inherit a
+            # provider list/order/sort or coding-score policy that could
+            # redirect the request away from the pinned Azure runtime.
+            pr = {}
 
         from hermes_cli.runtime_provider import (
             resolve_runtime_provider,
@@ -2938,13 +2985,22 @@ def run_job(
             # circuits that precedence and can resurrect old providers (for
             # example DeepSeek) for cron jobs that do not pin provider/model.
             managed_provider = os.getenv("HERMES_OXAIDE_PROVIDER", "").strip()
-            if _is_oxaide_managed_occurrence and not managed_provider:
-                raise RuntimeError("Managed Scheduled Research provider is not configured")
+            if _is_oxaide_managed_occurrence and managed_provider != _OXAIDE_MANAGED_PROVIDER:
+                raise RuntimeError(
+                    "Managed Scheduled Research requires "
+                    f"HERMES_OXAIDE_PROVIDER={_OXAIDE_MANAGED_PROVIDER!r}"
+                )
             runtime_kwargs = {
-                "requested": managed_provider if _is_oxaide_managed_occurrence else job.get("provider"),
+                "requested": (
+                    managed_provider
+                    if _is_oxaide_managed_occurrence
+                    else job.get("provider")
+                ),
             }
             if job.get("base_url"):
                 runtime_kwargs["explicit_base_url"] = job.get("base_url")
+            if _is_oxaide_managed_occurrence:
+                runtime_kwargs["target_model"] = model
             runtime = resolve_runtime_provider(**runtime_kwargs)
         except AuthError as auth_exc:
             if _is_oxaide_managed_occurrence:
@@ -2970,6 +3026,9 @@ def run_job(
         except Exception as exc:
             message = format_runtime_provider_error(exc)
             raise RuntimeError(message) from exc
+
+        if _is_oxaide_managed_occurrence:
+            _validate_oxaide_managed_runtime(runtime)
 
         # Provider/model-drift fail-closed guard (#44585).
         #
@@ -3025,7 +3084,11 @@ def run_job(
                 f"(or pin the original values to keep them). See #44585."
             )
 
-        fallback_model = get_fallback_chain(_cfg) or None
+        fallback_model = (
+            None
+            if _is_oxaide_managed_occurrence
+            else get_fallback_chain(_cfg) or None
+        )
         credential_pool = None
         runtime_provider = str(runtime.get("provider") or "").strip().lower()
         if runtime_provider:
@@ -3082,7 +3145,11 @@ def run_job(
             providers_ignored=pr.get("ignore"),
             providers_order=pr.get("order"),
             provider_sort=pr.get("sort"),
-            openrouter_min_coding_score=(_cfg.get("openrouter") or {}).get("min_coding_score"),
+            openrouter_min_coding_score=(
+                None
+                if _is_oxaide_managed_occurrence
+                else (_cfg.get("openrouter") or {}).get("min_coding_score")
+            ),
             enabled_toolsets=_resolve_cron_enabled_toolsets(job, _cfg),
             disabled_toolsets=_resolve_cron_disabled_toolsets(_cfg),
             quiet_mode=True,
@@ -3376,6 +3443,16 @@ def run_job(
         return False, output, "", error_msg
 
     finally:
+        # ``AIAgent.session_id`` may rotate during context compression. Capture
+        # it before the agent is closed so durable consumers can bind results to
+        # the session that actually produced them rather than the initial
+        # ``_cron_session_id`` seed.
+        if final_session_id is not None and agent is not None:
+            try:
+                captured_session_id = str(getattr(agent, "session_id", "") or "").strip()
+            except Exception:
+                captured_session_id = ""
+            final_session_id.append(captured_session_id or None)
         # Restore TERMINAL_CWD to whatever it was before this job ran.  We
         # only ever mutate it when the job has a workdir; see the setup block
         # at the top of run_job for the serialization guarantee.

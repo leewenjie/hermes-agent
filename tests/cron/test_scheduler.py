@@ -982,15 +982,26 @@ class TestRunJobSessionPersistence:
              ), \
              patch("run_agent.AIAgent") as mock_agent_cls:
             mock_agent = MagicMock()
+            mock_agent.session_id = "cron_rotated_final"
             mock_agent.run_conversation.return_value = {"final_response": "ok"}
             mock_agent_cls.return_value = mock_agent
 
-            success, output, final_response, error = run_job(job)
+            final_session_id = []
+            mock_agent.close.side_effect = lambda: (
+                None if final_session_id == ["cron_rotated_final"]
+                else (_ for _ in ()).throw(AssertionError(
+                    "agent must close after final session capture"
+                ))
+            )
+            success, output, final_response, error = run_job(
+                job, final_session_id=final_session_id
+            )
 
         assert success is True
         assert error is None
         assert final_response == "ok"
         assert "ok" in output
+        assert final_session_id == ["cron_rotated_final"]
 
         kwargs = mock_agent_cls.call_args.kwargs
         assert kwargs["session_db"] is fake_db

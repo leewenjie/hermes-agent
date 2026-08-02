@@ -1,0 +1,7 @@
+name: browser-cloudflare
+version: 1.0.0
+description: "Cloudflare Browser Run persistent CDP backend. Requires a scoped Browser Rendering API token."
+author: Oxaide
+kind: backend
+provides_browser_providers:
+  - cloudflare

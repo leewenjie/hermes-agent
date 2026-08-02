@@ -40,6 +40,9 @@ _TERMINAL_SETTLEMENT_CODES = {
     "turn_reservation_binding_fenced",
     "turn_reservation_not_active",
     "turn_reservation_not_found",
+    "scheduled_research_occurrence_mismatch",
+    "scheduled_research_occurrence_required",
+    "scheduled_research_winner_mismatch",
 }
 _TERMINAL_HEARTBEAT_CODES = {
     "runtime_session_not_authorized",
@@ -107,6 +110,9 @@ class OxaideTurnClient:
         ).strip()
         self.runtime_key = str(trusted_context.get("runtime_key") or "").strip()
         self.user_id = str(trusted_context.get("user_id") or "").strip()
+        self.scheduled_research_occurrence_id = str(
+            trusted_context.get("scheduled_research_occurrence_id") or ""
+        ).strip()
         self.jti = str(trusted_context.get("jti") or "").strip()
         try:
             self.expires_at = int(trusted_context.get("expires_at") or 0)
@@ -120,10 +126,21 @@ class OxaideTurnClient:
             self.user_id,
         ))
         browser_context_complete = bool(self.jti and self.expires_at)
+        scheduled_context_complete = bool(self.scheduled_research_occurrence_id)
+        if scheduled_context_complete:
+            try:
+                self.scheduled_research_occurrence_id = str(
+                    uuid.UUID(self.scheduled_research_occurrence_id)
+                )
+            except ValueError as exc:
+                raise OxaideTurnError(
+                    "trusted scheduled research occurrence is invalid"
+                ) from exc
         if (
             not required_identity
             or self.context_kind not in {"browser_launch", "scheduled_research"}
             or (self.context_kind == "browser_launch" and not browser_context_complete)
+            or (self.context_kind == "scheduled_research" and not scheduled_context_complete)
         ):
             raise OxaideTurnError("trusted Oxaide launch context is incomplete")
 
@@ -155,6 +172,7 @@ class OxaideTurnClient:
         user_id: str,
         runtime_key: str,
         runtime_session_id: str,
+        occurrence_id: str,
     ) -> "OxaideTurnClient":
         return cls({
             "context_kind": "scheduled_research",
@@ -162,6 +180,7 @@ class OxaideTurnClient:
             "user_id": user_id,
             "runtime_key": runtime_key,
             "runtime_session_id": runtime_session_id,
+            "scheduled_research_occurrence_id": occurrence_id,
         })
 
     def authorize(self, on_lease_lost=None, *, event_id: str | None = None) -> OxaideTurn:
@@ -346,6 +365,10 @@ class OxaideTurnClient:
             "runtime_session_id": self.runtime_session_id,
             "hermes_event_id": event_id,
         }
+        if phase in {"authorize", "complete"} and self.scheduled_research_occurrence_id:
+            payload["scheduled_research_occurrence_id"] = (
+                self.scheduled_research_occurrence_id
+            )
         if phase == "complete":
             payload["completed_at"] = (
                 datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -353,6 +376,26 @@ class OxaideTurnClient:
             if details:
                 payload["details"] = details
         return payload
+
+    def complete_scheduled_occurrence(
+        self,
+        event_id: str,
+        *,
+        completed_at: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        """Deliver winner settlement without the unrelated file outbox.
+
+        Scheduled research owns its settlement intent in the same SQLite
+        transaction as the winning occurrence. Delivery errors must therefore
+        propagate so that outbox can retry them without splitting authority
+        across two persistence mechanisms.
+        """
+        if self.context_kind != "scheduled_research":
+            raise OxaideTurnError("scheduled occurrence settlement is unavailable")
+        payload = self._payload("complete", event_id, details=details)
+        payload["completed_at"] = completed_at
+        self._request_payload(payload)
 
     def _request(self, phase: str, event_id: str) -> dict[str, Any]:
         return self._request_payload(self._payload(phase, event_id))

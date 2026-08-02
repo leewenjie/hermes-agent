@@ -61,7 +61,7 @@ def request_control(
 ) -> Any:
     import time
 
-    if action in {"create", "update", "pause", "resume", "delete"} and not request_id:
+    if action in {"create", "update", "pause", "resume", "delete", "set_consent"} and not request_id:
         raise ScheduledResearchControlError("scheduled_research_request_id_required", 400)
     body = {**_identity(user_id, request_id), "action": action, **fields}
     raw_body = json.dumps(body, separators=(",", ":"), sort_keys=True)
@@ -111,10 +111,42 @@ def request_control(
             "occurrences": occurrences,
             "next_cursor": decoded.get("next_cursor"),
         }
+    if action in {"get_consent", "set_consent"}:
+        consent = decoded.get("consent")
+        if not isinstance(consent, dict):
+            raise ScheduledResearchControlError("scheduled_research_response_invalid", 502)
+        expected_fields = {
+            "consentType",
+            "granted",
+            "active",
+            "confirmedEmail",
+            "grantedAt",
+            "withdrawnAt",
+            "expiresAt",
+            "method",
+            "legalBasis",
+        }
+        if set(consent) != expected_fields:
+            raise ScheduledResearchControlError("scheduled_research_response_invalid", 502)
+        if consent.get("consentType") != "scheduled_research_emails":
+            raise ScheduledResearchControlError("scheduled_research_response_invalid", 502)
+        if not isinstance(consent.get("granted"), bool) or not isinstance(consent.get("active"), bool):
+            raise ScheduledResearchControlError("scheduled_research_response_invalid", 502)
+        for field in expected_fields - {"consentType", "granted", "active"}:
+            value = consent.get(field)
+            if value is not None and not isinstance(value, str):
+                raise ScheduledResearchControlError("scheduled_research_response_invalid", 502)
+        return consent
     return decoded.get("schedule") if action != "delete" else {"ok": True}
 
 
-def build_mutation(name: str, prompt: str, schedule_input: str) -> dict[str, Any]:
+def build_mutation(
+    name: str,
+    prompt: str,
+    schedule_input: str,
+    *,
+    completion_email_enabled: bool = False,
+) -> dict[str, Any]:
     schedule = parse_schedule(schedule_input)
     next_run_at = compute_next_run(schedule)
     if not next_run_at:
@@ -127,6 +159,7 @@ def build_mutation(name: str, prompt: str, schedule_input: str) -> dict[str, Any
         "schedule_display": str(schedule.get("display") or schedule_input),
         "timezone": "UTC",
         "next_run_at": next_run_at,
+        "completion_email_enabled": bool(completion_email_enabled),
     }
 
 
