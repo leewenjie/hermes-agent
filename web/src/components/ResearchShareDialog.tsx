@@ -286,7 +286,6 @@ export function ResearchShareDialog({ session, onClose }: ResearchShareDialogPro
                   <div className="text-text-secondary">Expires {new Date(published.expires_at).toLocaleDateString()}</div>
                 </div>
               )}
-              {!published && preview && <label className="flex cursor-pointer items-start gap-3 text-xs leading-5 text-foreground"><Checkbox checked={confirmed} onCheckedChange={(value) => setConfirmed(value === true)} /><span>I reviewed this exact preview and am authorized to publish its contents.</span></label>}
             </aside>
 
             <section aria-busy={loadingPreview} className="min-h-72 border border-border bg-background/30 p-3 sm:p-4">
@@ -294,7 +293,7 @@ export function ResearchShareDialog({ session, onClose }: ResearchShareDialogPro
               {loadingPreview ? (
                 <div className="flex min-h-64 flex-col items-center justify-center gap-3 text-sm text-text-secondary"><span className="inline-flex items-center gap-2"><Spinner /> Preparing safe preview…</span><Button outlined size="sm" onClick={stopLoading} prefix={<X className="h-3.5 w-3.5" />}>Stop loading</Button></div>
               ) : loadError && !preview ? (
-                <div role="alert" className="flex min-h-64 flex-col items-center justify-center gap-4 px-4 text-center text-sm"><AlertTriangle className="h-5 w-5 text-destructive" /><p className="max-w-lg text-destructive">{loadError.message}</p><Button outlined onClick={loadShareData} prefix={<RotateCcw className="h-4 w-4" />}>Retry preview</Button></div>
+                <div role="alert" className="flex min-h-64 flex-col items-center justify-center gap-4 px-4 text-center text-sm"><AlertTriangle className="h-5 w-5 text-destructive" /><p className="max-w-lg text-destructive">{loadError.message}</p><Button outlined size="sm" onClick={loadShareData} prefix={<RotateCcw className="h-4 w-4" />}>Retry preview</Button></div>
               ) : preview ? (
                 <div className="space-y-4">{preview.snapshot.messages.map((message, index) => (
                   <article key={`${message.role}-${index}`} className={message.role === "user" ? "border border-border bg-secondary/40 p-4" : "border border-success/25 bg-background p-4"}>
@@ -311,8 +310,8 @@ export function ResearchShareDialog({ session, onClose }: ResearchShareDialogPro
           </div>
 
           {actionError && <div role="alert" aria-live="polite" className="mx-3 mt-3 flex shrink-0 flex-wrap items-center gap-3 border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive sm:mx-4"><span className="min-w-0 flex-1">{actionError.message}</span>{actionError.refreshPreview && <Button outlined size="sm" onClick={loadShareData} prefix={<RotateCcw className="h-3.5 w-3.5" />}>Refresh preview</Button>}</div>}
-          <DialogFooter className="shrink-0 flex-col gap-2 border-t border-border bg-background px-4 py-3 sm:flex-row sm:px-6">
-            {published ? <><div className="mr-auto flex items-center gap-2 text-sm text-success"><CheckCircle2 className="h-4 w-4" /> Public link ready</div><Button outlined onClick={() => setConfirmRevoke(true)} disabled={revoking} prefix={<Trash2 />}>Revoke</Button><Button outlined onClick={() => void copyLink()} prefix={copied ? <CheckCircle2 /> : <Copy />}>{copied ? "Copied" : "Copy link"}</Button><Button onClick={() => window.open(published.public_url, "_blank", "noopener,noreferrer")} prefix={<ExternalLink />}>Open link</Button></> : <><Button outlined onClick={handleClose}>Cancel</Button><Button onClick={() => void publish()} disabled={!preview || !confirmed || !title.trim() || publishing} prefix={publishing ? <Spinner /> : <Link2 />}>Create public link</Button></>}
+          <DialogFooter className="shrink-0 flex-col items-stretch gap-3 border-t border-border bg-background px-4 py-3 sm:flex-row sm:items-center sm:px-6">
+            {published ? <><div className="mr-auto flex items-center gap-2 text-sm text-success"><CheckCircle2 className="h-4 w-4" /> Public link ready</div><Button outlined size="sm" onClick={() => setConfirmRevoke(true)} disabled={revoking} prefix={<Trash2 />}>Revoke</Button><Button outlined size="sm" onClick={() => void copyLink()} prefix={copied ? <CheckCircle2 /> : <Copy />}>{copied ? "Copied" : "Copy link"}</Button><Button size="sm" onClick={() => window.open(published.public_url, "_blank", "noopener,noreferrer")} prefix={<ExternalLink />}>Open link</Button></> : <>{preview && <label id="research-share-confirmation" className="mr-auto flex cursor-pointer items-start gap-2 text-xs leading-5 text-foreground sm:max-w-md"><Checkbox checked={confirmed} onCheckedChange={(value) => setConfirmed(value === true)} /><span>I reviewed this exact preview and am authorized to publish its contents.</span></label>}<div className="flex justify-end gap-2"><Button outlined size="sm" onClick={handleClose}>Cancel</Button><Button size="sm" onClick={() => void publish()} disabled={!preview || !confirmed || !title.trim() || publishing} aria-describedby={preview && !confirmed ? "research-share-confirmation" : undefined} prefix={publishing ? <Spinner /> : <Link2 />}>Create public link</Button></div></>}
           </DialogFooter>
         </DialogContent>
       </Dialog>
