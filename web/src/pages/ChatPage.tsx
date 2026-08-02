@@ -166,7 +166,15 @@ export default function ChatPage({
   const copyResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttemptRef = useRef(0);
-  const forceFreshPtyRef = useRef(false);
+  // Oxaide's explicit Start New action arrives as /chat?fresh=1. Seed the
+  // one-shot flag before the first PTY effect so a stale localStorage attach
+  // token cannot reconnect the previous conversation.
+  const forceFreshPtyRef = useRef(
+    searchParams.get("fresh") === "1" ||
+      searchParams.get("fresh") === "true" ||
+      searchParams.get("fresh") === "yes" ||
+      searchParams.get("fresh") === "on",
+  );
   const blockedInputNoticeRef = useRef(false);
   const lastResumeReconnectAtRef = useRef(0);
   // True from the moment the connect effect begins until the socket resolves

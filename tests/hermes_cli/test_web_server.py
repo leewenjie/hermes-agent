@@ -20,6 +20,63 @@ from hermes_cli.config import (
 )
 
 
+def test_oxaide_resume_lookup_is_scoped_to_trusted_user_and_excludes_cron(monkeypatch):
+    import hermes_cli.web_server as web_server
+
+    class FakeDB:
+        def __init__(self):
+            self.calls = []
+
+        def list_sessions_rich(self, **kwargs):
+            self.calls.append(kwargs)
+            return [{"id": "user-a-live-tip"}]
+
+        def close(self):
+            pass
+
+    db = FakeDB()
+    monkeypatch.setattr(web_server, "_open_session_db_for_profile", lambda *args, **kwargs: db)
+
+    assert web_server._oxaide_latest_resume_session_id({"user_id": "user-a"}) == "user-a-live-tip"
+    assert db.calls == [{
+        "exclude_sources": ["cron"],
+        "limit": 1,
+        "offset": 0,
+        "min_message_count": 1,
+        "order_by_last_active": True,
+        "compact_rows": True,
+        "user_id": "user-a",
+    }]
+
+
+def test_oxaide_resume_lookup_returns_none_without_trusted_identity(monkeypatch):
+    import hermes_cli.web_server as web_server
+
+    monkeypatch.setattr(
+        web_server,
+        "_open_session_db_for_profile",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("untrusted lookup opened the database")),
+    )
+    assert web_server._oxaide_latest_resume_session_id(None) is None
+    assert web_server._oxaide_latest_resume_session_id({"workspace_id": "workspace-1"}) is None
+
+
+def test_oxaide_resume_lookup_returns_none_when_only_empty_sessions_exist(monkeypatch):
+    import hermes_cli.web_server as web_server
+
+    class FakeDB:
+        def list_sessions_rich(self, **kwargs):
+            assert kwargs["min_message_count"] == 1
+            assert kwargs["exclude_sources"] == ["cron"]
+            return []
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(web_server, "_open_session_db_for_profile", lambda *args, **kwargs: FakeDB())
+    assert web_server._oxaide_latest_resume_session_id({"user_id": "user-a"}) is None
+
+
 # ---------------------------------------------------------------------------
 # Shared fixtures
 # ---------------------------------------------------------------------------

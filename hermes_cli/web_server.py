@@ -16510,6 +16510,39 @@ def _pty_input_enabled(trusted_context: Optional[dict[str, Any]]) -> bool:
     return str(trusted_context.get("access_state") or "").strip() == "active"
 
 
+def _oxaide_latest_resume_session_id(
+    trusted_context: Optional[dict[str, Any]],
+) -> Optional[str]:
+    """Return the newest durable research session for a trusted Oxaide user.
+
+    The browser may carry a PTY attach token for continuity, but it must not
+    choose a transcript.  A fresh browser therefore resolves Resume here,
+    from the launch-token identity and the runtime's own session database.
+    Compression continuations are projected to their live tip by
+    ``list_sessions_rich``.
+    """
+    if trusted_context is None:
+        return None
+    user_id = str(trusted_context.get("user_id") or "").strip()
+    if not user_id:
+        return None
+    db = _open_session_db_for_profile(None, read_only=True)
+    try:
+        rows = db.list_sessions_rich(
+            exclude_sources=["cron"],
+            limit=1,
+            offset=0,
+            min_message_count=1,
+            order_by_last_active=True,
+            compact_rows=True,
+            user_id=user_id,
+        )
+        session_id = str(rows[0].get("id") or "").strip() if rows else ""
+        return session_id or None
+    finally:
+        db.close()
+
+
 def _configured_runtime_pin(name: str) -> bool:
     from hermes_cli.managed_scope import managed_value_configured
 
@@ -17670,6 +17703,15 @@ async def pty_ws(ws: WebSocket) -> None:
             _forget_active_session_file(active_session_file)
         elif not resume:
             resume = _read_active_session_file(active_session_file)
+
+    # A new browser has neither a channel breadcrumb nor an explicit resume
+    # query.  Resolve the primary Resume action from the trusted launch
+    # identity, while keeping ``fresh=1`` authoritative for Start New.
+    if trusted_context is not None and not force_fresh and not resume:
+        resume = await asyncio.to_thread(
+            _oxaide_latest_resume_session_id,
+            trusted_context,
+        )
 
     resolve_kwargs = {
         "resume": resume,
