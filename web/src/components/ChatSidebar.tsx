@@ -243,7 +243,8 @@ export function ChatSidebar({
     // session — it writes config.yaml over REST — so we don't track its id.
     bootstrapChatSidebar(gw, {
       profile,
-      readOnly: readOnly || !accessResolved,
+      accessResolved,
+      readOnly,
     })
       .then((result) => {
         if (cancelled) {

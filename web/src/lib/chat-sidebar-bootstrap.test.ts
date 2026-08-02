@@ -16,6 +16,20 @@ function gatewayMock() {
 }
 
 describe("bootstrapChatSidebar", () => {
+  it("does not open the sidecar while access is still resolving", async () => {
+    const gateway = gatewayMock();
+
+    const result = await bootstrapChatSidebar(gateway, {
+      accessResolved: false,
+      profile: "researcher",
+      readOnly: false,
+    });
+
+    expect(gateway.connect).not.toHaveBeenCalled();
+    expect(gateway.request).not.toHaveBeenCalled();
+    expect(result).toBeNull();
+  });
+
   it("connects for read events without creating a session in read-only mode", async () => {
     const gateway = gatewayMock();
 
