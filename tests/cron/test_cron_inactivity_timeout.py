@@ -394,6 +394,11 @@ def test_active_managed_occurrence_hits_wall_clock_deadline(monkeypatch):
             "https://openai.azure.com.attacker.test/openai/v1",
             "non-Azure endpoint",
         ),
+        (
+            "base_url",
+            "https://resource.cognitiveservices.azure.com.attacker.test/openai/v1",
+            "non-Azure endpoint",
+        ),
     ],
 )
 def test_managed_runtime_rejects_unapproved_resolution(field, value, message):
@@ -417,6 +422,7 @@ def test_managed_runtime_accepts_approved_azure_hosts():
     for host in (
         "https://resource.openai.azure.com/openai/v1",
         "https://resource.services.ai.azure.com/openai/v1",
+        "https://resource.cognitiveservices.azure.com/openai/v1",
     ):
         _validate_oxaide_managed_runtime(
             {

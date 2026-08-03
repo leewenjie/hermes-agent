@@ -73,6 +73,7 @@ def _validate_oxaide_managed_runtime(runtime: dict[str, Any]) -> None:
     if not (
         base_url_host_matches(base_url, "openai.azure.com")
         or base_url_host_matches(base_url, "services.ai.azure.com")
+        or base_url_host_matches(base_url, "cognitiveservices.azure.com")
     ):
         raise RuntimeError(
             "Managed Scheduled Research resolved a non-Azure endpoint; "
