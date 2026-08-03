@@ -282,6 +282,51 @@ def test_frozen_launch_propagates_state_and_blocks_http_mutations(gated_app):
     assert blocked.json()["code"] == "access_frozen"
 
 
+def test_frozen_workspace_can_revoke_but_cannot_publish_share(
+    gated_app, monkeypatch
+):
+    client, secret = gated_app
+    client.get(
+        f"/auth/oxaide-launch?token={_launch_token(secret, access_state='frozen')}",
+        follow_redirects=False,
+    )
+
+    from hermes_cli import oxaide_research_share as sharing
+
+    revoked = []
+    monkeypatch.setattr(
+        sharing,
+        "revoke_research_share",
+        lambda **kwargs: revoked.append(kwargs) or {
+            "ok": True,
+            "action": "revoke",
+            "share_id": kwargs["share_id"],
+        },
+    )
+    monkeypatch.setattr(sharing, "remove_recorded_share", lambda _share_id: True)
+
+    revoke = client.post(
+        "/api/research-shares",
+        json={
+            "action": "revoke",
+            "share_id": "00000000-0000-4000-8000-000000000001",
+        },
+    )
+    publish = client.post(
+        "/api/research-shares",
+        json={"action": "publish", "session_id": "session-1"},
+    )
+
+    assert revoke.status_code == 200
+    assert revoked == [{
+        "workspace_id": "workspace-1",
+        "user_id": "oxaide-user-1",
+        "share_id": "00000000-0000-4000-8000-000000000001",
+    }]
+    assert publish.status_code == 403
+    assert publish.json()["code"] == "access_frozen"
+
+
 def test_public_status_exposes_only_nonsecret_tenant_identity(gated_app):
     client, _secret = gated_app
 
@@ -654,6 +699,11 @@ def test_hosted_runtime_uses_its_own_shared_secret_on_gated_dashboard(gated_app)
 
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+    assert response.json()["scheduled_research"]["running_count"] == 0
+    assert response.json()["scheduled_research"]["expired_leases"] == {
+        "authorizing": 0,
+        "executing": 0,
+    }
 
 
 def test_hosted_runtime_bridge_is_hidden_when_disabled(gated_app, monkeypatch):

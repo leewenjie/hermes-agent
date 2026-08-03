@@ -198,12 +198,17 @@ def _result_headers(payload, secret="hosted-runtime-test-secret-at-least-32-byte
 def _complete_occurrence(db, payload, *, hermes_session_id="cron_final_session"):
     claim = _claim_occurrence(db, payload)
     assert claim is not None
+    assert db.begin_scheduled_research_execution(
+        payload["occurrence_id"],
+        claim["lease_token"],
+        claim["billing_event_id"],
+    )
     assert db.finish_scheduled_research_occurrence(
         payload["occurrence_id"],
         claim["lease_token"],
         "completed",
         result_artifact_id=_ARTIFACT_ID,
-        billing_event_id=_BILLING_ID,
+        billing_event_id=claim["billing_event_id"],
         hermes_session_id=hermes_session_id,
         terminal_event_id="terminal-event",
         terminal_event_body='{"status":"completed"}',
@@ -607,7 +612,7 @@ def test_managed_occurrence_has_hard_deadline_and_terminal_callback(
 
         def authorize(self, _on_revoke, *, event_id):
             uuid.UUID(event_id)
-            assert event_id != payload["occurrence_id"]
+            assert event_id == claim["billing_event_id"]
             return turn
 
     monkeypatch.setattr(
@@ -678,7 +683,7 @@ def test_successful_occurrence_emits_result_and_final_session_evidence(
 
         def authorize(self, _on_revoke, *, event_id):
             uuid.UUID(event_id)
-            assert event_id != payload["occurrence_id"]
+            assert event_id == claim["billing_event_id"]
             return turn
 
         def stop_heartbeat(self):
@@ -808,7 +813,7 @@ def test_successful_attempt_cleans_artifact_and_releases_turn_on_commit_failure(
     assert dict(occurrence) == {
         "status": "running",
         "result_artifact_id": None,
-        "billing_event_id": None,
+        "billing_event_id": claim["billing_event_id"],
     }
     assert billing_count == 0
     assert turn.released is True
@@ -859,22 +864,30 @@ def test_remote_billing_ack_is_retried_after_local_ack_crash(
     )
     with pytest.raises(RuntimeError, match="after remote acknowledgement"):
         managed.flush_occurrence_billing(db)
-    assert [call[0] for call in remote_calls] == [_BILLING_ID]
+    persisted_billing_id = db._conn.execute(
+        "SELECT billing_event_id FROM scheduled_research_occurrences "
+        "WHERE occurrence_id = ?",
+        (payload["occurrence_id"],),
+    ).fetchone()["billing_event_id"]
+    assert [call[0] for call in remote_calls] == [persisted_billing_id]
 
     monkeypatch.setattr(db, "settle_scheduled_research_billing", settle_locally)
     managed.flush_occurrence_billing(db)
     billing = db._conn.execute(
         "SELECT status FROM scheduled_research_billing_outbox "
         "WHERE billing_event_id = ?",
-        (_BILLING_ID,),
+        (persisted_billing_id,),
     ).fetchone()
     db.close()
 
-    assert [call[0] for call in remote_calls] == [_BILLING_ID, _BILLING_ID]
+    assert [call[0] for call in remote_calls] == [
+        persisted_billing_id,
+        persisted_billing_id,
+    ]
     assert billing["status"] == "delivered"
 
 
-def test_expired_running_occurrence_is_reclaimed_without_duplicate_running_event(
+def test_expired_authorizing_occurrence_is_reclaimed_with_stable_billing_identity(
     occurrence_client,
 ):
     del occurrence_client
@@ -891,6 +904,7 @@ def test_expired_running_occurrence_is_reclaimed_without_duplicate_running_event
     recovered = db.claim_scheduled_research_occurrence(lease_seconds=30)
     assert recovered is not None
     assert recovered["lease_token"] != first_claim["lease_token"]
+    assert recovered["billing_event_id"] == first_claim["billing_event_id"]
 
     managed.enqueue_occurrence_event(db, payload, 2, "running")
     assert db.finish_scheduled_research_occurrence(

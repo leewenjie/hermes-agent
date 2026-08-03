@@ -14,6 +14,37 @@ from cron.jobs import compute_next_run, parse_schedule
 from hermes_cli.oxaide_scheduled_research import sign_request
 
 _DEFAULT_ENDPOINT = "https://oxaide.com/api/agents/research-schedules"
+_SCHEDULE_FIELDS = frozenset({
+    "id", "revision", "name", "prompt", "schedule", "schedule_input",
+    "schedule_display", "completion_email_enabled", "enabled", "state",
+    "created_at", "last_run_at", "next_run_at", "last_status",
+})
+_SCHEDULE_SPEC_FIELDS = frozenset({"kind", "expr", "minutes", "run_at", "display"})
+_OCCURRENCE_FIELDS = frozenset({
+    "id", "schedule_id", "schedule_revision", "nominal_fire_at", "name",
+    "status", "accepted_at", "started_at", "completed_at", "error_code",
+    "error_message", "result_url", "created_at",
+})
+
+
+def _project_schedule(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ScheduledResearchControlError("scheduled_research_response_invalid", 502)
+    projected = {key: value[key] for key in _SCHEDULE_FIELDS if key in value}
+    schedule = projected.get("schedule")
+    if schedule is not None:
+        if not isinstance(schedule, dict):
+            raise ScheduledResearchControlError("scheduled_research_response_invalid", 502)
+        projected["schedule"] = {
+            key: schedule[key] for key in _SCHEDULE_SPEC_FIELDS if key in schedule
+        }
+    return projected
+
+
+def _project_occurrence(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ScheduledResearchControlError("scheduled_research_response_invalid", 502)
+    return {key: value[key] for key in _OCCURRENCE_FIELDS if key in value}
 
 
 class ScheduledResearchControlError(RuntimeError):
@@ -102,14 +133,23 @@ def request_control(
         schedules = decoded.get("schedules")
         if not isinstance(schedules, list):
             raise ScheduledResearchControlError("scheduled_research_response_invalid", 502)
-        return schedules
+        return [_project_schedule(schedule) for schedule in schedules]
     if action == "list_occurrences":
         occurrences = decoded.get("occurrences")
         if not isinstance(occurrences, list):
             raise ScheduledResearchControlError("scheduled_research_response_invalid", 502)
+        cursor = decoded.get("next_cursor")
+        if cursor is not None:
+            if not isinstance(cursor, dict):
+                raise ScheduledResearchControlError(
+                    "scheduled_research_response_invalid", 502
+                )
+            cursor = {
+                key: cursor[key] for key in ("created_at", "id") if key in cursor
+            }
         return {
-            "occurrences": occurrences,
-            "next_cursor": decoded.get("next_cursor"),
+            "occurrences": [_project_occurrence(item) for item in occurrences],
+            "next_cursor": cursor,
         }
     if action in {"get_consent", "set_consent"}:
         consent = decoded.get("consent")
@@ -137,7 +177,11 @@ def request_control(
             if value is not None and not isinstance(value, str):
                 raise ScheduledResearchControlError("scheduled_research_response_invalid", 502)
         return consent
-    return decoded.get("schedule") if action != "delete" else {"ok": True}
+    return (
+        _project_schedule(decoded.get("schedule"))
+        if action != "delete"
+        else {"ok": True}
+    )
 
 
 def build_mutation(

@@ -766,6 +766,7 @@ def _oxaide_frozen_http_allowed(method: str, path: str) -> bool:
         return True
     if method == "POST" and path in {
         "/api/auth/ws-ticket",
+        "/api/research-shares",
         "/api/research-shares/preview",
         "/auth/logout",
     }:
@@ -2508,6 +2509,19 @@ async def download_managed_file(request: Request, path: str):
     )
 
 
+def _commit_managed_upload(tmp_path: Path, target: Path, *, overwrite: bool) -> None:
+    """Atomically publish an upload without racing the overwrite policy."""
+    if overwrite:
+        os.replace(tmp_path, target)
+        return
+
+    # A hard link is an atomic create-if-absent operation. Unlike a separate
+    # exists() check followed by replace(), it cannot clobber a file created by
+    # another process between validation and commit.
+    os.link(tmp_path, target)
+    tmp_path.unlink()
+
+
 @app.post("/api/files/upload")
 async def upload_managed_file(payload: ManagedFileUpload, request: Request):
     policy, target, display_path = _resolve_managed_path(payload.path, request, for_write=True)
@@ -2526,10 +2540,10 @@ async def upload_managed_file(payload: ManagedFileUpload, request: Request):
         tmp_path = Path(tmp_name)
         with os.fdopen(tmp_fd, "wb") as out:
             out.write(data)
-        # Atomic replacement never follows a final-component symlink, even if
-        # another same-user process creates one after path validation.
-        os.replace(tmp_path, target)
+        _commit_managed_upload(tmp_path, target, overwrite=payload.overwrite)
         tmp_path = None
+    except FileExistsError:
+        raise HTTPException(status_code=409, detail="File already exists")
     except PermissionError:
         raise HTTPException(status_code=403, detail="File is not writable")
     except OSError as exc:
@@ -2600,10 +2614,12 @@ async def upload_managed_file_stream(
                 if total > _MANAGED_FILE_MAX_BYTES:
                     raise HTTPException(status_code=413, detail="File is too large")
                 out.write(chunk)
-        os.replace(tmp_path, target)
+        _commit_managed_upload(tmp_path, target, overwrite=overwrite)
         renamed = True
     except HTTPException:
         raise
+    except FileExistsError:
+        raise HTTPException(status_code=409, detail="File already exists")
     except PermissionError:
         raise HTTPException(status_code=403, detail="File is not writable")
     except OSError as exc:
@@ -3386,6 +3402,13 @@ async def hosted_runtime_health(request: Request):
     _require_hosted_runtime_secret(request)
     with _hosted_runtime_lock:
         session_count = len(_hosted_runtime_sessions)
+    from hermes_state import SessionDB
+
+    db = SessionDB(get_hermes_home() / "state.db")
+    try:
+        scheduled_research = db.get_scheduled_research_health()
+    finally:
+        db.close()
     return {
         "configured": bool(_hosted_runtime_shared_secret()),
         "reachable": True,
@@ -3394,6 +3417,7 @@ async def hosted_runtime_health(request: Request):
         "scaffolded": True,
         "live_session_binding": False,
         "session_count": session_count,
+        "scheduled_research": scheduled_research,
     }
 
 
@@ -11006,6 +11030,20 @@ async def manage_research_share(request: Request, body: ResearchShareRequest):
 
     workspace_id, user_id, runtime_key = _oxaide_share_identity(request)
     local_dev = _local_research_share_dev_enabled(request)
+    session = getattr(request.state, "session", None)
+    if (
+        session is not None
+        and getattr(session, "provider", "") == "oxaide-demo"
+        and getattr(session, "access_state", "active") == "frozen"
+        and body.action != "revoke"
+    ):
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": "This workspace is frozen. Upgrade to publish research.",
+                "code": "access_frozen",
+            },
+        )
     if body.action == "revoke":
         if not body.share_id:
             raise HTTPException(status_code=400, detail="share_id is required")
@@ -17285,6 +17323,11 @@ async def console_ws(ws: WebSocket) -> None:
             auth_reason, mode, cred, peer,
         )
         await ws.close(code=4401, reason=_ws_close_reason(f"auth: {auth_reason}"))
+        return
+
+    if trusted_context is not None:
+        _log.warning("console refused for managed Oxaide launch peer=%s", peer)
+        await ws.close(code=4403, reason="console unavailable")
         return
 
     host_origin_reason = _ws_host_origin_reason(ws)

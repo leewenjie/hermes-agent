@@ -4,8 +4,8 @@ Extracted from ``agent/conversation_loop.py`` as part of the god-file
 decomposition campaign (``~/.hermes/plans/god-file-decomposition.md``, Phase 1
 step 4 — the post-loop ``TurnFinalizer`` seam). ``run_conversation``'s tail
 (everything after the main tool-calling ``while`` loop) is lifted here verbatim:
-budget-exhaustion summary, trajectory save, session persist, turn diagnostics,
-response transforms, result-dict assembly, steer drain, and the memory/skill
+budget-exhaustion summary, trajectory save, response transforms, session persist,
+turn diagnostics, result-dict assembly, steer drain, and the memory/skill
 review trigger.
 
 Behavior-neutral: the body is moved unchanged. All ``agent.*`` side effects fire
@@ -184,55 +184,6 @@ def finalize_turn(
         _cleanup_errors.append(f"cleanup_task_resources: {_cleanup_err}")
         logger.error("finalize_turn: _cleanup_task_resources failed: %s", _cleanup_err, exc_info=True)
 
-    # Persist session to both JSON log and SQLite only after private retry
-    # scaffolding has been removed. Otherwise a later user "continue" turn
-    # can replay assistant("(empty)") / recovery nudges and fall into the
-    # same empty-response loop again.
-    try:
-        agent._drop_trailing_empty_response_scaffolding(messages)
-
-        # When the turn was interrupted and the last message is a tool
-        # result, append a synthetic assistant message to close the
-        # tool-call sequence. Without this, the session persists a
-        # ``tool → user`` alternation that strict providers (Gemini,
-        # Claude) reject, causing them to hallucinate a continuation of
-        # the user's message on the next turn (#48879).
-        #
-        # ``_drop_trailing_empty_response_scaffolding`` only rewinds the
-        # tool tail when an empty-response scaffolding flag is present; a
-        # clean ``/stop`` interrupt after a successful tool sets no such
-        # flag, so the tool result survives as the tail and we close it
-        # here instead. On an interrupt ``final_response`` is typically
-        # empty, so fall back to an explicit placeholder rather than
-        # persisting an empty-content assistant turn.
-        if interrupted:
-            from agent.message_sanitization import close_interrupted_tool_sequence
-            close_interrupted_tool_sequence(messages, final_response)
-
-        # Some recovery/fallback paths return a real final_response without
-        # adding a closing assistant message to the transcript (e.g. the
-        # partial-stream and prior-turn-content recovery ``break`` sites in
-        # ``conversation_loop``). If persisted as-is, the durable session can
-        # end at a tool/user message even though the caller — and the gateway
-        # platform — already saw a completed assistant response. The next turn
-        # then replays a user-only backlog and the model re-answers every
-        # "unanswered" message. Close the durable turn at the source, at the
-        # single chokepoint every recovery ``break`` flows through, so the
-        # invariant "delivered final_response ⇒ assistant row in transcript"
-        # holds regardless of which path produced it. (#43849 / #44100)
-        if final_response and not interrupted:
-            try:
-                _tail_role = messages[-1].get("role") if messages else None
-            except Exception:
-                _tail_role = None
-            if _tail_role != "assistant":
-                messages.append({"role": "assistant", "content": final_response})
-
-        agent._persist_session(messages, conversation_history)
-    except Exception as _persist_err:
-        _cleanup_errors.append(f"persist_session: {_persist_err}")
-        logger.error("finalize_turn: _persist_session failed: %s", _persist_err, exc_info=True)
-
     # ── Turn-exit diagnostic log ─────────────────────────────────────
     # Always logged at INFO so agent.log captures WHY every turn ended.
     # When the last message is a tool result (agent was mid-work), log
@@ -383,6 +334,44 @@ def finalize_turn(
         except Exception as exc:
             logger.warning("transform_llm_output hook failed: %s", exc)
 
+    # Persist only after every user-visible response transform has run. The
+    # durable assistant row and the returned response must be identical;
+    # otherwise a resumed session sees text different from what the user saw.
+    # Private retry scaffolding is removed first so a later "continue" turn
+    # cannot replay assistant("(empty)") / recovery nudges.
+    try:
+        agent._drop_trailing_empty_response_scaffolding(messages)
+
+        # Interrupted tool sequences need a closing assistant row for strict
+        # providers. On an interrupt ``final_response`` is typically empty, so
+        # the helper supplies an explicit placeholder when necessary.
+        if interrupted:
+            from agent.message_sanitization import close_interrupted_tool_sequence
+            close_interrupted_tool_sequence(messages, final_response)
+
+        # Normal model responses usually already occupy the terminal assistant
+        # row. Replace its content with the fully transformed response. Recovery
+        # paths can end at a tool/user row, in which case append the missing
+        # assistant row instead. This is the single durable/display invariant
+        # for model output, verifier footers, completion explainers, and plugin
+        # transforms. (#43849 / #44100)
+        if final_response and not interrupted:
+            try:
+                _tail = messages[-1] if messages else None
+                _tail_role = _tail.get("role") if isinstance(_tail, dict) else None
+            except Exception:
+                _tail = None
+                _tail_role = None
+            if _tail_role == "assistant" and not _tail.get("tool_calls"):
+                _tail["content"] = final_response
+            else:
+                messages.append({"role": "assistant", "content": final_response})
+
+        agent._persist_session(messages, conversation_history)
+    except Exception as _persist_err:
+        _cleanup_errors.append(f"persist_session: {_persist_err}")
+        logger.error("finalize_turn: _persist_session failed: %s", _persist_err, exc_info=True)
+
     # Plugin hook: post_llm_call
     # Fired once per turn after the tool-calling loop completes.
     # Plugins can use this to persist conversation data (e.g. sync
@@ -499,7 +488,15 @@ def finalize_turn(
 
     # Background memory/skill review — runs AFTER the response is delivered
     # so it never competes with the user's task for model attention.
-    if final_response and not interrupted and (_should_review_memory or _should_review_skills):
+    if (
+        final_response
+        and not interrupted
+        and (_should_review_memory or _should_review_skills)
+        # Managed execution may not mint an unmetered descendant after the
+        # caller-visible turn. A review needs a separately authorized lease;
+        # until that exists, fail closed and leave normal standalone behavior.
+        and getattr(agent, "execution_capability", None) is None
+    ):
         try:
             agent._spawn_background_review(
                 messages_snapshot=list(messages),

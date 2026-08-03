@@ -347,6 +347,7 @@ def init_agent(
     checkpoint_max_total_size_mb: int = 500,
     checkpoint_max_file_size_mb: int = 10,
     pass_session_id: bool = False,
+    execution_capability=None,
 ):
     """
     Initialize the AI Agent.
@@ -402,6 +403,10 @@ def init_agent(
 
     agent.model = model
     agent.max_iterations = max_iterations
+    # Optional managed-runtime lease. ``None`` preserves standalone Hermes
+    # behavior. A managed turn passes one fresh object shared by identity with
+    # every descendant; it must never be replaced by a later turn's lease.
+    agent.execution_capability = execution_capability
     # Shared iteration budget — parent creates, children inherit.
     # Consumed by every LLM turn across parent + all subagents.
     agent.iteration_budget = iteration_budget or IterationBudget(max_iterations)

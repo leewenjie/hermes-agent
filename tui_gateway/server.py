@@ -1143,8 +1143,14 @@ def write_json(obj: dict) -> bool:
 
 
 def _emit(event: str, sid: str, payload: dict | None = None):
-    if event == "session.info" and payload is not None and _is_oxaide_tenant_runtime():
-        payload = _managed_session_info(payload)
+    if payload is not None and _is_oxaide_tenant_runtime():
+        if event == "session.info":
+            payload = _managed_session_info(payload)
+        elif event == "message.complete":
+            payload = dict(payload)
+            payload["usage"] = _managed_usage(payload.get("usage"))
+        elif event == "error":
+            payload = {"message": _managed_inference_error()}
     params = {"type": event, "session_id": sid}
     if payload is not None:
         params["payload"] = payload
@@ -1220,6 +1226,8 @@ def _ok(rid, result: dict) -> dict:
 
 
 def _err(rid, code: int, msg: str) -> dict:
+    if _is_oxaide_tenant_runtime() and (code >= 5000 or code == -32000):
+        msg = _managed_inference_error()
     return {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": msg}}
 
 
@@ -1375,7 +1383,12 @@ def _wait_agent(session: dict, rid: str, timeout: float = 30.0) -> dict | None:
     return _err(rid, 5032, err) if err else None
 
 
-def _start_agent_build(sid: str, session: dict) -> None:
+def _start_agent_build(
+    sid: str,
+    session: dict,
+    *,
+    execution_capability=None,
+) -> None:
     """Start building the real AIAgent for a TUI session, once.
 
     Classic `hermes` shows the prompt before constructing AIAgent; the TUI used
@@ -1465,7 +1478,12 @@ def _start_agent_build(sid: str, session: dict) -> None:
                         kw["reasoning_config_override"] = reasoning
                     if (tier := current.get("create_service_tier_override")) is not None:
                         kw["service_tier_override"] = tier
-                agent = _make_agent(sid, key, **kw)
+                agent = _make_agent(
+                    sid,
+                    key,
+                    execution_capability=execution_capability,
+                    **kw,
+                )
             finally:
                 _clear_session_context(tokens)
 
@@ -4515,7 +4533,11 @@ def _agent_fallback_model(agent):
     return _load_fallback_model()
 
 
-def _background_agent_kwargs(agent, task_id: str) -> dict:
+def _background_agent_kwargs(
+    agent,
+    task_id: str,
+    execution_capability=None,
+) -> dict:
     cfg = _load_cfg()
 
     return {
@@ -4550,6 +4572,7 @@ def _background_agent_kwargs(agent, task_id: str) -> dict:
         "platform": "tui",
         "session_db": _get_db(),
         "fallback_model": _agent_fallback_model(agent),
+        "execution_capability": execution_capability,
     }
 
 
@@ -4848,6 +4871,7 @@ def _make_agent(
     reasoning_config_override: dict | None = None,
     service_tier_override: str | None = None,
     platform_override: str | None = None,
+    execution_capability=None,
 ):
     if _is_oxaide_tenant_runtime():
         # run_agent imports model_tools, whose import-time discovery loads
@@ -5021,6 +5045,7 @@ def _make_agent(
         skip_context_files=is_truthy_value(os.environ.get("HERMES_IGNORE_RULES")),
         skip_memory=is_truthy_value(os.environ.get("HERMES_IGNORE_RULES")),
         fallback_model=[] if _is_oxaide_tenant_runtime() else _load_fallback_model(),
+        execution_capability=execution_capability,
         **_agent_cbs(sid),
     )
     _validate_oxaide_agent_tools(agent)
@@ -5603,13 +5628,34 @@ def _authorize_oxaide_user_turn(session: dict):
         return None
     from tui_gateway.oxaide_turns import OxaideTurnClient
 
+    capability_holder = {"value": None}
     turn = OxaideTurnClient(dict(context)).authorize(
         on_lease_lost=lambda code: _cancel_oxaide_turn_after_lease_loss(
-            session, code
+            session,
+            code,
+            execution_capability=capability_holder["value"],
         )
     )
+    # Authorization succeeded. Only now mint the permission object that this
+    # exact turn and all of its descendants must share by identity.
+    from agent.execution_capability import ExecutionCapability
+
+    execution_capability = ExecutionCapability()
+    capability_holder["value"] = execution_capability
+    setattr(turn, "execution_capability", execution_capability)
+    # A very short lease may be lost between authorize() returning and the
+    # holder assignment above. The callback records that loss on the session;
+    # close this race before any model or tool dispatch can start.
+    lease_lost = session.get("_oxaide_lease_lost")
+    if lease_lost:
+        execution_capability.revoke(str(lease_lost))
     session["_oxaide_agent_authorized"] = True
     return turn
+
+
+def _oxaide_turn_execution_capability(turn):
+    """Return the immutable per-turn gate without consulting session state."""
+    return getattr(turn, "execution_capability", None) if turn is not None else None
 
 
 _OXAIDE_LEASE_LOSS_HARD_STOP_SECONDS = 30.0
@@ -5652,7 +5698,12 @@ def _schedule_oxaide_runtime_hard_stop(code: str) -> None:
     ).start()
 
 
-def _cancel_oxaide_turn_after_lease_loss(session: dict, code: str) -> None:
+def _cancel_oxaide_turn_after_lease_loss(
+    session: dict,
+    code: str,
+    *,
+    execution_capability=None,
+) -> None:
     """Interrupt physical work when its host-capacity lease is no longer held."""
     from hermes_cli.managed_scope import mark_managed_runtime_terminal_failure
 
@@ -5672,6 +5723,11 @@ def _cancel_oxaide_turn_after_lease_loss(session: dict, code: str) -> None:
         if not session.get("_oxaide_hard_stop_scheduled"):
             session["_oxaide_hard_stop_scheduled"] = True
             should_schedule_hard_stop = True
+    # Revoke before interrupting. Interrupt is cooperative and detached workers
+    # can outlive it; the shared monotonic gate is what prevents new side
+    # effects after the managed lease is gone.
+    if execution_capability is not None:
+        execution_capability.revoke(str(code or "turn_lease_renewal_failed"))
     agent = session.get("agent")
     if agent is not None:
         try:
@@ -5690,6 +5746,9 @@ def _is_oxaide_loopback_development() -> bool:
 def _release_oxaide_turn(turn) -> None:
     if turn is None:
         return
+    capability = _oxaide_turn_execution_capability(turn)
+    if capability is not None:
+        capability.revoke("turn_released")
     try:
         turn.release()
     except Exception:
@@ -5786,6 +5845,9 @@ def _settle_oxaide_turn(
             )
         )
     )
+    capability = _oxaide_turn_execution_capability(turn)
+    if capability is not None:
+        capability.revoke("turn_completed" if successful_turn else "turn_released")
     if successful_turn:
         turn.complete(details=details)
     else:
@@ -6881,6 +6943,19 @@ def _managed_session_info(info: dict) -> dict:
     }
 
 
+def _managed_usage(usage: dict | None) -> dict:
+    projected = dict(usage or {})
+    projected["model"] = "Oxaide Research Engine"
+    return projected
+
+
+def _managed_inference_error() -> str:
+    return (
+        "Oxaide Research Engine could not complete this request. "
+        "Please try again."
+    )
+
+
 def _live_session_payload(
     sid: str,
     session: dict,
@@ -7368,6 +7443,8 @@ def _(rid, params: dict) -> dict:
             usage["credits_lines"] = credits
     except Exception:
         pass
+    if _is_oxaide_tenant_runtime():
+        usage = _managed_usage(usage)
     return _ok(rid, usage)
 
 
@@ -8822,6 +8899,9 @@ def _(rid, params: dict) -> dict:
             )
             info = _session_info(agent, session)
             _emit("session.info", sid, info)
+            if _is_oxaide_tenant_runtime():
+                info = _managed_session_info(info)
+                usage = _managed_usage(usage)
             return _ok(
                 rid,
                 {
@@ -9372,7 +9452,15 @@ def _(rid, params: dict) -> dict:
     # A branch becomes real here: copy its parent's transcript into the row so it
     # resumes with full context (the agent won't persist the seed itself).
     _persist_branch_seed(session)
-    _start_agent_build(sid, session)
+    execution_capability = _oxaide_turn_execution_capability(oxaide_turn)
+    if execution_capability is None:
+        _start_agent_build(sid, session)
+    else:
+        _start_agent_build(
+            sid,
+            session,
+            execution_capability=execution_capability,
+        )
 
     def run_after_agent_ready() -> None:
         err = _wait_agent(session, rid)
@@ -9403,6 +9491,7 @@ def _(rid, params: dict) -> dict:
             session,
             text,
             oxaide_turn=oxaide_turn,
+            execution_capability=execution_capability,
         )
 
     run_thread = threading.Thread(target=run_after_agent_ready, daemon=True)
@@ -9824,6 +9913,7 @@ def _run_prompt_submit(
     text: Any,
     *,
     oxaide_turn=None,
+    execution_capability=None,
 ) -> None:
     if (
         _is_oxaide_tenant_runtime()
@@ -9839,6 +9929,12 @@ def _run_prompt_submit(
         if not isinstance(session.get("inflight_turn"), dict):
             _start_inflight_turn(session, text)
     agent = session["agent"]
+    if execution_capability is None:
+        execution_capability = _oxaide_turn_execution_capability(oxaide_turn)
+    if execution_capability is not None:
+        # run_conversation captures this once at entry. Replacing the agent's
+        # slot for a later turn cannot re-authorize workers from an older turn.
+        agent.execution_capability = execution_capability
     if hasattr(agent, "clear_interrupt"):
         try:
             agent.clear_interrupt()
@@ -10089,7 +10185,10 @@ def _run_prompt_submit(
                 if (not raw) and result.get("error") and (
                     result.get("failed") or result.get("partial")
                 ):
-                    raw = f"Error: {result.get('error')}"
+                    if _is_oxaide_tenant_runtime():
+                        raw = _managed_inference_error()
+                    else:
+                        raw = f"Error: {result.get('error')}"
                 lr = result.get("last_reasoning")
                 if isinstance(lr, str) and lr.strip():
                     last_reasoning = lr.strip()
@@ -10107,12 +10206,12 @@ def _run_prompt_submit(
                 payload["rendered"] = rendered
             with session["history_lock"]:
                 _clear_inflight_turn(session)
-            _emit("message.complete", sid, payload)
 
             if oxaide_turn is not None:
-                # The answer is already visible. Treat settlement as terminal
-                # before delivery so an unexpected local I/O failure cannot
-                # fall through to a contradictory release in ``finally``.
+                # Treat settlement as terminal before delivery so an unexpected
+                # local I/O failure cannot fall through to a contradictory
+                # release in ``finally``. Do not finalize the answer to the
+                # caller until completion is delivered or durably queued.
                 oxaide_settled = True
                 _settle_oxaide_turn(
                     oxaide_turn,
@@ -10125,6 +10224,7 @@ def _run_prompt_submit(
                         oxaide_started_at,
                     ),
                 )
+            _emit("message.complete", sid, payload)
 
             # ── /goal continuation (Ralph-style loop) ─────────────────
             # After every TUI turn, if a /goal is active, ask the judge
@@ -11007,6 +11107,7 @@ def _(rid, params: dict) -> dict:
         )
         return _err(rid, 4020, f"Oxaide turn denied: {code}")
     task_id = f"bg_{uuid.uuid4().hex[:6]}"
+    execution_capability = _oxaide_turn_execution_capability(oxaide_turn)
 
     def run():
         session_tokens = _set_session_context(task_id, cwd=_session_cwd(session))
@@ -11015,7 +11116,11 @@ def _(rid, params: dict) -> dict:
             from run_agent import AIAgent
 
             agent = AIAgent(
-                **_background_agent_kwargs(session["agent"], task_id)
+                **_background_agent_kwargs(
+                    session["agent"],
+                    task_id,
+                    execution_capability,
+                )
             )
             usage_baseline = _oxaide_usage_snapshot(agent)
             started_at = time.monotonic()
@@ -11061,7 +11166,14 @@ def _(rid, params: dict) -> dict:
             _emit(
                 "background.complete",
                 parent,
-                {"task_id": task_id, "text": f"error: {e}"},
+                {
+                    "task_id": task_id,
+                    "text": (
+                        _managed_inference_error()
+                        if _is_oxaide_tenant_runtime()
+                        else f"error: {e}"
+                    ),
+                },
             )
         finally:
             if oxaide_turn is not None and not oxaide_settled:

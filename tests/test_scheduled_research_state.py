@@ -1,6 +1,7 @@
 import hashlib
 import json
 import sqlite3
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -63,18 +64,32 @@ def test_occurrence_claim_and_terminal_state_are_lease_fenced(tmp_path):
     claim = db.claim_scheduled_research_occurrence()
     assert claim is not None
     assert claim["payload"]["occurrence_id"] == payload["occurrence_id"]
+    assert claim["execution_phase"] == "authorizing"
+    uuid.UUID(claim["billing_event_id"])
+    assert not db.finish_scheduled_research_occurrence(
+        payload["occurrence_id"], claim["lease_token"], "completed",
+        result_artifact_id=_ARTIFACT_ID,
+        billing_event_id=claim["billing_event_id"],
+        terminal_event_id="premature-terminal-event",
+        terminal_event_body=_TERMINAL_BODY,
+    )
+    assert db.begin_scheduled_research_execution(
+        payload["occurrence_id"],
+        claim["lease_token"],
+        claim["billing_event_id"],
+    )
     assert db.claim_scheduled_research_occurrence() is None
     assert not db.finish_scheduled_research_occurrence(
         payload["occurrence_id"], "wrong-token", "completed",
         result_artifact_id=_ARTIFACT_ID,
-        billing_event_id=_BILLING_ID,
+        billing_event_id=claim["billing_event_id"],
         terminal_event_id="terminal-event",
         terminal_event_body=_TERMINAL_BODY,
     )
     assert db.finish_scheduled_research_occurrence(
         payload["occurrence_id"], claim["lease_token"], "completed",
         result_artifact_id=_ARTIFACT_ID,
-        billing_event_id=_BILLING_ID,
+        billing_event_id=claim["billing_event_id"],
         terminal_event_id="terminal-event",
         terminal_event_body=_TERMINAL_BODY,
     )
@@ -89,6 +104,9 @@ def test_completed_result_authorization_requires_exact_identity_and_final_sessio
     _accept_and_authorize(db, payload)
     claim = db.claim_scheduled_research_occurrence()
     assert claim is not None
+    assert db.begin_scheduled_research_execution(
+        payload["occurrence_id"], claim["lease_token"], claim["billing_event_id"]
+    )
 
     assert db.get_authorized_scheduled_research_result(
         payload["occurrence_id"],
@@ -103,7 +121,7 @@ def test_completed_result_authorization_requires_exact_identity_and_final_sessio
         claim["lease_token"],
         "completed",
         result_artifact_id=_ARTIFACT_ID,
-        billing_event_id=_BILLING_ID,
+        billing_event_id=claim["billing_event_id"],
         hermes_session_id="cron_final_session",
         terminal_event_id="terminal-event",
         terminal_event_body=_TERMINAL_BODY,
@@ -128,7 +146,7 @@ def test_completed_result_authorization_requires_exact_identity_and_final_sessio
     assert {key: authorized[key] for key in expected} == expected
     assert authorized["completed_at"] is not None
     assert authorized["result_artifact_id"] == _ARTIFACT_ID
-    assert authorized["billing_event_id"] == _BILLING_ID
+    assert authorized["billing_event_id"] == claim["billing_event_id"]
 
     for field in (
         "workspace_id",
@@ -164,10 +182,13 @@ def test_completed_result_authorization_rejects_missing_final_session_identity(
     _accept_and_authorize(db, payload)
     claim = db.claim_scheduled_research_occurrence()
     assert claim is not None
+    assert db.begin_scheduled_research_execution(
+        payload["occurrence_id"], claim["lease_token"], claim["billing_event_id"]
+    )
     assert db.finish_scheduled_research_occurrence(
         payload["occurrence_id"], claim["lease_token"], "completed",
         result_artifact_id=_ARTIFACT_ID,
-        billing_event_id=_BILLING_ID,
+        billing_event_id=claim["billing_event_id"],
         terminal_event_id="terminal-event",
         terminal_event_body=_TERMINAL_BODY,
     )
@@ -202,13 +223,17 @@ def test_completed_winner_atomically_creates_billing_intent(tmp_path):
     _accept_and_authorize(db, payload)
     claim = db.claim_scheduled_research_occurrence()
     assert claim is not None
+    billing_event_id = claim["billing_event_id"]
+    assert db.begin_scheduled_research_execution(
+        payload["occurrence_id"], claim["lease_token"], billing_event_id
+    )
 
     assert db.finish_scheduled_research_occurrence(
         payload["occurrence_id"],
         claim["lease_token"],
         "completed",
         result_artifact_id=_ARTIFACT_ID,
-        billing_event_id=_BILLING_ID,
+        billing_event_id=billing_event_id,
         terminal_event_id="terminal-event",
         terminal_event_body=json.dumps({"status": "completed"}),
     )
@@ -219,15 +244,15 @@ def test_completed_winner_atomically_creates_billing_intent(tmp_path):
     ).fetchone()
     assert dict(billing) == {
         "occurrence_id": payload["occurrence_id"],
-        "billing_event_id": _BILLING_ID,
+        "billing_event_id": billing_event_id,
         "status": "pending",
     }
     assert db.list_pending_scheduled_research_billing() == []
 
     db.settle_scheduled_research_event("terminal-event", delivered=True)
     pending = db.list_pending_scheduled_research_billing()
-    assert [row["billing_event_id"] for row in pending] == [_BILLING_ID]
-    assert db.settle_scheduled_research_billing(_BILLING_ID, delivered=True)
+    assert [row["billing_event_id"] for row in pending] == [billing_event_id]
+    assert db.settle_scheduled_research_billing(billing_event_id, delivered=True)
     assert db.list_pending_scheduled_research_billing() == []
 
 
@@ -237,6 +262,9 @@ def test_winner_transaction_conflict_rolls_back_occurrence_and_billing(tmp_path)
     _accept_and_authorize(db, payload)
     claim = db.claim_scheduled_research_occurrence()
     assert claim is not None
+    assert db.begin_scheduled_research_execution(
+        payload["occurrence_id"], claim["lease_token"], claim["billing_event_id"]
+    )
     db.enqueue_scheduled_research_event(
         payload["occurrence_id"],
         1,
@@ -250,7 +278,7 @@ def test_winner_transaction_conflict_rolls_back_occurrence_and_billing(tmp_path)
             claim["lease_token"],
             "completed",
             result_artifact_id=_ARTIFACT_ID,
-            billing_event_id=_BILLING_ID,
+            billing_event_id=claim["billing_event_id"],
             terminal_event_id="duplicate-event-id",
             terminal_event_body=_TERMINAL_BODY,
         )
@@ -264,7 +292,7 @@ def test_winner_transaction_conflict_rolls_back_occurrence_and_billing(tmp_path)
         "status": "running",
         "lease_token": claim["lease_token"],
         "result_artifact_id": None,
-        "billing_event_id": None,
+        "billing_event_id": claim["billing_event_id"],
     }
     assert db._conn.execute(
         "SELECT COUNT(*) FROM scheduled_research_billing_outbox"
@@ -285,13 +313,16 @@ def test_stale_attempt_cannot_commit_winner_or_billing_intent(tmp_path):
         )
     winner = db.claim_scheduled_research_occurrence(lease_seconds=30)
     assert winner is not None
+    assert db.begin_scheduled_research_execution(
+        payload["occurrence_id"], winner["lease_token"], winner["billing_event_id"]
+    )
 
     assert not db.finish_scheduled_research_occurrence(
         payload["occurrence_id"],
         stale["lease_token"],
         "completed",
         result_artifact_id=_LOSER_ARTIFACT_ID,
-        billing_event_id=_LOSER_BILLING_ID,
+        billing_event_id=stale["billing_event_id"],
         terminal_event_id="loser-terminal-event",
         terminal_event_body=_TERMINAL_BODY,
     )
@@ -304,7 +335,7 @@ def test_stale_attempt_cannot_commit_winner_or_billing_intent(tmp_path):
         winner["lease_token"],
         "completed",
         result_artifact_id=_ARTIFACT_ID,
-        billing_event_id=_BILLING_ID,
+        billing_event_id=winner["billing_event_id"],
         terminal_event_id="winner-terminal-event",
         terminal_event_body=_TERMINAL_BODY,
     )
@@ -318,9 +349,9 @@ def test_stale_attempt_cannot_commit_winner_or_billing_intent(tmp_path):
     ).fetchall()
     assert dict(occurrence) == {
         "result_artifact_id": _ARTIFACT_ID,
-        "billing_event_id": _BILLING_ID,
+        "billing_event_id": winner["billing_event_id"],
     }
-    assert [row["billing_event_id"] for row in billing] == [_BILLING_ID]
+    assert [row["billing_event_id"] for row in billing] == [winner["billing_event_id"]]
 
 
 def test_billing_reconciliation_survives_each_crash_boundary(tmp_path):
@@ -330,12 +361,16 @@ def test_billing_reconciliation_survives_each_crash_boundary(tmp_path):
     _accept_and_authorize(db, payload)
     claim = db.claim_scheduled_research_occurrence()
     assert claim is not None
+    billing_event_id = claim["billing_event_id"]
+    assert db.begin_scheduled_research_execution(
+        payload["occurrence_id"], claim["lease_token"], billing_event_id
+    )
     assert db.finish_scheduled_research_occurrence(
         payload["occurrence_id"],
         claim["lease_token"],
         "completed",
         result_artifact_id=_ARTIFACT_ID,
-        billing_event_id=_BILLING_ID,
+        billing_event_id=billing_event_id,
         terminal_event_id="terminal-event",
         terminal_event_body=_TERMINAL_BODY,
     )
@@ -352,12 +387,12 @@ def test_billing_reconciliation_survives_each_crash_boundary(tmp_path):
     # recoverable and remains pending until its own acknowledgement is saved.
     db = SessionDB(path)
     pending = db.list_pending_scheduled_research_billing()
-    assert [row["billing_event_id"] for row in pending] == [_BILLING_ID]
+    assert [row["billing_event_id"] for row in pending] == [billing_event_id]
     db.close()
 
     db = SessionDB(path)
-    assert db.settle_scheduled_research_billing(_BILLING_ID, delivered=True)
-    assert not db.settle_scheduled_research_billing(_BILLING_ID, delivered=True)
+    assert db.settle_scheduled_research_billing(billing_event_id, delivered=True)
+    assert not db.settle_scheduled_research_billing(billing_event_id, delivered=True)
     assert db.list_pending_scheduled_research_billing() == []
 
 
@@ -376,7 +411,7 @@ def test_concurrent_duplicate_receipt_has_one_acceptance_and_one_replay(tmp_path
     assert sorted(results) == [False, True]
 
 
-def test_expired_running_occurrence_is_reclaimed(tmp_path):
+def test_expired_authorizing_occurrence_reuses_stable_billing_identity(tmp_path):
     db = SessionDB(tmp_path / "state.db")
     payload = _payload()
     _accept_and_authorize(db, payload)
@@ -392,7 +427,72 @@ def test_expired_running_occurrence_is_reclaimed(tmp_path):
     reclaimed = db.claim_scheduled_research_occurrence(lease_seconds=30)
     assert reclaimed is not None
     assert reclaimed["lease_token"] != first["lease_token"]
-    assert reclaimed["attempt_count"] == 1
+    assert reclaimed["attempt_count"] == 2
+    assert reclaimed["billing_event_id"] == first["billing_event_id"]
+
+
+def test_expired_executing_occurrence_is_not_automatically_replayed(tmp_path):
+    db = SessionDB(tmp_path / "state.db")
+    payload = _payload()
+    _accept_and_authorize(db, payload)
+    claim = db.claim_scheduled_research_occurrence(lease_seconds=30)
+    assert claim is not None
+    assert db.begin_scheduled_research_execution(
+        payload["occurrence_id"],
+        claim["lease_token"],
+        claim["billing_event_id"],
+    )
+    with db._lock:
+        db._conn.execute(
+            "UPDATE scheduled_research_occurrences SET lease_expires_at = 0 "
+            "WHERE occurrence_id = ?",
+            (payload["occurrence_id"],),
+        )
+        db._conn.commit()
+
+    assert db.claim_scheduled_research_occurrence(lease_seconds=30) is None
+
+    health = db.get_scheduled_research_health()
+    assert health["running_count"] == 1
+    assert health["execution_phases"] == {
+        "authorizing": 0,
+        "executing": 1,
+        "unknown": 0,
+    }
+    assert health["expired_leases"] == {"authorizing": 0, "executing": 1}
+    assert health["oldest_running_age_seconds"] is not None
+
+
+def test_scheduled_research_health_reports_outbox_settlement_state(tmp_path):
+    db = SessionDB(tmp_path / "state.db")
+    payload = _payload()
+    _accept_and_authorize(db, payload)
+    claim = db.claim_scheduled_research_occurrence()
+    assert claim is not None
+    assert db.begin_scheduled_research_execution(
+        payload["occurrence_id"], claim["lease_token"], claim["billing_event_id"]
+    )
+    assert db.finish_scheduled_research_occurrence(
+        payload["occurrence_id"],
+        claim["lease_token"],
+        "completed",
+        result_artifact_id=_ARTIFACT_ID,
+        billing_event_id=claim["billing_event_id"],
+        terminal_event_id="terminal-event",
+        terminal_event_body=_TERMINAL_BODY,
+    )
+
+    health = db.get_scheduled_research_health()
+    assert health["lifecycle_outbox"]["pending_count"] == 1
+    assert health["billing_outbox"]["pending_count"] == 1
+    assert health["billing_outbox"]["ready_to_settle_count"] == 0
+    assert health["completed_without_terminal_event_count"] == 0
+    assert health["completed_without_billing_count"] == 0
+
+    db.settle_scheduled_research_event("terminal-event", delivered=True)
+    health = db.get_scheduled_research_health()
+    assert health["lifecycle_outbox"]["pending_count"] == 0
+    assert health["billing_outbox"]["ready_to_settle_count"] == 1
 
 
 def test_running_occurrence_lease_renewal_is_fenced(tmp_path):

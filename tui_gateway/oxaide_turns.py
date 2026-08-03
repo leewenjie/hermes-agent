@@ -30,6 +30,8 @@ _DEFAULT_ENDPOINT = "https://oxaide.com/api/agents/billing/usage/record"
 _TIMEOUT_SECONDS = 5.0
 _HEARTBEAT_INTERVAL_SECONDS = 30.0
 _HEARTBEAT_RETRY_INTERVAL_SECONDS = 2.0
+_OUTBOX_RETRY_INITIAL_SECONDS = 2.0
+_OUTBOX_RETRY_MAX_SECONDS = 60.0
 _LEASE_SAFETY_MARGIN_SECONDS = 10.0
 _LEGACY_LEASE_GRACE_SECONDS = 75.0
 _TERMINAL_SETTLEMENT_CODES = {
@@ -42,6 +44,7 @@ _TERMINAL_SETTLEMENT_CODES = {
     "turn_reservation_not_found",
     "scheduled_research_occurrence_mismatch",
     "scheduled_research_occurrence_required",
+    "scheduled_research_winner_committed",
     "scheduled_research_winner_mismatch",
 }
 _TERMINAL_HEARTBEAT_CODES = {
@@ -163,6 +166,8 @@ class OxaideTurnClient:
         self._state_lock = threading.Lock()
         self._settlement_started = False
         self._lease_deadline = 0.0
+        self._outbox_retry_thread: threading.Thread | None = None
+        self._outbox_retry_wake = threading.Event()
 
     @classmethod
     def from_scheduled_occurrence(
@@ -318,14 +323,58 @@ class OxaideTurnClient:
                 event_id[:12],
                 exc,
             )
+            if pending is None:
+                raise OxaideTurnError(
+                    "Oxaide settlement could not be delivered or persisted",
+                    code=exc.code,
+                    retryable=exc.retryable,
+                ) from exc
+            self._start_outbox_retry(pending)
             return
         if pending is not None:
+            self._unlink_pending(pending, event_id=event_id)
+
+    def _start_outbox_retry(self, pending: Path) -> None:
+        with self._state_lock:
+            current = self._outbox_retry_thread
+            if current is not None and current.is_alive():
+                self._outbox_retry_wake.set()
+                return
+
+            def retry_loop() -> None:
+                delay = _OUTBOX_RETRY_INITIAL_SECONDS
+                while True:
+                    self._outbox_retry_wake.wait(delay)
+                    self._outbox_retry_wake.clear()
+                    self.flush_outbox()
+
+                    with self._state_lock:
+                        if not self._has_retryable_outbox_records():
+                            self._outbox_retry_thread = None
+                            return
+                    delay = min(delay * 2, _OUTBOX_RETRY_MAX_SECONDS)
+
+            self._outbox_retry_thread = threading.Thread(
+                target=retry_loop,
+                name=f"oxaide-turn-outbox-{pending.stem[:8]}",
+                daemon=True,
+            )
+            self._outbox_retry_thread.start()
+
+    def _has_retryable_outbox_records(self) -> bool:
+        outbox = self._outbox_dir()
+        if not outbox.is_dir():
+            return False
+        for pending in outbox.glob("*.json"):
             try:
-                pending.unlink(missing_ok=True)
-            except OSError:
-                logger.warning(
-                    "Oxaide turn outbox cleanup failed event=%s", event_id[:12]
-                )
+                payload = json.loads(pending.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    return True
+                if payload.get("workspace_id") == self.workspace_id:
+                    return True
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                return True
+        return False
 
     def flush_outbox(self) -> None:
         outbox = self._outbox_dir()
@@ -343,7 +392,7 @@ class OxaideTurnClient:
                     break
                 attempted += 1
                 self._request_payload(payload)
-                pending.unlink(missing_ok=True)
+                self._unlink_pending(pending)
             except OxaideTurnError as exc:
                 if self._is_terminal_settlement_error(exc):
                     self._dead_letter(pending, str(exc))
@@ -485,6 +534,29 @@ class OxaideTurnClient:
         return get_hermes_home() / "oxaide-turn-outbox"
 
     @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        descriptor = None
+        try:
+            descriptor = os.open(path, flags)
+            os.fsync(descriptor)
+        except OSError:
+            logger.debug("Oxaide turn directory fsync unavailable path=%s", path)
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
+    def _unlink_pending(self, pending: Path, *, event_id: str = "") -> None:
+        try:
+            pending.unlink(missing_ok=True)
+            self._fsync_directory(pending.parent)
+        except OSError:
+            logger.warning(
+                "Oxaide turn outbox cleanup failed event=%s",
+                event_id[:12],
+            )
+
+    @staticmethod
     def _is_terminal_settlement_error(error: OxaideTurnError) -> bool:
         return error.code in _TERMINAL_SETTLEMENT_CODES
 
@@ -495,6 +567,8 @@ class OxaideTurnClient:
             os.chmod(dead_letters, 0o700)
             target = dead_letters / pending.name
             os.replace(pending, target)
+            self._fsync_directory(pending.parent)
+            self._fsync_directory(dead_letters)
             metadata = dead_letters / f"{pending.name}.reason.json"
             metadata.write_text(
                 json.dumps(
@@ -544,4 +618,5 @@ class OxaideTurnClient:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, target)
+        self._fsync_directory(outbox)
         return target

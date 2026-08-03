@@ -298,12 +298,15 @@ def _run_agent_tool_execution_middleware(
     effective_task_id: str,
     tool_call_id: str,
     execute,
+    execution_capability=None,
 ) -> tuple[Any, dict]:
     observed_args = function_args
 
     def _execute(next_args: dict) -> Any:
         nonlocal observed_args
         observed_args = next_args if isinstance(next_args, dict) else function_args
+        if execution_capability is not None:
+            execution_capability.require_active(f"tool '{function_name}'")
         return execute(observed_args)
 
     from hermes_cli.middleware import run_tool_execution_middleware
@@ -322,7 +325,14 @@ def _run_agent_tool_execution_middleware(
     return result, observed_args
 
 
-def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
+def execute_tool_calls_concurrent(
+    agent,
+    assistant_message,
+    messages: list,
+    effective_task_id: str,
+    api_call_count: int = 0,
+    execution_capability=None,
+) -> None:
     """Execute multiple tool calls concurrently using a thread pool.
 
     Results are collected in the original tool-call order and appended to
@@ -596,6 +606,8 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         start = time.time()
         try:
             try:
+                if execution_capability is not None:
+                    execution_capability.require_active(f"tool '{function_name}'")
                 result = agent._invoke_tool(
                     function_name,
                     function_args,
@@ -605,6 +617,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                     pre_tool_block_checked=True,
                     skip_tool_request_middleware=True,
                     tool_request_middleware_trace=list(middleware_trace),
+                    execution_capability=execution_capability,
                 )
             except KeyboardInterrupt:
                 try:
@@ -1019,7 +1032,14 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
 
 
 
-def execute_tool_calls_sequential(agent, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
+def execute_tool_calls_sequential(
+    agent,
+    assistant_message,
+    messages: list,
+    effective_task_id: str,
+    api_call_count: int = 0,
+    execution_capability=None,
+) -> None:
     """Execute tool calls sequentially (original behavior). Used for single calls or interactive tools."""
     # Resolve the context-scaled tool-output budget once per turn.
     _tool_budget = _budget_for_agent(agent)
@@ -1198,6 +1218,9 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             except Exception:
                 pass  # never block tool execution
 
+        if not _execution_blocked and execution_capability is not None:
+            execution_capability.require_active(f"tool '{function_name}'")
+
         tool_start_time = time.time()
 
         if _block_msg is not None:
@@ -1248,6 +1271,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 effective_task_id=effective_task_id,
                 tool_call_id=getattr(tool_call, "id", "") or "",
                 execute=_execute,
+                execution_capability=execution_capability,
             )
             tool_duration = time.time() - tool_start_time
             if agent._should_emit_quiet_tool_messages():
@@ -1277,6 +1301,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 effective_task_id=effective_task_id,
                 tool_call_id=getattr(tool_call, "id", "") or "",
                 execute=_execute,
+                execution_capability=execution_capability,
             )
             tool_duration = time.time() - tool_start_time
             if agent._should_emit_quiet_tool_messages():
@@ -1314,6 +1339,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 effective_task_id=effective_task_id,
                 tool_call_id=getattr(tool_call, "id", "") or "",
                 execute=_execute,
+                execution_capability=execution_capability,
             )
             tool_duration = time.time() - tool_start_time
             if agent._should_emit_quiet_tool_messages():
@@ -1333,6 +1359,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 effective_task_id=effective_task_id,
                 tool_call_id=getattr(tool_call, "id", "") or "",
                 execute=_execute,
+                execution_capability=execution_capability,
             )
             tool_duration = time.time() - tool_start_time
             if agent._should_emit_quiet_tool_messages():
@@ -1352,6 +1379,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 effective_task_id=effective_task_id,
                 tool_call_id=getattr(tool_call, "id", "") or "",
                 execute=_execute,
+                execution_capability=execution_capability,
             )
             tool_duration = time.time() - tool_start_time
             if agent._should_emit_quiet_tool_messages():
@@ -1384,6 +1412,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     effective_task_id=effective_task_id,
                     tool_call_id=getattr(tool_call, "id", "") or "",
                     execute=_execute,
+                    execution_capability=execution_capability,
                 )
                 _delegate_result = function_result
             finally:
@@ -1415,6 +1444,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     effective_task_id=effective_task_id,
                     tool_call_id=getattr(tool_call, "id", "") or "",
                     execute=_execute,
+                    execution_capability=execution_capability,
                 )
                 _ce_result = function_result
             except Exception as tool_error:
@@ -1449,6 +1479,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     effective_task_id=effective_task_id,
                     tool_call_id=getattr(tool_call, "id", "") or "",
                     execute=_execute,
+                    execution_capability=execution_capability,
                 )
                 _mem_result = function_result
             except Exception as tool_error:
@@ -1484,6 +1515,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                     disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                     tool_request_middleware_trace=list(middleware_trace),
+                    execution_capability=execution_capability,
                 )
                 _spinner_result = function_result
             except KeyboardInterrupt:
@@ -1526,6 +1558,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                     disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                     tool_request_middleware_trace=list(middleware_trace),
+                    execution_capability=execution_capability,
                 )
             except KeyboardInterrupt:
                 _emit_cancelled_terminal_post_tool_call(

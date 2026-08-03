@@ -281,6 +281,52 @@ def test_hosted_schedule_control_proxies_create_and_revision_fenced_update(monke
     assert calls[-1][2]["request_id"] == body.request_id
 
 
+def test_hosted_control_response_projection_drops_private_runtime_fields(monkeypatch):
+    from hermes_cli import oxaide_scheduled_research_control as control
+
+    decoded = {
+        "ok": True,
+        "schedules": [{
+            "id": "schedule-1",
+            "revision": 2,
+            "name": "Market review",
+            "schedule": {
+                "kind": "interval",
+                "minutes": 60,
+                "private_model": "private-model",
+            },
+            "provider": "private-provider",
+            "model": "private-model",
+        }],
+    }
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return json.dumps(decoded).encode()
+
+    monkeypatch.setenv("HERMES_OXAIDE_WORKSPACE_ID", "workspace-123")
+    monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", "runtime-123")
+    monkeypatch.setenv("HERMES_OXAIDE_SCHEDULED_RESEARCH_SIGNING_SECRET", "s" * 43)
+    monkeypatch.setattr(control.urllib.request, "urlopen", lambda *_a, **_k: Response())
+
+    schedules = control.request_control("user-1", "list")
+
+    assert schedules == [{
+        "id": "schedule-1",
+        "revision": 2,
+        "name": "Market review",
+        "schedule": {"kind": "interval", "minutes": 60},
+    }]
+
+
 def test_hosted_schedule_mutation_requires_stable_request_id(monkeypatch):
     from hermes_cli import oxaide_scheduled_research_control as control
 

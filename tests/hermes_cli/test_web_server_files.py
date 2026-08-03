@@ -1,6 +1,7 @@
 """Tests for the dashboard-managed file browser API."""
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -543,6 +544,32 @@ def test_local_mode_upload_read_mkdir_delete_roundtrip(local_files_client):
     assert not folder.exists()
 
 
+def test_json_upload_no_overwrite_loses_competitor_race_safely(
+    forced_files_client, monkeypatch
+):
+    client, root = forced_files_client
+    target = root / "race.txt"
+    real_link = web_server.os.link
+
+    def competitor_wins(source, destination):
+        Path(destination).write_bytes(b"competitor")
+        real_link(source, destination)
+
+    monkeypatch.setattr(web_server.os, "link", competitor_wins)
+    response = client.post(
+        "/api/files/upload",
+        json={
+            "path": str(target),
+            "data_url": "data:text/plain;base64,dXBsb2Fk",
+            "overwrite": False,
+        },
+    )
+
+    assert response.status_code == 409
+    assert target.read_bytes() == b"competitor"
+    assert list(target.parent.glob(".*.upload")) == []
+
+
 def _seed_file(client, root, name="out/hello.txt"):
     file_path = root / name
     created = client.post(
@@ -696,6 +723,40 @@ def test_stream_upload_roundtrip(forced_files_client):
     assert file_path.read_bytes() == payload
 
 
+@pytest.mark.parametrize(
+    ("filename", "mime_type", "payload"),
+    [
+        ("research.pdf", "application/pdf", b"%PDF-1.7\n% uploaded report\n"),
+        (
+            "evidence.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            b"PK\x03\x04 uploaded workbook \x00\x01",
+        ),
+    ],
+)
+def test_stream_upload_data_documents_roundtrip(
+    forced_files_client, filename, mime_type, payload
+):
+    client, root = forced_files_client
+    file_path = root / "uploads" / filename
+
+    created = client.post(
+        "/api/files/upload-stream",
+        data={"path": str(file_path), "overwrite": "true"},
+        files={"file": (filename, payload, mime_type)},
+    )
+    listing = client.get("/api/files", params={"path": "/uploads"})
+    downloaded = client.get("/api/files/download", params={"path": f"/uploads/{filename}"})
+
+    assert created.status_code == 200, created.text
+    assert file_path.read_bytes() == payload
+    assert listing.status_code == 200
+    assert listing.json()["entries"][0]["name"] == filename
+    assert listing.json()["entries"][0]["mime_type"] == mime_type
+    assert downloaded.status_code == 200
+    assert downloaded.content == payload
+
+
 def test_stream_upload_rejects_oversized_without_clobbering(forced_files_client, monkeypatch):
     """Over-limit uploads return 413 and never overwrite an existing file.
 
@@ -748,6 +809,29 @@ def test_stream_upload_respects_overwrite_false(forced_files_client):
     )
     assert conflict.status_code == 409
     assert file_path.read_bytes() == b"first"
+
+
+def test_stream_upload_no_overwrite_loses_competitor_race_safely(
+    forced_files_client, monkeypatch
+):
+    client, root = forced_files_client
+    target = root / "stream-race.txt"
+    real_link = web_server.os.link
+
+    def competitor_wins(source, destination):
+        Path(destination).write_bytes(b"competitor")
+        real_link(source, destination)
+
+    monkeypatch.setattr(web_server.os, "link", competitor_wins)
+    response = client.post(
+        "/api/files/upload-stream",
+        data={"path": str(target), "overwrite": "false"},
+        files={"file": ("stream-race.txt", b"upload", "text/plain")},
+    )
+
+    assert response.status_code == 409
+    assert target.read_bytes() == b"competitor"
+    assert list(target.parent.glob(".*.upload")) == []
 
 
 def test_stream_upload_stays_under_forced_root(forced_files_client):

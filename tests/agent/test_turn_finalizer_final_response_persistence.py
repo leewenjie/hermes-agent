@@ -110,3 +110,42 @@ def test_final_response_closes_tool_tail_before_persistence(monkeypatch):
     assert result["messages"][-1] == {"role": "assistant", "content": "Done."}
     assert agent.persisted_messages is not None
     assert agent.persisted_messages[-1] == {"role": "assistant", "content": "Done."}
+
+
+def test_transformed_response_replaces_durable_assistant_content(monkeypatch):
+    """Displayed plugin output and resumed-session history must agree."""
+    monkeypatch.setattr(
+        "hermes_cli.plugins.invoke_hook",
+        lambda hook, **_kwargs: ["Redacted for display."]
+        if hook == "transform_llm_output"
+        else [],
+    )
+    agent = FakeAgent()
+    messages = [
+        {"role": "user", "content": "share the result"},
+        {"role": "assistant", "content": "Sensitive raw result."},
+    ]
+
+    result = finalize_turn(
+        agent,
+        final_response="Sensitive raw result.",
+        api_call_count=1,
+        interrupted=False,
+        failed=False,
+        messages=messages,
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn",
+        user_message="share the result",
+        original_user_message="share the result",
+        _should_review_memory=False,
+        _turn_exit_reason="text_response(length=21)",
+    )
+
+    assert result["final_response"] == "Redacted for display."
+    assert result["response_transformed"] is True
+    assert agent.persisted_messages[-1] == {
+        "role": "assistant",
+        "content": "Redacted for display.",
+    }
+    assert result["messages"][-1] == agent.persisted_messages[-1]

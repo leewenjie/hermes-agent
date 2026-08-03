@@ -870,6 +870,7 @@ CREATE TABLE IF NOT EXISTS scheduled_research_occurrences (
     nominal_fire_at TEXT NOT NULL,
     payload_json TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'prepared',
+    execution_phase TEXT,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     lease_token TEXT,
     lease_expires_at REAL,
@@ -1617,15 +1618,23 @@ class SessionDB:
         *,
         lease_seconds: int = 900,
     ) -> Optional[Dict[str, Any]]:
-        """Atomically claim one accepted or abandoned occurrence."""
+        """Claim accepted work or safely retry an abandoned authorization.
+
+        A billing identity is persisted in the same transaction as the first
+        claim. Only the pre-execution ``authorizing`` phase is reclaimable;
+        an expired ``executing`` attempt is ambiguous and must never be
+        automatically replayed.
+        """
         now = time.time()
         lease_token = uuid.uuid4().hex
+        billing_event_id = str(uuid.uuid4())
 
         def _claim(conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
             row = conn.execute(
                 """SELECT * FROM scheduled_research_occurrences
                    WHERE status = 'accepted'
-                      OR (status = 'running' AND lease_expires_at < ?)
+                      OR (status = 'running' AND execution_phase = 'authorizing'
+                          AND lease_expires_at < ?)
                    ORDER BY accepted_at, occurrence_id LIMIT 1""",
                 (now,),
             ).fetchone()
@@ -1634,13 +1643,18 @@ class SessionDB:
             updated = conn.execute(
                 """UPDATE scheduled_research_occurrences
                    SET status = 'running', attempt_count = attempt_count + 1,
+                       execution_phase = 'authorizing',
+                       billing_event_id = COALESCE(billing_event_id, ?),
                        lease_token = ?, lease_expires_at = ?,
                        started_at = COALESCE(started_at, ?), updated_at = ?
                    WHERE occurrence_id = ?
                      AND (status = 'accepted'
-                          OR (status = 'running' AND lease_expires_at < ?))""",
+                          OR (status = 'running'
+                              AND execution_phase = 'authorizing'
+                              AND lease_expires_at < ?))""",
                 (
-                    lease_token, now + max(30, lease_seconds), now, now,
+                    billing_event_id, lease_token,
+                    now + max(30, lease_seconds), now, now,
                     row["occurrence_id"], now,
                 ),
             )
@@ -1649,6 +1663,9 @@ class SessionDB:
             claimed = dict(row)
             claimed.update({
                 "status": "running",
+                "execution_phase": "authorizing",
+                "attempt_count": int(row["attempt_count"] or 0) + 1,
+                "billing_event_id": row["billing_event_id"] or billing_event_id,
                 "lease_token": lease_token,
                 "lease_expires_at": now + max(30, lease_seconds),
                 "payload": json.loads(row["payload_json"]),
@@ -1656,6 +1673,33 @@ class SessionDB:
             return claimed
 
         return self._execute_write(_claim)
+
+    def begin_scheduled_research_execution(
+        self,
+        occurrence_id: str,
+        lease_token: str,
+        billing_event_id: str,
+    ) -> bool:
+        """Fence the irreversible transition from authorization to execution."""
+        try:
+            billing_event_id = str(uuid.UUID(str(billing_event_id)))
+        except (ValueError, AttributeError, TypeError) as exc:
+            raise ValueError("scheduled research billing identity must be a UUID") from exc
+        now = time.time()
+
+        def _begin(conn: sqlite3.Connection) -> bool:
+            cursor = conn.execute(
+                """UPDATE scheduled_research_occurrences
+                   SET execution_phase = 'executing', updated_at = ?
+                   WHERE occurrence_id = ? AND status = 'running'
+                     AND execution_phase = 'authorizing'
+                     AND lease_token = ? AND lease_expires_at >= ?
+                     AND billing_event_id = ?""",
+                (now, occurrence_id, lease_token, now, billing_event_id),
+            )
+            return cursor.rowcount == 1
+
+        return self._execute_write(_begin)
 
     def authorize_scheduled_research_occurrence(
         self,
@@ -1813,7 +1857,7 @@ class SessionDB:
             cursor = conn.execute(
                 """UPDATE scheduled_research_occurrences
                    SET status = ?, lease_token = NULL, lease_expires_at = NULL,
-                       billing_event_id = COALESCE(?, billing_event_id),
+                       billing_event_id = COALESCE(billing_event_id, ?),
                        hermes_session_id = COALESCE(?, hermes_session_id),
                        result_artifact_id = CASE
                            WHEN ? = 'completed' THEN ?
@@ -1822,11 +1866,16 @@ class SessionDB:
                        completed_at = ?, last_error_code = ?, last_error = ?,
                        updated_at = ?
                    WHERE occurrence_id = ? AND status = 'running'
-                     AND lease_token = ? AND lease_expires_at >= ?""",
+                                         AND lease_token = ? AND lease_expires_at >= ?
+                                         AND (? != 'completed' OR (
+                                                 execution_phase = 'executing'
+                                                 AND billing_event_id = ?
+                                         ))""",
                 (
                     status, billing_event_id, hermes_session_id,
                     status, result_artifact_id, now, error_code, error, now,
                     occurrence_id, lease_token, now,
+                    status, billing_event_id,
                 ),
             )
             finished = cursor.rowcount == 1
@@ -2044,6 +2093,121 @@ class SessionDB:
             return cursor.rowcount == 1
 
         return self._execute_write(_settle)
+
+    def get_scheduled_research_health(self) -> Dict[str, Any]:
+        """Return bounded lifecycle diagnostics without tenant identifiers."""
+        now = time.time()
+        with self._lock:
+            occurrence = self._conn.execute(
+                """SELECT
+                       SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END)
+                           AS running_count,
+                       SUM(CASE WHEN status = 'running'
+                                 AND execution_phase = 'authorizing'
+                                THEN 1 ELSE 0 END) AS authorizing_count,
+                       SUM(CASE WHEN status = 'running'
+                                 AND execution_phase = 'executing'
+                                THEN 1 ELSE 0 END) AS executing_count,
+                       SUM(CASE WHEN status = 'running'
+                                 AND execution_phase IS NULL
+                                THEN 1 ELSE 0 END) AS unknown_phase_count,
+                       SUM(CASE WHEN status = 'running'
+                                 AND execution_phase = 'authorizing'
+                                 AND lease_expires_at < ?
+                                THEN 1 ELSE 0 END) AS expired_authorizing_count,
+                       SUM(CASE WHEN status = 'running'
+                                 AND execution_phase = 'executing'
+                                 AND lease_expires_at < ?
+                                THEN 1 ELSE 0 END) AS expired_executing_count,
+                       MIN(CASE WHEN status = 'running' THEN updated_at END)
+                           AS oldest_running_at,
+                       SUM(CASE WHEN status = 'completed' AND NOT EXISTS (
+                               SELECT 1
+                               FROM scheduled_research_event_outbox event
+                               WHERE event.occurrence_id =
+                                     scheduled_research_occurrences.occurrence_id
+                                 AND event.sequence = 3
+                           ) THEN 1 ELSE 0 END)
+                           AS completed_without_terminal_event_count,
+                       SUM(CASE WHEN status = 'completed' AND NOT EXISTS (
+                               SELECT 1
+                               FROM scheduled_research_billing_outbox billing
+                               WHERE billing.occurrence_id =
+                                     scheduled_research_occurrences.occurrence_id
+                           ) THEN 1 ELSE 0 END)
+                           AS completed_without_billing_count
+                   FROM scheduled_research_occurrences""",
+                (now, now),
+            ).fetchone()
+            event = self._conn.execute(
+                """SELECT
+                       SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END)
+                           AS pending_count,
+                       SUM(CASE WHEN status = 'dead_letter' THEN 1 ELSE 0 END)
+                           AS dead_letter_count,
+                       MIN(CASE WHEN status = 'pending' THEN created_at END)
+                           AS oldest_pending_at
+                   FROM scheduled_research_event_outbox"""
+            ).fetchone()
+            billing = self._conn.execute(
+                """SELECT
+                       SUM(CASE WHEN billing.status = 'pending' THEN 1 ELSE 0 END)
+                           AS pending_count,
+                       SUM(CASE WHEN billing.status = 'dead_letter' THEN 1 ELSE 0 END)
+                           AS dead_letter_count,
+                       MIN(CASE WHEN billing.status = 'pending'
+                                THEN billing.created_at END) AS oldest_pending_at,
+                       SUM(CASE WHEN billing.status = 'pending' AND EXISTS (
+                               SELECT 1
+                               FROM scheduled_research_event_outbox event
+                               WHERE event.occurrence_id = billing.occurrence_id
+                                 AND event.sequence = 3
+                                 AND event.status = 'delivered'
+                           ) THEN 1 ELSE 0 END) AS ready_to_settle_count
+                   FROM scheduled_research_billing_outbox billing"""
+            ).fetchone()
+
+        def _count(row: sqlite3.Row, key: str) -> int:
+            return int(row[key] or 0)
+
+        def _age(row: sqlite3.Row, key: str) -> Optional[int]:
+            value = row[key]
+            return max(0, int(now - float(value))) if value is not None else None
+
+        return {
+            "running_count": _count(occurrence, "running_count"),
+            "execution_phases": {
+                "authorizing": _count(occurrence, "authorizing_count"),
+                "executing": _count(occurrence, "executing_count"),
+                "unknown": _count(occurrence, "unknown_phase_count"),
+            },
+            "expired_leases": {
+                "authorizing": _count(occurrence, "expired_authorizing_count"),
+                "executing": _count(occurrence, "expired_executing_count"),
+            },
+            "oldest_running_age_seconds": _age(
+                occurrence, "oldest_running_at"
+            ),
+            "lifecycle_outbox": {
+                "pending_count": _count(event, "pending_count"),
+                "dead_letter_count": _count(event, "dead_letter_count"),
+                "oldest_pending_age_seconds": _age(event, "oldest_pending_at"),
+            },
+            "billing_outbox": {
+                "pending_count": _count(billing, "pending_count"),
+                "dead_letter_count": _count(billing, "dead_letter_count"),
+                "ready_to_settle_count": _count(billing, "ready_to_settle_count"),
+                "oldest_pending_age_seconds": _age(
+                    billing, "oldest_pending_at"
+                ),
+            },
+            "completed_without_terminal_event_count": _count(
+                occurrence, "completed_without_terminal_event_count"
+            ),
+            "completed_without_billing_count": _count(
+                occurrence, "completed_without_billing_count"
+            ),
+        }
 
     def _try_wal_checkpoint(self) -> None:
         """Best-effort TRUNCATE WAL checkpoint.  Never raises.

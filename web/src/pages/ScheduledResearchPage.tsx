@@ -256,7 +256,12 @@ export default function ScheduledResearchPage() {
         if (item.enabled) await api.pauseResearchSchedule(item.id, requestId);
         else await api.resumeResearchSchedule(item.id, requestId);
         setPendingMutation(null);
-        showToast(item.enabled ? "Research paused" : "Research resumed", "success");
+        showToast(
+          item.enabled
+            ? "Future research runs paused. A review already running may finish."
+            : "Research resumed",
+          "success",
+        );
         await load();
       } catch (error) {
         showToast(`Could not change schedule: ${error}`, "error");
@@ -269,7 +274,9 @@ export default function ScheduledResearchPage() {
 
   const remove = useCallback(
     async (item: ResearchSchedule) => {
-      if (!window.confirm(`Delete “${item.name || "Untitled research"}”?`)) return;
+      if (!window.confirm(
+        `Delete “${item.name || "Untitled research"}”? Future runs will be canceled. A review already running may finish.`,
+      )) return;
       setWorkingId(item.id);
       try {
         const fingerprint = `delete:${item.id}`;
@@ -280,7 +287,10 @@ export default function ScheduledResearchPage() {
         await api.deleteResearchSchedule(item.id, requestId);
         setPendingMutation(null);
         if (editingId === item.id) resetForm();
-        showToast("Research schedule deleted", "success");
+        showToast(
+          "Research schedule deleted. A review already running may finish.",
+          "success",
+        );
         await load();
       } catch (error) {
         showToast(`Could not delete schedule: ${error}`, "error");

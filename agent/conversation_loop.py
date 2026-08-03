@@ -552,6 +552,10 @@ def run_conversation(
     Returns:
         Dict: Complete conversation result with final response and message history
     """
+    # Capture by identity at turn entry. Detached workers from this turn must
+    # never observe a capability installed for a later turn.
+    execution_capability = getattr(agent, "execution_capability", None)
+
     if moa_config is None:
         try:
             from hermes_cli.moa_config import decode_moa_turn
@@ -632,6 +636,8 @@ def run_conversation(
     # See agent/transports/codex_app_server_session.py for the adapter
     # and references/codex-app-server-runtime.md for the rationale.
     if agent.api_mode == "codex_app_server":
+        if execution_capability is not None:
+            execution_capability.require_active("Codex app-server request")
         return agent._run_codex_app_server_turn(
             user_message=user_message,
             original_user_message=original_user_message,
@@ -1318,6 +1324,8 @@ def run_conversation(
                         _use_streaming = False
 
                 def _perform_api_call(next_api_kwargs):
+                    if execution_capability is not None:
+                        execution_capability.require_active("model request")
                     if agent.api_mode == "codex_responses":
                         next_api_kwargs = agent._get_transport().preflight_kwargs(
                             next_api_kwargs,
@@ -4762,7 +4770,13 @@ def run_conversation(
                     except Exception:
                         pass
 
-                agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
+                agent._execute_tool_calls(
+                    assistant_message,
+                    messages,
+                    effective_task_id,
+                    api_call_count,
+                    execution_capability=execution_capability,
+                )
 
                 if agent._tool_guardrail_halt_decision is not None:
                     decision = agent._tool_guardrail_halt_decision

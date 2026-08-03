@@ -1,6 +1,7 @@
 import base64
 import json
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlsplit
 
 import pytest
@@ -147,6 +148,27 @@ def test_snapshot_rejects_active_svg_and_omits_symlinks(tmp_path, monkeypatch):
     assert result["warnings"]
 
 
+@pytest.mark.parametrize("active_content", [
+    '<style>@import url("https://attacker.example/style.css")</style>',
+    '<style>.secret { fill: url(https://attacker.example/pixel) }</style>',
+    '<!DOCTYPE svg [<!ENTITY payload "unsafe">]><text>&payload;</text>',
+])
+def test_snapshot_rejects_svg_stylesheets_and_entities(
+    tmp_path, monkeypatch, active_content
+):
+    monkeypatch.setenv("HERMES_DASHBOARD_FILES_ROOT", str(tmp_path))
+    active = tmp_path / "active.svg"
+    active.write_text(
+        f'<svg xmlns="http://www.w3.org/2000/svg">{active_content}</svg>'
+    )
+
+    with pytest.raises(ResearchShareError):
+        build_research_snapshot(_session(), [
+            {"role": "user", "content": "Question"},
+            {"role": "assistant", "content": f"Answer\nMEDIA:{active}"},
+        ])
+
+
 def test_snapshot_omits_artifact_replaced_after_validation(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_DASHBOARD_FILES_ROOT", str(tmp_path))
     chart = tmp_path / "chart.svg"
@@ -201,6 +223,24 @@ def test_recorded_shares_survive_dialog_reopen_and_can_be_removed(tmp_path, monk
     assert list_recorded_shares("session-1")[0]["public_url"] == result["public_url"]
     remove_recorded_share(result["share_id"])
     assert list_recorded_shares("session-1") == []
+
+
+def test_concurrent_recorded_shares_do_not_overwrite_each_other(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    def publish(index):
+        record_share("session-1", {
+            "share_id": f"share-{index}",
+            "public_url": f"https://oxaide.com/r/{index}",
+            "expires_at": "2026-08-14T00:00:00Z",
+        })
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(publish, range(24)))
+
+    assert {row["share_id"] for row in list_recorded_shares("session-1")} == {
+        f"share-{index}" for index in range(24)
+    }
 
 
 def test_local_share_stores_only_token_hash_and_revokes_snapshot(tmp_path, monkeypatch):

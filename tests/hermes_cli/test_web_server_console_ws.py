@@ -70,6 +70,24 @@ def test_console_ws_rejects_missing_or_bad_token(console_client):
     assert exc.value.code == 4401
 
 
+def test_console_ws_rejects_managed_oxaide_launch(console_client, monkeypatch):
+    monkeypatch.setattr(
+        web_server,
+        "_ws_auth_context",
+        lambda _ws: (
+            None,
+            "trusted-launch",
+            {"workspace_id": "workspace-1", "access_state": "active"},
+        ),
+    )
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with console_client.websocket_connect(_url()):
+            pass
+
+    assert exc.value.code == 4403
+
+
 def test_console_ws_runs_read_only_command(console_client):
     with console_client.websocket_connect(_url()) as conn:
         ready = conn.receive_json()

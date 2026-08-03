@@ -1037,6 +1037,7 @@ def handle_function_call(
     tool_request_middleware_trace: Optional[List[Dict[str, Any]]] = None,
     enabled_toolsets: Optional[List[str]] = None,
     disabled_toolsets: Optional[List[str]] = None,
+    execution_capability=None,
 ) -> str:
     """
     Main function call dispatcher that routes calls to the tool registry.
@@ -1262,14 +1263,19 @@ def handle_function_call(
                 # the parent's tool set via the process-global.
                 sandbox_enabled = enabled_tools if enabled_tools is not None else _last_resolved_tool_names
                 def _dispatch(next_args: Dict[str, Any]) -> Any:
+                    if execution_capability is not None:
+                        execution_capability.require_active(f"tool '{function_name}'")
                     return registry.dispatch(
                         function_name, next_args,
                         task_id=task_id,
                         session_id=session_id,
                         enabled_tools=sandbox_enabled,
+                        execution_capability=execution_capability,
                     )
             else:
                 def _dispatch(next_args: Dict[str, Any]) -> Any:
+                    if execution_capability is not None:
+                        execution_capability.require_active(f"tool '{function_name}'")
                     return registry.dispatch(
                         function_name, next_args,
                         task_id=task_id,

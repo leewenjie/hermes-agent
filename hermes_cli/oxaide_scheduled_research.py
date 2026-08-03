@@ -447,7 +447,7 @@ def _run_occurrence(db: SessionDB, claim: dict[str, Any]) -> None:
     payload = claim["payload"]
     occurrence_id = payload["occurrence_id"]
     lease_token = claim["lease_token"]
-    billing_event_id = str(uuid.uuid4())
+    billing_event_id = claim["billing_event_id"]
     lease_lost = threading.Event()
     client = None
     turn = None
@@ -494,6 +494,13 @@ def _run_occurrence(db: SessionDB, claim: dict[str, Any]) -> None:
             lambda _reason: lease_lost.set(),
             event_id=billing_event_id,
         )
+        if not db.begin_scheduled_research_execution(
+            occurrence_id,
+            lease_token,
+            billing_event_id,
+        ):
+            lease_lost.set()
+            raise RuntimeError("scheduled_research_execution_lease_lost")
         enqueue_occurrence_event(db, payload, 2, "running")
         flush_occurrence_events(db)
 

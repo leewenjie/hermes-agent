@@ -31,7 +31,7 @@ from hermes_constants import get_hermes_home
 
 _SCHEMA_VERSION = "research-share.v1"
 _DEFAULT_ENDPOINT = "https://oxaide.com/api/agents/research-shares"
-_LOCAL_STORE_LOCK = threading.Lock()
+_SHARE_STORE_LOCK = threading.Lock()
 _MAX_MESSAGES = 100
 _MAX_MESSAGE_CHARS = 20_000
 _MAX_ARTIFACT_BYTES = 1536 * 1024
@@ -102,11 +102,16 @@ def _sanitize_svg(data: bytes) -> bytes:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ResearchShareError("SVG artifact is not valid UTF-8") from exc
+    if re.search(r"<!\s*(?:doctype|entity)\b", text, re.IGNORECASE):
+        raise ResearchShareError("SVG artifact contains an unsafe XML declaration")
     try:
         root = ET.fromstring(text)
     except ET.ParseError as exc:
         raise ResearchShareError("SVG artifact is malformed") from exc
-    blocked = {"script", "foreignobject", "iframe", "object", "embed", "audio", "video"}
+    blocked = {
+        "script", "style", "foreignobject", "iframe", "object", "embed",
+        "audio", "video",
+    }
     for element in root.iter():
         local_tag = element.tag.rsplit("}", 1)[-1].lower()
         if local_tag in blocked:
@@ -364,7 +369,7 @@ def publish_local_research_share(*, session_id: str, preview: dict[str, Any],
         "description": preview.get("description"),
         "snapshot": preview["snapshot"],
     }
-    with _LOCAL_STORE_LOCK:
+    with _SHARE_STORE_LOCK:
         rows = _read_local_snapshots()
         rows.append(row)
         _write_local_snapshots(rows)
@@ -382,7 +387,7 @@ def load_local_research_share(token: str) -> dict[str, Any] | None:
         return None
     token_sha256 = hashlib.sha256(token.encode("utf-8")).hexdigest()
     now = datetime.now(timezone.utc)
-    with _LOCAL_STORE_LOCK:
+    with _SHARE_STORE_LOCK:
         rows = _read_local_snapshots()
     for row in rows:
         if not hmac.compare_digest(str(row.get("token_sha256") or ""), token_sha256):
@@ -399,7 +404,7 @@ def load_local_research_share(token: str) -> dict[str, Any] | None:
 
 def revoke_local_research_share(share_id: str) -> dict[str, Any]:
     """Erase a local development snapshot immediately."""
-    with _LOCAL_STORE_LOCK:
+    with _SHARE_STORE_LOCK:
         rows = _read_local_snapshots()
         kept = [row for row in rows if row.get("share_id") != share_id]
         if len(kept) == len(rows):
@@ -425,39 +430,49 @@ def list_recorded_shares(session_id: str) -> list[dict[str, Any]]:
     return [row for row in rows if isinstance(row, dict) and row.get("session_id") == session_id]
 
 
-def record_share(session_id: str, result: dict[str, Any]) -> None:
-    path = _share_store_path()
-    rows: list[dict[str, Any]] = []
-    if path.is_file():
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(loaded, list):
-                rows = [row for row in loaded if isinstance(row, dict)]
-        except (OSError, json.JSONDecodeError):
-            rows = []
-    rows.append({
-        "session_id": session_id,
-        "share_id": result.get("share_id"),
-        "public_url": result.get("public_url"),
-        "expires_at": result.get("expires_at"),
-    })
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temporary.write_text(json.dumps(rows, separators=(",", ":")), encoding="utf-8")
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
-
-
-def remove_recorded_share(share_id: str) -> None:
+def _read_recorded_shares() -> list[dict[str, Any]]:
     path = _share_store_path()
     if not path.is_file():
-        return
+        return []
     try:
         rows = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return
-    kept = [row for row in rows if isinstance(row, dict) and row.get("share_id") != share_id]
-    path.write_text(json.dumps(kept, separators=(",", ":")), encoding="utf-8")
-    os.chmod(path, 0o600)
+        return []
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _write_recorded_shares(rows: list[dict[str, Any]]) -> None:
+    path = _share_store_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(json.dumps(rows, separators=(",", ":")), encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def record_share(session_id: str, result: dict[str, Any]) -> None:
+    with _SHARE_STORE_LOCK:
+        rows = _read_recorded_shares()
+        rows.append({
+            "session_id": session_id,
+            "share_id": result.get("share_id"),
+            "public_url": result.get("public_url"),
+            "expires_at": result.get("expires_at"),
+        })
+        _write_recorded_shares(rows)
+
+
+def remove_recorded_share(share_id: str) -> None:
+    with _SHARE_STORE_LOCK:
+        rows = _read_recorded_shares()
+        kept = [row for row in rows if row.get("share_id") != share_id]
+        if len(kept) != len(rows):
+            _write_recorded_shares(kept)
 
 
 def revoke_research_share(*, workspace_id: str, user_id: str, share_id: str) -> dict[str, Any]:

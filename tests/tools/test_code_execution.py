@@ -49,7 +49,9 @@ from tools.code_execution_tool import (
 )
 
 
-def _mock_handle_function_call(function_name, function_args, task_id=None, user_task=None):
+def _mock_handle_function_call(
+    function_name, function_args, task_id=None, user_task=None, **kwargs
+):
     """Mock dispatcher that returns canned responses for each tool."""
     if function_name == "terminal":
         cmd = function_args.get("command", "")
@@ -329,7 +331,9 @@ else:
     print(f"OK {N}/{N}")
 '''
 
-        def slow_mock(function_name, function_args, task_id=None, user_task=None):
+        def slow_mock(
+            function_name, function_args, task_id=None, user_task=None, **kwargs
+        ):
             import time as _t
             if function_name == "terminal":
                 _t.sleep(0.05)  # ensure requests overlap on the socket
@@ -405,6 +409,7 @@ raise RuntimeError("deliberate crash")
                 ))
         self.assertEqual(result["status"], "timeout")
         self.assertIn("timed out", result.get("error", ""))
+
         # The timeout message must also appear in output so the LLM always
         # surfaces it to the user (#10807).
         self.assertIn("timed out", result.get("output", ""))
@@ -759,6 +764,7 @@ class TestEnvVarFiltering(unittest.TestCase):
         })
         self.assertNotIn("OPENAI_API_KEY", child_env)
         self.assertNotIn("ANTHROPIC_API_KEY", child_env)
+
         self.assertNotIn("FIRECRAWL_API_KEY", child_env)
 
     def test_tokens_excluded(self):
@@ -1131,6 +1137,89 @@ class TestRpcTokenAuthorization(unittest.TestCase):
         src = generate_hermes_tools_module(["terminal"], transport="uds")
         self.assertIn("HERMES_RPC_TOKEN", src)
         self.assertIn('"token"', src)
+
+
+class TestRpcExecutionCapability(unittest.TestCase):
+    def test_local_rpc_rejects_nested_dispatch_after_revocation(self):
+        from agent.execution_capability import ExecutionCapability
+        from tools.code_execution_tool import _rpc_server_loop
+
+        capability = ExecutionCapability()
+        capability.revoke("lease lost")
+        srv, cli = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+
+        class Listener:
+            def settimeout(self, _timeout):
+                pass
+
+            def accept(self):
+                return srv, ("peer", 0)
+
+        dispatch = MagicMock(return_value='{}')
+        with patch("model_tools.handle_function_call", dispatch):
+            thread = threading.Thread(
+                target=_rpc_server_loop,
+                args=(
+                    Listener(), "test-task", [], [0], 10,
+                    frozenset({"terminal"}), threading.Event(), "token",
+                    capability,
+                ),
+                daemon=True,
+            )
+            thread.start()
+            cli.sendall((json.dumps({
+                "token": "token",
+                "tool": "terminal",
+                "args": {"command": "pwd"},
+            }) + "\n").encode())
+            response = json.loads(cli.recv(65536).decode())
+            cli.close()
+            thread.join(timeout=2)
+
+        dispatch.assert_not_called()
+        self.assertIn("capability revoked", response["error"])
+
+    def test_remote_rpc_rejects_nested_dispatch_after_revocation(self):
+        import base64
+        import re
+
+        from agent.execution_capability import ExecutionCapability
+        from tools.code_execution_tool import _rpc_poll_loop
+
+        capability = ExecutionCapability()
+        capability.revoke("lease lost")
+        stop_event = threading.Event()
+        request = json.dumps({
+            "token": "token",
+            "tool": "terminal",
+            "args": {"command": "pwd"},
+            "seq": 1,
+        })
+
+        class FakeEnv:
+            response = None
+
+            def execute(self, command, cwd=None, timeout=None):
+                if command.startswith("ls -1"):
+                    return {"output": "/rpc/req_000001\n"}
+                if command.startswith("cat "):
+                    return {"output": request}
+                if "base64 -d" in command:
+                    encoded = re.search(r"echo '([^']+)'", command).group(1)
+                    self.response = json.loads(base64.b64decode(encoded).decode())
+                    stop_event.set()
+                return {"output": ""}
+
+        env = FakeEnv()
+        dispatch = MagicMock(return_value='{}')
+        with patch("model_tools.handle_function_call", dispatch):
+            _rpc_poll_loop(
+                env, "/rpc", "test-task", [], [0], 10,
+                frozenset({"terminal"}), stop_event, "token", capability,
+            )
+
+        dispatch.assert_not_called()
+        self.assertIn("capability revoked", env.response["error"])
 
 
 if __name__ == "__main__":

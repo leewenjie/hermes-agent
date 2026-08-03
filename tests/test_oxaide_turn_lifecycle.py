@@ -582,17 +582,60 @@ def test_heartbeat_failure_fails_closed(monkeypatch):
     assert lost_codes == ["turn_reservation_not_active"]
 
 
-def test_lease_loss_interrupts_physical_agent_work_and_schedules_one_hard_stop(
+def test_each_successful_authorization_mints_a_fresh_execution_capability(
     monkeypatch,
 ):
     from hermes_cli import managed_scope
 
     managed_scope._reset_managed_runtime_terminal_failure_for_tests()
+    monkeypatch.setenv(
+        "HERMES_OXAIDE_USAGE_SIGNING_SECRET",
+        "test-usage-signing-secret-at-least-32-bytes",
+    )
+    callbacks = []
+
+    class _Turn:
+        pass
+
+    def authorize(self, on_lease_lost=None):
+        callbacks.append(on_lease_lost)
+        return _Turn()
+
+    monkeypatch.setattr(OxaideTurnClient, "authorize", authorize)
+    monkeypatch.setattr(server, "_schedule_oxaide_runtime_hard_stop", lambda _code: None)
+    session = {
+        "trusted_launch_context": dict(_CONTEXT_A),
+        "history_lock": threading.Lock(),
+    }
+
+    first = server._authorize_oxaide_user_turn(session)
+    second = server._authorize_oxaide_user_turn(session)
+
+    assert first.execution_capability is not second.execution_capability
+    assert first.execution_capability.is_active
+    assert second.execution_capability.is_active
+
+    callbacks[0]("turn_reservation_binding_fenced")
+    assert first.execution_capability.is_active is False
+    assert second.execution_capability.is_active
+    managed_scope._reset_managed_runtime_terminal_failure_for_tests()
+
+
+def test_lease_loss_interrupts_physical_agent_work_and_schedules_one_hard_stop(
+    monkeypatch,
+):
+    from agent.execution_capability import ExecutionCapability
+    from hermes_cli import managed_scope
+
+    managed_scope._reset_managed_runtime_terminal_failure_for_tests()
+    capability = ExecutionCapability()
+
     class _Agent:
         def __init__(self):
             self.interrupted = 0
 
         def interrupt(self):
+            assert capability.is_active is False
             self.interrupted += 1
 
     agent = _Agent()
@@ -605,15 +648,20 @@ def test_lease_loss_interrupts_physical_agent_work_and_schedules_one_hard_stop(
     )
 
     server._cancel_oxaide_turn_after_lease_loss(
-        session, "turn_reservation_binding_fenced"
+        session,
+        "turn_reservation_binding_fenced",
+        execution_capability=capability,
     )
     server._cancel_oxaide_turn_after_lease_loss(
-        session, "turn_reservation_binding_fenced"
+        session,
+        "turn_reservation_binding_fenced",
+        execution_capability=capability,
     )
 
     assert managed_scope.managed_runtime_terminal_failure() == "terminal_lease_loss"
     assert session["_turn_cancel_requested"] is True
     assert session["_oxaide_lease_lost"] == "turn_reservation_binding_fenced"
+    assert capability.revoke_reason == "turn_reservation_binding_fenced"
     assert agent.interrupted == 2
     assert scheduled == ["turn_reservation_binding_fenced"]
     managed_scope._reset_managed_runtime_terminal_failure_for_tests()
@@ -648,11 +696,16 @@ def test_runtime_hard_stop_terminates_s6_service_tree(monkeypatch):
 
 
 def test_background_turn_authorizes_before_child_agent_construction(monkeypatch):
+    from agent.execution_capability import ExecutionCapability
+
     session = _install_session(monkeypatch)
     session["agent"] = object()
     calls = []
+    capability = ExecutionCapability()
 
     class _Turn:
+        execution_capability = capability
+
         def complete(self, details=None):
             calls.append(("complete", details))
 
@@ -663,8 +716,9 @@ def test_background_turn_authorizes_before_child_agent_construction(monkeypatch)
         model = "test-model"
         provider = "test-provider"
 
-        def __init__(self, **_kwargs):
+        def __init__(self, **kwargs):
             calls.append(("construct", None))
+            assert kwargs["execution_capability"] is capability
             self.session_api_calls = 0
             self.session_input_tokens = 0
             self.session_output_tokens = 0
@@ -685,7 +739,13 @@ def test_background_turn_authorizes_before_child_agent_construction(monkeypatch)
         "_authorize_oxaide_user_turn",
         lambda _session: calls.append(("authorize", None)) or _Turn(),
     )
-    monkeypatch.setattr(server, "_background_agent_kwargs", lambda *_args: {})
+    monkeypatch.setattr(
+        server,
+        "_background_agent_kwargs",
+        lambda _agent, _task_id, execution_capability=None: {
+            "execution_capability": execution_capability,
+        },
+    )
     monkeypatch.setattr("run_agent.AIAgent", _ChildAgent)
     monkeypatch.setattr(server, "_emit", lambda *_args: calls.append(("emit", None)))
 
@@ -738,6 +798,81 @@ def test_background_authorization_denial_never_constructs_agent(monkeypatch):
         server._sessions.clear()
 
 
+def test_background_failure_hides_private_inference_identity(monkeypatch):
+    session = _install_session(monkeypatch)
+    session["agent"] = object()
+    emitted = []
+    private = "gpt-private via private-provider at /private/runtime"
+
+    class _Turn:
+        def release(self):
+            return None
+
+    class _ChildAgent:
+        model = "private-model"
+        provider = "private-provider"
+        session_api_calls = 0
+        session_input_tokens = 0
+        session_output_tokens = 0
+        session_cache_read_tokens = 0
+        session_cache_write_tokens = 0
+        session_reasoning_tokens = 0
+        session_estimated_cost_usd = 0.0
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def run_conversation(self, **_kwargs):
+            raise RuntimeError(private)
+
+    class _InlineThread:
+        def __init__(self, target=None, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setenv("HERMES_OXAIDE_WORKSPACE_ID", "workspace-a")
+    monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", "runtime-key-a")
+    monkeypatch.setattr(server, "_authorize_oxaide_user_turn", lambda _session: _Turn())
+    monkeypatch.setattr(server, "_background_agent_kwargs", lambda *_args: {})
+    monkeypatch.setattr("run_agent.AIAgent", _ChildAgent)
+    monkeypatch.setattr(server.threading, "Thread", _InlineThread)
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda event, _sid, payload=None: emitted.append((event, payload)),
+    )
+
+    try:
+        token = bind_transport(_Transport(dict(_CONTEXT_A)))
+        try:
+            response = server._methods["prompt.background"](
+                "rid", {"session_id": "sid", "text": "background prompt"}
+            )
+        finally:
+            reset_transport(token)
+        assert "task_id" in response["result"]
+        deadline = time.monotonic() + 2
+        while not emitted:
+            if time.monotonic() >= deadline:
+                pytest.fail("background failure did not complete")
+            threading.Event().wait(0.01)
+
+        assert emitted == [
+            (
+                "background.complete",
+                {
+                    "task_id": emitted[0][1]["task_id"],
+                    "text": server._managed_inference_error(),
+                },
+            )
+        ]
+        assert private not in str(emitted)
+    finally:
+        server._sessions.clear()
+
+
 def test_established_runtime_session_outlives_launch_token(monkeypatch):
     monkeypatch.setenv("HERMES_OXAIDE_USAGE_SIGNING_SECRET", "test-usage-signing-secret-at-least-32-bytes")
     monkeypatch.setenv(
@@ -762,16 +897,21 @@ def test_established_runtime_session_outlives_launch_token(monkeypatch):
 
 
 def test_success_completes_once_and_failed_turns_release():
+    from agent.execution_capability import ExecutionCapability
+
     class _Turn:
         def __init__(self):
             self.completed = 0
             self.released = 0
+            self.execution_capability = ExecutionCapability()
 
         def complete(self, details=None):
+            assert self.execution_capability.is_active is False
             self.completed += 1
             self.details = details
 
         def release(self):
+            assert self.execution_capability.is_active is False
             self.released += 1
 
     success = _Turn()
@@ -785,6 +925,7 @@ def test_success_completes_once_and_failed_turns_release():
     )
     assert (success.completed, success.released) == (1, 0)
     assert success.details == details
+    assert success.execution_capability.revoke_reason == "turn_completed"
 
     for result, raw, status in (
         ({"failed": True}, "answer", "complete"),
@@ -796,6 +937,7 @@ def test_success_completes_once_and_failed_turns_release():
         failed = _Turn()
         server._settle_oxaide_turn(failed, result, raw, status)
         assert (failed.completed, failed.released) == (0, 1)
+        assert failed.execution_capability.revoke_reason == "turn_released"
 
 
 def test_synthetic_turn_is_unmetered_noop():
@@ -810,6 +952,78 @@ def test_hosted_full_turn_without_authorization_fails_closed(monkeypatch):
 
     with pytest.raises(RuntimeError, match="require pre-runtime authorization"):
         server._run_prompt_submit("rid", "sid", session, "synthetic")
+
+
+def test_hosted_answer_is_not_finalized_when_settlement_cannot_persist(monkeypatch):
+    session = _install_session(monkeypatch)
+    emitted = []
+
+    class _Agent:
+        model = "private-model"
+        provider = "private-provider"
+        session_api_calls = 0
+        session_input_tokens = 0
+        session_output_tokens = 0
+        session_cache_read_tokens = 0
+        session_cache_write_tokens = 0
+        session_reasoning_tokens = 0
+        session_estimated_cost_usd = 0.0
+        session_cost_status = "unknown"
+        session_cost_source = "none"
+
+        def clear_interrupt(self):
+            return None
+
+        def run_conversation(self, *_args, **_kwargs):
+            return {"final_response": "customer answer"}
+
+    class _Turn:
+        def complete(self, details=None):
+            raise OxaideTurnError(
+                "settlement could not be delivered or persisted",
+                retryable=True,
+            )
+
+        def release(self):
+            pytest.fail("failed completion must not send a contradictory release")
+
+    class _InlineThread:
+        def __init__(self, target=None, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    session["agent"] = _Agent()
+    monkeypatch.setenv("HERMES_OXAIDE_WORKSPACE_ID", "workspace-a")
+    monkeypatch.setenv("HERMES_OXAIDE_RUNTIME_KEY", "runtime-key-a")
+    monkeypatch.setattr(server.threading, "Thread", _InlineThread)
+    monkeypatch.setattr(server, "_set_session_context", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda _tokens: None)
+    monkeypatch.setattr(server, "_wire_callbacks", lambda _sid: None)
+    monkeypatch.setattr(server, "_sync_agent_model_with_config", lambda *_args: None)
+    monkeypatch.setattr(server, "_register_session_cwd", lambda _session: None)
+    monkeypatch.setattr(server, "make_stream_renderer", lambda _cols: None)
+    monkeypatch.setattr(server, "render_message", lambda _raw, _cols: "")
+    monkeypatch.setattr(server, "_get_usage", lambda _agent: {})
+    monkeypatch.setattr(server, "_sync_session_key_after_compress", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_session_info", lambda *_args: {})
+    monkeypatch.setattr(server, "_drain_queued_prompt", lambda *_args: False)
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda event, _sid, payload=None: emitted.append((event, payload)),
+    )
+
+    try:
+        server._run_prompt_submit(
+            "rid", "sid", session, "research prompt", oxaide_turn=_Turn()
+        )
+
+        assert "message.complete" not in [event for event, _payload in emitted]
+        assert "error" in [event for event, _payload in emitted]
+    finally:
+        server._sessions.clear()
 
 
 def test_loopback_development_turn_does_not_require_hosted_authorization(monkeypatch):
@@ -930,6 +1144,113 @@ def test_completion_delivery_failure_is_durable_and_non_raising(monkeypatch, tmp
     }
 
 
+def test_settlement_raises_when_delivery_and_persistence_both_fail(monkeypatch):
+    monkeypatch.setenv(
+        "HERMES_OXAIDE_USAGE_SIGNING_SECRET",
+        "test-usage-signing-secret-at-least-32-bytes",
+    )
+    client = OxaideTurnClient(dict(_CONTEXT_A))
+    monkeypatch.setattr(
+        client,
+        "_write_outbox",
+        lambda _payload: (_ for _ in ()).throw(OSError("disk unavailable")),
+    )
+    monkeypatch.setattr(
+        client,
+        "_request_payload",
+        lambda _payload: (_ for _ in ()).throw(
+            OxaideTurnError("offline", retryable=True)
+        ),
+    )
+
+    with pytest.raises(
+        OxaideTurnError,
+        match="could not be delivered or persisted",
+    ):
+        client.settle("complete", "lost-event")
+
+
+def test_settlement_retries_without_later_authorization(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv(
+        "HERMES_OXAIDE_USAGE_SIGNING_SECRET",
+        "test-usage-signing-secret-at-least-32-bytes",
+    )
+    monkeypatch.setattr(
+        "tui_gateway.oxaide_turns._OUTBOX_RETRY_INITIAL_SECONDS", 0.01
+    )
+    monkeypatch.setattr(
+        "tui_gateway.oxaide_turns._OUTBOX_RETRY_MAX_SECONDS", 0.01
+    )
+    client = OxaideTurnClient(dict(_CONTEXT_A))
+    attempts = []
+
+    def deliver(payload):
+        attempts.append(payload)
+        if len(attempts) == 1:
+            raise OxaideTurnError("offline", retryable=True)
+        return {"ok": True}
+
+    monkeypatch.setattr(client, "_request_payload", deliver)
+    client.settle("release", "retry-event")
+    client._outbox_retry_thread.join(timeout=2)
+
+    assert len(attempts) == 2
+    assert list((tmp_path / "oxaide-turn-outbox").glob("*.json")) == []
+
+
+def test_settlement_retry_worker_drains_multiple_pending_records(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv(
+        "HERMES_OXAIDE_USAGE_SIGNING_SECRET",
+        "test-usage-signing-secret-at-least-32-bytes",
+    )
+    monkeypatch.setattr(
+        "tui_gateway.oxaide_turns._OUTBOX_RETRY_INITIAL_SECONDS", 1.0
+    )
+    monkeypatch.setattr(
+        "tui_gateway.oxaide_turns._OUTBOX_RETRY_MAX_SECONDS", 1.0
+    )
+    client = OxaideTurnClient(dict(_CONTEXT_A))
+    attempts = []
+
+    def deliver(payload):
+        attempts.append(payload["hermes_event_id"])
+        if attempts.count(payload["hermes_event_id"]) == 1:
+            raise OxaideTurnError("offline", retryable=True)
+        return {"ok": True}
+
+    monkeypatch.setattr(client, "_request_payload", deliver)
+    client.settle("release", "retry-event-one")
+    retry_thread = client._outbox_retry_thread
+    assert retry_thread is not None
+    client.settle("release", "retry-event-two")
+    retry_thread.join(timeout=2)
+
+    assert not retry_thread.is_alive()
+    assert attempts.count("retry-event-one") == 2
+    assert attempts.count("retry-event-two") == 2
+    assert list((tmp_path / "oxaide-turn-outbox").glob("*.json")) == []
+
+
+def test_outbox_rename_fsyncs_parent_directory(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv(
+        "HERMES_OXAIDE_USAGE_SIGNING_SECRET",
+        "test-usage-signing-secret-at-least-32-bytes",
+    )
+    client = OxaideTurnClient(dict(_CONTEXT_A))
+    synced = []
+    monkeypatch.setattr(client, "_fsync_directory", synced.append)
+
+    pending = client._write_outbox(
+        client._payload("release", "durable-event")
+    )
+
+    assert pending.exists()
+    assert synced == [tmp_path / "oxaide-turn-outbox"]
+
+
 def test_terminal_settlement_failure_moves_record_to_dead_letter(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv(
@@ -942,8 +1263,8 @@ def test_terminal_settlement_failure_moves_record_to_dead_letter(monkeypatch, tm
         "_request_payload",
         lambda _payload: (_ for _ in ()).throw(
             OxaideTurnError(
-                "turn_event_not_reusable",
-                code="turn_event_not_reusable",
+                "scheduled_research_winner_committed",
+                code="scheduled_research_winner_committed",
             )
         ),
     )
@@ -957,7 +1278,7 @@ def test_terminal_settlement_failure_moves_record_to_dead_letter(monkeypatch, tm
     reason = json.loads(
         (outbox / "dead-letter" / f"{dead_letters[0].name}.reason.json").read_text()
     )
-    assert reason["reason"] == "turn_event_not_reusable"
+    assert reason["reason"] == "scheduled_research_winner_committed"
     assert reason["dead_lettered_at"]
 
 

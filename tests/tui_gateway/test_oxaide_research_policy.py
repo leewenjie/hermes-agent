@@ -492,6 +492,64 @@ def test_oxaide_session_rpc_rows_hide_runtime_metadata(monkeypatch, oxaide_runti
     assert payload["session_key"] == "stored-1"
 
 
+def test_oxaide_public_usage_and_errors_hide_runtime_identity(
+    monkeypatch, oxaide_runtime
+):
+    usage = server._managed_usage({
+        "model": "private-model",
+        "input": 12,
+        "total": 20,
+    })
+
+    assert usage == {
+        "model": "Oxaide Research Engine",
+        "input": 12,
+        "total": 20,
+    }
+    error = server._managed_inference_error()
+    assert "Oxaide Research Engine" in error
+    assert "private-model" not in error
+    assert "provider" not in error.lower()
+
+
+def test_oxaide_completion_event_projects_nested_usage(monkeypatch, oxaide_runtime):
+    emitted = []
+    monkeypatch.setattr(server, "write_json", emitted.append)
+
+    server._emit(
+        "message.complete",
+        "session-1",
+        {
+            "text": "Answer",
+            "usage": {"model": "private-model", "total": 7},
+            "status": "complete",
+        },
+    )
+
+    payload = emitted[0]["params"]["payload"]
+    assert payload["usage"] == {
+        "model": "Oxaide Research Engine",
+        "total": 7,
+    }
+
+
+def test_oxaide_generic_errors_hide_private_inference_identity(
+    monkeypatch, oxaide_runtime
+):
+    emitted = []
+    monkeypatch.setattr(server, "write_json", emitted.append)
+    private = "gpt-5.6-luna via azure-foundry using codex_responses"
+
+    server._emit("error", "session-1", {"message": private, "provider": private})
+    response = server._err("rid", 5000, private)
+
+    event_payload = emitted[0]["params"]["payload"]
+    assert event_payload == {"message": server._managed_inference_error()}
+    assert response["error"]["message"] == server._managed_inference_error()
+    assert private not in str(emitted)
+    assert private not in str(response)
+
+
 def test_oxaide_session_enumeration_is_owner_scoped(monkeypatch, oxaide_runtime):
     rows = [
         {
