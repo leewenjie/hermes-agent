@@ -113,6 +113,25 @@ def test_completed_result_is_persisted_as_opaque_managed_artifact(monkeypatch, t
     assert result.stat().st_mode & 0o777 == 0o600
 
 
+def test_result_summary_uses_persisted_summary_section_and_utf16_bound(monkeypatch, tmp_path):
+    managed_root = tmp_path / "workspace"
+    monkeypatch.setenv("HERMES_DASHBOARD_FILES_ROOT", str(managed_root))
+    managed._persist_occurrence_result(
+        _ARTIFACT_ID,
+        "# Report\n\n## Executive Summary\n\nEvidence **improved** [materially](https://example.test).\n\n## Sources\n\nHidden from summary.",
+        None,
+    )
+
+    assert managed._result_summary_from_artifact(_ARTIFACT_ID) == (
+        "Evidence improved materially."
+    )
+
+    bounded_artifact_id = "31000000-0000-4000-8000-000000000002"
+    managed._persist_occurrence_result(bounded_artifact_id, "😀" * 1_001, None)
+    bounded = managed._result_summary_from_artifact(bounded_artifact_id)
+    assert len(bounded.encode("utf-16-le")) // 2 == 2_000
+
+
 def test_result_persistence_enforces_utf8_byte_limit_before_writing(monkeypatch, tmp_path):
     managed_root = tmp_path / "workspace"
     monkeypatch.setenv("HERMES_DASHBOARD_FILES_ROOT", str(managed_root))
@@ -763,6 +782,7 @@ def test_successful_occurrence_emits_result_and_final_session_evidence(
     )
     assert event["billing_event_id"] == row["billing_event_id"]
     assert event["result_session_id"] == "cron_final_session"
+    assert event["result_summary"] == "Completed research"
     assert dict(billing) == {
         "billing_event_id": row["billing_event_id"],
         "status": "pending",

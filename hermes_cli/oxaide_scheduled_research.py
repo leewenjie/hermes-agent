@@ -26,6 +26,7 @@ from typing import Any
 from hermes_constants import get_hermes_home
 from hermes_cli.scheduled_research_results import (
     delete_result,
+    read_result_text,
     result_path,
     results_directory,
     write_result_text,
@@ -44,6 +45,7 @@ _DEFAULT_EVENT_ENDPOINT = "https://oxaide.com/api/agents/research-schedule-event
 _EVENT_TIMEOUT_SECONDS = 10.0
 _LOCAL_LEASE_SECONDS = 360
 _LOCAL_LEASE_RENEWAL_SECONDS = 60.0
+_RESULT_SUMMARY_MAX_UTF16_UNITS = 2_000
 _worker_lock = threading.Lock()
 _worker_thread: threading.Thread | None = None
 _worker_wake = threading.Event()
@@ -314,6 +316,34 @@ def _persist_occurrence_result(
     return write_result_text(artifact_id, content)
 
 
+def _result_summary_from_artifact(artifact_id: str) -> str:
+    """Derive bounded email evidence only from the immutable final artifact."""
+    content = read_result_text(artifact_id).strip()
+    section = re.search(
+        r"(?ims)^#{1,6}\s+(?:executive\s+summary|summary|key\s+findings|results?)\s*$\n(.*?)(?=^#{1,6}\s+|\Z)",
+        content,
+    )
+    candidate = section.group(1).strip() if section else content
+    candidate = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", candidate)
+    candidate = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", candidate)
+    candidate = re.sub(r"(?m)^#{1,6}\s+", "", candidate)
+    candidate = re.sub(r"[*_`~]", "", candidate)
+    candidate = re.sub(r"[ \t]+", " ", candidate)
+    candidate = re.sub(r"\n{3,}", "\n\n", candidate).strip()
+    if not candidate:
+        candidate = "Scheduled research completed. Open the private result for details."
+
+    summary: list[str] = []
+    units = 0
+    for character in candidate:
+        character_units = len(character.encode("utf-16-le")) // 2
+        if units + character_units > _RESULT_SUMMARY_MAX_UTF16_UNITS:
+            break
+        summary.append(character)
+        units += character_units
+    return "".join(summary).rstrip()
+
+
 def _event_endpoint() -> str:
     return str(
         os.environ.get("OXAIDE_SCHEDULED_RESEARCH_EVENT_ENDPOINT")
@@ -473,6 +503,7 @@ def _run_occurrence(db: SessionDB, claim: dict[str, Any]) -> None:
     final_hermes_session_id = None
     result_artifact_id = None
     result_artifact_ref = None
+    result_summary = None
     final_session_capture: list[str | None] = []
     deferred_agents: list[Any] = []
     local_lease_stop = threading.Event()
@@ -586,6 +617,7 @@ def _run_occurrence(db: SessionDB, claim: dict[str, Any]) -> None:
             result_artifact_ref = _persist_occurrence_result(
                 result_artifact_id, document, final_response
             )
+            result_summary = _result_summary_from_artifact(result_artifact_id)
             result_artifact_ref = f"/research-results/{result_artifact_ref}.md"
             terminal_status = "completed"
         else:
@@ -613,6 +645,7 @@ def _run_occurrence(db: SessionDB, claim: dict[str, Any]) -> None:
             event_fields["billing_event_id"] = billing_event_id
             event_fields["result_artifact_ref"] = result_artifact_ref
             event_fields["result_session_id"] = final_hermes_session_id
+            event_fields["result_summary"] = result_summary
         if terminal_status == "failed":
             event_fields.update({
                 "error_code": error_code or "execution_failed",
