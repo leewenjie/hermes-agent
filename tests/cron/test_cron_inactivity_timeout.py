@@ -11,6 +11,7 @@ Tests cover:
 import concurrent.futures
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -377,10 +378,93 @@ def test_active_managed_occurrence_hits_wall_clock_deadline(monkeypatch):
     agent = ActiveManagedAgent.instance
     assert success is False
     assert error == "TimeoutError: managed_scheduled_research_timeout"
-    assert agent is not None and agent._interrupted is True
+    assert agent is not None
+    deadline = time.monotonic() + 1.0
+    while not agent._interrupted and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert agent._interrupted is True
     assert "execution deadline" in agent._interrupt_msg
     assert resolver_kwargs["requested"] == "azure-foundry"
     assert resolver_kwargs["target_model"] == "gpt-5.6-luna"
+
+
+def test_managed_deadline_is_bounded_when_interrupt_and_close_block(monkeypatch):
+    """Third-party shutdown hooks cannot suppress a managed timeout result."""
+    import cron.scheduler as scheduler
+    import hermes_cli.runtime_provider as runtime_provider
+    import run_agent
+
+    interrupt_entered = threading.Event()
+    release_interrupt = threading.Event()
+    close_entered = threading.Event()
+    release_close = threading.Event()
+    stop_run = threading.Event()
+
+    class BlockingShutdownAgent(FakeAgent):
+        def __init__(self, **_kwargs):
+            super().__init__(idle_seconds=0.0, activity_desc="stream_delta")
+
+        def run_conversation(self, _prompt):
+            stop_run.wait(timeout=5.0)
+            return {"completed": False, "failed": True, "final_response": "stopped"}
+
+        def interrupt(self, _message):
+            interrupt_entered.set()
+            release_interrupt.wait(timeout=5.0)
+
+        def close(self):
+            close_entered.set()
+            release_close.wait(timeout=5.0)
+
+    monkeypatch.setattr(
+        scheduler, "_OXAIDE_MANAGED_EXECUTION_TIMEOUT_SECONDS", 0.02
+    )
+    monkeypatch.setenv("HERMES_OXAIDE_MODEL", "gpt-5.6-luna")
+    monkeypatch.setenv("HERMES_OXAIDE_PROVIDER", "azure-foundry")
+    monkeypatch.setattr(run_agent, "AIAgent", BlockingShutdownAgent)
+    monkeypatch.setattr(
+        runtime_provider,
+        "resolve_runtime_provider",
+        lambda **_kwargs: {
+            "provider": "azure-foundry",
+            "api_mode": "codex_responses",
+            "base_url": "https://resource.openai.azure.com/openai/v1",
+            "api_key": "test-key",
+            "source": "test",
+        },
+    )
+
+    deferred_agents = []
+    started = time.monotonic()
+    success, _document, _response, error = scheduler.run_job(
+        {
+            "id": "managed-blocked-shutdown",
+            "name": "Managed blocked shutdown",
+            "prompt": "Keep working actively",
+            "schedule": {"kind": "once", "run_at": "2099-01-01T00:00:00Z"},
+            "origin": {"type": "oxaide-scheduled-research-v1"},
+        },
+        defer_agent_teardown=deferred_agents,
+    )
+    elapsed = time.monotonic() - started
+
+    try:
+        assert success is False
+        assert error == "TimeoutError: managed_scheduled_research_timeout"
+        assert elapsed < 1.0
+        assert interrupt_entered.wait(timeout=1.0)
+        assert len(deferred_agents) == 1
+
+        teardown_started = time.monotonic()
+        scheduler._teardown_cron_agent_async(
+            deferred_agents[0], "managed-blocked-shutdown"
+        )
+        assert time.monotonic() - teardown_started < 0.5
+        assert close_entered.wait(timeout=1.0)
+    finally:
+        stop_run.set()
+        release_interrupt.set()
+        release_close.set()
 
 
 @pytest.mark.parametrize(

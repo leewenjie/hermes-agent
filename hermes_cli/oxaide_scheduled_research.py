@@ -440,8 +440,23 @@ def flush_occurrence_billing(db: SessionDB | None = None) -> None:
             db.close()
 
 
+def _run_cleanup_async(name: str, callback: Any) -> None:
+    """Run one post-terminal cleanup hook without blocking durable lifecycle."""
+    def _cleanup() -> None:
+        try:
+            callback()
+        except BaseException as exc:
+            logger.debug("Scheduled research cleanup %s failed: %s", name, exc)
+
+    threading.Thread(
+        target=_cleanup,
+        daemon=True,
+        name=f"scheduled-research-{name}"[:64],
+    ).start()
+
+
 def _run_occurrence(db: SessionDB, claim: dict[str, Any]) -> None:
-    from cron.scheduler import run_job
+    from cron.scheduler import run_job, _teardown_cron_agent_async
     from tui_gateway.oxaide_turns import OxaideTurnClient, OxaideTurnDenied
 
     payload = claim["payload"]
@@ -459,6 +474,7 @@ def _run_occurrence(db: SessionDB, claim: dict[str, Any]) -> None:
     result_artifact_id = None
     result_artifact_ref = None
     final_session_capture: list[str | None] = []
+    deferred_agents: list[Any] = []
     local_lease_stop = threading.Event()
 
     def renew_local_lease() -> None:
@@ -526,16 +542,24 @@ def _run_occurrence(db: SessionDB, claim: dict[str, Any]) -> None:
             "cancel_requested": lease_lost.is_set,
         }
         try:
-            run_job_parameters = inspect.signature(run_job).parameters.values()
+            run_job_parameters = tuple(inspect.signature(run_job).parameters.values())
             accepts_final_session_capture = any(
                 parameter.name == "final_session_id"
                 or parameter.kind == inspect.Parameter.VAR_KEYWORD
                 for parameter in run_job_parameters
             )
+            accepts_deferred_teardown = any(
+                parameter.name == "defer_agent_teardown"
+                or parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in run_job_parameters
+            )
         except (TypeError, ValueError):
             accepts_final_session_capture = False
+            accepts_deferred_teardown = False
         if accepts_final_session_capture:
             run_job_kwargs["final_session_id"] = final_session_capture
+        if accepts_deferred_teardown:
+            run_job_kwargs["defer_agent_teardown"] = deferred_agents
         try:
             success, document, final_response, run_error = run_job(
                 job, **run_job_kwargs
@@ -617,24 +641,36 @@ def _run_occurrence(db: SessionDB, claim: dict[str, Any]) -> None:
         if result_artifact_id is not None:
             delete_result(result_artifact_id)
         if turn is not None:
-            turn.release()
+            _run_cleanup_async(f"release-{occurrence_id[:8]}", turn.release)
+        for deferred_agent in deferred_agents:
+            _teardown_cron_agent_async(deferred_agent, occurrence_id)
         raise
     if not finished:
         if result_artifact_id is not None:
             delete_result(result_artifact_id)
         if turn is not None:
-            turn.release()
+            _run_cleanup_async(f"release-{occurrence_id[:8]}", turn.release)
         logger.error("Scheduled research local lease lost id=%s", occurrence_id)
+        for deferred_agent in deferred_agents:
+            _teardown_cron_agent_async(deferred_agent, occurrence_id)
         return
-    if terminal_status == "completed":
-        if client is not None:
-            client.stop_heartbeat()
-    else:
-        if result_artifact_id is not None:
-            delete_result(result_artifact_id)
-        if turn is not None:
-            turn.release()
-    flush_occurrence_events(db)
+    if terminal_status != "completed" and result_artifact_id is not None:
+        delete_result(result_artifact_id)
+    try:
+        flush_occurrence_events(db)
+    finally:
+        # Terminal state and its sequence-3 outbox event are committed before
+        # best-effort resource cleanup begins. Provider, billing, or tool hooks
+        # that wedge can no longer leave the authoritative occurrence at
+        # `running` or suppress the terminal publication attempt.
+        if terminal_status == "completed" and client is not None:
+            _run_cleanup_async(
+                f"heartbeat-{occurrence_id[:8]}", client.stop_heartbeat
+            )
+        elif turn is not None:
+            _run_cleanup_async(f"release-{occurrence_id[:8]}", turn.release)
+        for deferred_agent in deferred_agents:
+            _teardown_cron_agent_async(deferred_agent, occurrence_id)
 
 
 def _worker_loop() -> None:

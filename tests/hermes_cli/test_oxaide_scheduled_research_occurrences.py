@@ -590,13 +590,23 @@ def test_managed_occurrence_has_hard_deadline_and_terminal_callback(
     # Simulate sequence 2 surviving a process interruption. Re-emitting
     # `running` during recovery must not block the terminal sequence 3 event.
     managed.enqueue_occurrence_event(db, payload, 2, "running")
-    monkeypatch.setattr(managed, "flush_occurrence_events", lambda db=None: None)
+    delivered_statuses = []
+
+    def deliver_event(raw_body):
+        delivered_statuses.append(json.loads(raw_body)["status"])
+        return True, False, ""
+
+    monkeypatch.setattr(managed, "_deliver_event", deliver_event)
 
     class FakeTurn:
         def __init__(self):
             self.released = False
+            self.release_entered = threading.Event()
+            self.release_gate = threading.Event()
 
         def release(self):
+            self.release_entered.set()
+            self.release_gate.wait(timeout=5.0)
             self.released = True
 
         def complete(self, _metadata):
@@ -619,13 +629,27 @@ def test_managed_occurrence_has_hard_deadline_and_terminal_callback(
         "tui_gateway.oxaide_turns.OxaideTurnClient", FakeClient
     )
 
-    def timed_out_job(_job, *, cancel_requested):
+    close_entered = threading.Event()
+    release_close = threading.Event()
+
+    class BlockingCloseAgent:
+        def close(self):
+            close_entered.set()
+            release_close.wait(timeout=5.0)
+
+    def timed_out_job(_job, *, cancel_requested, defer_agent_teardown):
         assert cancel_requested() is False
+        defer_agent_teardown.append(BlockingCloseAgent())
         return False, "", "", "TimeoutError: managed_scheduled_research_timeout"
 
     monkeypatch.setattr("cron.scheduler.run_job", timed_out_job)
 
     managed._run_occurrence(db, claim)
+
+    # Teardown starts only after the terminal row/outbox transaction commits;
+    # even a close hook that now blocks cannot hold the occurrence at running.
+    assert close_entered.wait(timeout=1.0)
+    assert turn.release_entered.wait(timeout=1.0)
 
     row = db._conn.execute(
         "SELECT status, last_error_code FROM scheduled_research_occurrences "
@@ -643,7 +667,10 @@ def test_managed_occurrence_has_hard_deadline_and_terminal_callback(
         (3, "failed"),
     ]
     assert json.loads(events[-1]["raw_body"])["error_code"] == "execution_timeout"
-    assert turn.released is True
+    assert "failed" in delivered_statuses
+    assert turn.released is False
+    turn.release_gate.set()
+    release_close.set()
 
 
 def test_successful_occurrence_emits_result_and_final_session_evidence(

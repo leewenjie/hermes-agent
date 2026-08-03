@@ -3167,8 +3167,11 @@ def run_job(
         )
 
         if cancel_requested is not None and cancel_requested():
-            if hasattr(agent, "interrupt"):
-                agent.interrupt("Managed scheduled research authorization was revoked")
+            _request_agent_interrupt(
+                agent,
+                "Managed scheduled research authorization was revoked",
+                job_id,
+            )
             raise RuntimeError("managed_scheduled_research_cancelled")
         
         # Run the agent with an *inactivity*-based timeout: the job can run
@@ -3246,16 +3249,18 @@ def run_job(
 
         def _raise_if_cancelled() -> None:
             if cancel_requested is not None and cancel_requested():
-                if hasattr(agent, "interrupt"):
-                    agent.interrupt(
-                        "Managed scheduled research authorization was revoked"
-                    )
+                _request_agent_interrupt(
+                    agent,
+                    "Managed scheduled research authorization was revoked",
+                    job_id,
+                )
                 raise RuntimeError("managed_scheduled_research_cancelled")
             if _managed_deadline is not None and time.monotonic() >= _managed_deadline:
-                if hasattr(agent, "interrupt"):
-                    agent.interrupt(
-                        "Managed scheduled research exceeded its execution deadline"
-                    )
+                _request_agent_interrupt(
+                    agent,
+                    "Managed scheduled research exceeded its execution deadline",
+                    job_id,
+                )
                 raise TimeoutError("managed_scheduled_research_timeout")
 
         try:
@@ -3331,8 +3336,11 @@ def run_job(
                 _last_desc, _iter_n, _iter_max,
                 _cur_tool or "none",
             )
-            if hasattr(agent, "interrupt"):
-                agent.interrupt("Cron job timed out (inactivity)")
+            _request_agent_interrupt(
+                agent,
+                "Cron job timed out (inactivity)",
+                job_id,
+            )
             raise TimeoutError(
                 f"Cron job '{job_name}' idle for "
                 f"{int(_secs_ago)}s (limit {int(_cron_inactivity_limit)}s) "
@@ -3508,6 +3516,35 @@ def run_job(
             _teardown_cron_agent(agent, job_id)
 
 
+def _request_agent_interrupt(agent, message: str, job_id: str) -> None:
+    """Request cancellation without letting a broken agent block lifecycle state.
+
+    Provider clients and tool backends are third-party/resource-bound code. Their
+    interrupt hooks are best-effort and have occasionally blocked indefinitely.
+    Run the hook on a raw daemon thread so a managed deadline can be reported to
+    its durable owner immediately even when cancellation itself wedges.
+    """
+    interrupt = getattr(agent, "interrupt", None)
+    if not callable(interrupt):
+        return
+
+    def _interrupt() -> None:
+        try:
+            interrupt(message)
+        except BaseException as exc:
+            logger.debug(
+                "Job '%s': asynchronous agent interrupt failed: %s",
+                job_id,
+                exc,
+            )
+
+    threading.Thread(
+        target=_interrupt,
+        daemon=True,
+        name=f"cron-interrupt-{str(job_id)[:24]}",
+    ).start()
+
+
 def _teardown_cron_agent(agent, job_id: str) -> None:
     """Release an ephemeral cron agent's async resources.
 
@@ -3531,6 +3568,23 @@ def _teardown_cron_agent(agent, job_id: str) -> None:
         cleanup_stale_async_clients()
     except Exception as e:
         logger.debug("Job '%s': failed to reap stale auxiliary clients: %s", job_id, e)
+
+
+def _teardown_cron_agent_async(agent, job_id: str) -> None:
+    """Best-effort daemon teardown for callers with durable terminal state.
+
+    Callers must invoke this only after committing and attempting to publish
+    their terminal result. A blocked ``agent.close()`` then leaks at most a
+    daemon thread until process exit instead of suppressing lifecycle state.
+    """
+    if agent is None:
+        return
+    threading.Thread(
+        target=_teardown_cron_agent,
+        args=(agent, job_id),
+        daemon=True,
+        name=f"cron-teardown-{str(job_id)[:24]}",
+    ).start()
 
 
 def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -> bool:
