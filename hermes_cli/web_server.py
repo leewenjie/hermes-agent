@@ -11727,12 +11727,17 @@ def _hosted_schedule_control_sync(
         if action == "list":
             return request_control(user_id, "list")
         if action == "list_occurrences":
-            return request_control(
-                user_id,
-                action,
-                before_created_at=cursor.get("created_at") if cursor else None,
-                before_id=cursor.get("id") if cursor else None,
-            )
+            # Only include cursor fields when actually present. The control
+            # plane contract treats absent fields as "no pagination"; sending
+            # explicit nulls is rejected by the strict request schema.
+            fields: Dict[str, Any] = {}
+            if cursor:
+                created_at = cursor.get("created_at")
+                cursor_id = cursor.get("id")
+                if created_at and cursor_id:
+                    fields["before_created_at"] = created_at
+                    fields["before_id"] = cursor_id
+            return request_control(user_id, action, **fields)
         schedules = request_control(user_id, "list")
         current = next(
             (item for item in schedules if str(item.get("id") or "") == job_id),
