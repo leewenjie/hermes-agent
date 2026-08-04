@@ -122,6 +122,22 @@ describe('desktop filesystem facade', () => {
     expect(api).toHaveBeenCalledWith({ path: '/api/fs/default-cwd', profile: 'remote-docker' })
   })
 
+  it('uses an explicit owning profile for persisted artifact reads', async () => {
+    $connection.set({ mode: 'remote', profile: 'currently-selected' } as never)
+
+    await readDesktopFileText('/srv/quant/trades.csv', 'artifact-owner')
+    await readDesktopFileDataUrl('/srv/quant/equity.png', 'artifact-owner')
+
+    expect(api).toHaveBeenCalledWith({
+      path: '/api/fs/read-text?path=%2Fsrv%2Fquant%2Ftrades.csv',
+      profile: 'artifact-owner'
+    })
+    expect(api).toHaveBeenCalledWith({
+      path: '/api/fs/read-data-url?path=%2Fsrv%2Fquant%2Fequity.png',
+      profile: 'artifact-owner'
+    })
+  })
+
   it('routes file diffs through backend git in remote mode', async () => {
     $connection.set({ mode: 'remote' } as never)
 

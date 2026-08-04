@@ -20,12 +20,14 @@ import { Tip } from '@/components/ui/tooltip'
 import { getSessionMessages, listAllProfileSessions } from '@/hermes'
 import { type Translations, useI18n } from '@/i18n'
 import { ExternalLink, ExternalLinkIcon, hostPathLabel, urlSlugTitleLabel, useLinkTitle } from '@/lib/external-link'
-import { FileImage, FileText, FolderOpen, Link2, Loader2, RefreshCw } from '@/lib/icons'
+import { Download, Eye, FileImage, FileText, FolderOpen, Link2, Loader2, RefreshCw } from '@/lib/icons'
+import { normalizeOrLocalPreviewTarget } from '@/lib/local-preview'
 import { downloadGatewayMediaFile, isRemoteGateway } from '@/lib/media'
 import { normalize } from '@/lib/text'
 import { fmtDayTime } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import { notifyError } from '@/store/notifications'
+import { openArtifactPreviewTarget } from '@/store/preview'
 
 import { useRefreshHotkey } from '../hooks/use-refresh-hotkey'
 import { useRouteEnumParam } from '../hooks/use-route-enum-param'
@@ -38,7 +40,8 @@ import {
   type ArtifactFilter,
   artifactImageSrc,
   type ArtifactRecord,
-  collectArtifactsForSession
+  collectArtifactsForSession,
+  isArtifactPreviewable
 } from './artifact-utils'
 
 function formatArtifactTime(timestamp: number): string {
@@ -83,15 +86,16 @@ function paginationItems(page: number, pageCount: number): Array<number | 'ellip
 }
 
 type CellCtx = {
-  onOpen: (href: string) => void | Promise<void>
+  onOpen: (artifact: ArtifactRecord) => void | Promise<void>
   onOpenChat: (sessionId: string) => void
+  onPreview: (artifact: ArtifactRecord) => void | Promise<void>
 }
 
 interface ArtifactColumn {
   Cell: (props: { artifact: ArtifactRecord; ctx: CellCtx }) => React.ReactElement
   bodyClassName: string
   header: (filter: ArtifactFilter, a: Translations['artifacts']) => string
-  id: 'location' | 'primary' | 'session'
+  id: 'actions' | 'location' | 'primary' | 'session'
   width: (filter: ArtifactFilter) => string
 }
 
@@ -236,28 +240,65 @@ export function ArtifactsView({ setStatusbarItemGroup: _setStatusbarItemGroup, .
   }, [artifacts])
 
   const openArtifact = useCallback(
-    async (href: string) => {
+    async (artifact: ArtifactRecord) => {
       try {
-        // A gateway-local file resolves to file:// in remote mode (the file
-        // lives on the gateway, not this disk). Opening that locally fails —
-        // and an OAuth remote connection has no query token to build a download
-        // URL. Fetch the bytes over the authenticated fs bridge instead.
-        if (isRemoteGateway() && /^file:/i.test(href)) {
-          await downloadGatewayMediaFile(href)
+        if (artifact.kind === 'file' || (artifact.kind === 'image' && !/^(?:https?:|data:)/i.test(artifact.value))) {
+          const target = await normalizeOrLocalPreviewTarget(artifact.value, artifact.cwd, artifact.profile)
+
+          if (!target || target.kind !== 'file') {
+            throw new Error(a.openFailed)
+          }
+
+          if (isRemoteGateway()) {
+            await downloadGatewayMediaFile(target.path || target.source, artifact.profile)
+
+            return
+          }
+
+          if (window.hermesDesktop?.openExternal) {
+            await window.hermesDesktop.openExternal(target.url)
+          } else {
+            window.open(target.url, '_blank', 'noopener,noreferrer')
+          }
 
           return
         }
 
+        // A gateway-local file resolves to file:// in remote mode (the file
+        // lives on the gateway, not this disk). Opening that locally fails —
+        // and an OAuth remote connection has no query token to build a download
+        // URL. Fetch the bytes over the authenticated fs bridge instead.
         if (window.hermesDesktop?.openExternal) {
-          await window.hermesDesktop.openExternal(href)
+          await window.hermesDesktop.openExternal(artifact.href)
         } else {
-          window.open(href, '_blank', 'noopener,noreferrer')
+          window.open(artifact.href, '_blank', 'noopener,noreferrer')
         }
       } catch (err) {
         notifyError(err, a.openFailed)
       }
     },
     [a]
+  )
+
+  const previewArtifact = useCallback(
+    async (artifact: ArtifactRecord) => {
+      try {
+        if (!isArtifactPreviewable(artifact)) {
+          throw new Error(a.previewUnavailable)
+        }
+
+        const target = await normalizeOrLocalPreviewTarget(artifact.value, artifact.cwd, artifact.profile)
+
+        if (!target || !openArtifactPreviewTarget(target)) {
+          throw new Error(a.previewUnavailable)
+        }
+
+        navigate(sessionRoute(artifact.sessionId))
+      } catch (err) {
+        notifyError(err, a.previewFailed)
+      }
+    },
+    [a, navigate]
   )
 
   const markImageFailed = useCallback((id: string) => {
@@ -272,7 +313,8 @@ export function ArtifactsView({ setStatusbarItemGroup: _setStatusbarItemGroup, .
 
   const cellCtx: CellCtx = {
     onOpen: openArtifact,
-    onOpenChat: sessionId => navigate(sessionRoute(sessionId))
+    onOpenChat: sessionId => navigate(sessionRoute(sessionId)),
+    onPreview: previewArtifact
   }
 
   return (
@@ -337,7 +379,9 @@ export function ArtifactsView({ setStatusbarItemGroup: _setStatusbarItemGroup, .
                       failedImage={failedImageIds.has(artifact.id)}
                       key={artifact.id}
                       onImageError={markImageFailed}
+                      onOpen={openArtifact}
                       onOpenChat={sessionId => navigate(sessionRoute(sessionId))}
+                      onPreview={previewArtifact}
                     />
                   ))}
                 </div>
@@ -425,10 +469,12 @@ interface ArtifactImageCardProps {
   artifact: ArtifactRecord
   failedImage: boolean
   onImageError: (id: string) => void
+  onOpen: (artifact: ArtifactRecord) => void | Promise<void>
   onOpenChat: (sessionId: string) => void
+  onPreview: (artifact: ArtifactRecord) => void | Promise<void>
 }
 
-function ArtifactImageCard({ artifact, failedImage, onImageError, onOpenChat }: ArtifactImageCardProps) {
+function ArtifactImageCard({ artifact, failedImage, onImageError, onOpen, onOpenChat, onPreview }: ArtifactImageCardProps) {
   const { t } = useI18n()
   const a = t.artifacts
   const kindLabel = artifact.kind === 'image' ? a.kindImage : artifact.kind === 'file' ? a.kindFile : a.kindLink
@@ -438,7 +484,7 @@ function ArtifactImageCard({ artifact, failedImage, onImageError, onOpenChat }: 
     let active = true
 
     setSrc('')
-    void artifactImageSrc(artifact.value, artifact.href)
+    void artifactImageSrc(artifact.value, artifact.href, artifact.cwd, artifact.profile)
       .then(nextSrc => {
         if (active) {
           setSrc(nextSrc)
@@ -453,7 +499,7 @@ function ArtifactImageCard({ artifact, failedImage, onImageError, onOpenChat }: 
     return () => {
       active = false
     }
-  }, [artifact.href, artifact.id, artifact.value, onImageError])
+  }, [artifact.cwd, artifact.href, artifact.id, artifact.profile, artifact.value, onImageError])
 
   return (
     <article className="group/artifact overflow-hidden rounded-lg border border-(--ui-stroke-tertiary) bg-(--ui-chat-bubble-background)">
@@ -493,9 +539,27 @@ function ArtifactImageCard({ artifact, failedImage, onImageError, onOpenChat }: 
           {artifact.sessionTitle} · {formatArtifactTime(artifact.timestamp)}
         </div>
 
-        <div className="flex flex-wrap gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5">
+          {isArtifactPreviewable(artifact) && (
+            <Button onClick={() => void onPreview(artifact)} size="xs" type="button" variant="secondary">
+              <Eye />
+              {a.preview}
+            </Button>
+          )}
+          <Button onClick={() => void onOpen(artifact)} size="xs" type="button" variant="secondary">
+            <Download />
+            {a.openOrDownload}
+          </Button>
+          <CopyButton
+            appearance="button"
+            buttonSize="xs"
+            buttonVariant="secondary"
+            label={a.copyPath}
+            text={artifact.value}
+            title={a.copyPath}
+          />
           <Button onClick={() => onOpenChat(artifact.sessionId)} size="xs" type="button" variant="textStrong">
-            <FolderOpen className="size-3" />
+            <FolderOpen />
             {a.chat}
           </Button>
         </div>
@@ -543,6 +607,7 @@ function ArtifactCellAction({
 
 function PrimaryCell({ artifact, ctx }: { artifact: ArtifactRecord; ctx: CellCtx }) {
   const isLink = artifact.kind === 'link'
+  const canPreview = isArtifactPreviewable(artifact)
   const Icon = isLink ? Link2 : FileText
   const fetchedTitle = useLinkTitle(isLink ? artifact.href : null)
   const label = isLink ? fetchedTitle || urlSlugTitleLabel(artifact.href) : artifact.label
@@ -550,7 +615,7 @@ function PrimaryCell({ artifact, ctx }: { artifact: ArtifactRecord; ctx: CellCtx
   return (
     <ArtifactCellAction
       href={isLink ? artifact.href : undefined}
-      onClick={isLink ? undefined : () => void ctx.onOpen(artifact.href)}
+      onClick={isLink || !canPreview ? () => void ctx.onOpen(artifact) : () => void ctx.onPreview(artifact)}
       title={label}
     >
       <span className="mt-0.5 grid size-6 shrink-0 place-items-center self-start rounded-md bg-(--ui-bg-tertiary) text-(--ui-text-tertiary)">
@@ -561,6 +626,39 @@ function PrimaryCell({ artifact, ctx }: { artifact: ArtifactRecord; ctx: CellCtx
         {isLink && <ExternalLinkIcon />}
       </span>
     </ArtifactCellAction>
+  )
+}
+
+function ActionsCell({ artifact, ctx }: { artifact: ArtifactRecord; ctx: CellCtx }) {
+  const { t } = useI18n()
+
+  return (
+    <div className="flex items-center justify-end gap-1 px-2.5 py-1.5">
+      {isArtifactPreviewable(artifact) && (
+        <Tip label={t.artifacts.preview}>
+          <Button
+            aria-label={t.artifacts.preview}
+            onClick={() => void ctx.onPreview(artifact)}
+            size="icon-xs"
+            type="button"
+            variant="ghost"
+          >
+            <Eye />
+          </Button>
+        </Tip>
+      )}
+      <Tip label={t.artifacts.openOrDownload}>
+        <Button
+          aria-label={t.artifacts.openOrDownload}
+          onClick={() => void ctx.onOpen(artifact)}
+          size="icon-xs"
+          type="button"
+          variant="ghost"
+        >
+          <Download />
+        </Button>
+      </Tip>
+    </div>
   )
 }
 
@@ -615,7 +713,7 @@ const ARTIFACT_COLUMNS: readonly ArtifactColumn[] = [
     header: (filter, a) =>
       filter === 'link' ? a.colTitleLink : filter === 'file' ? a.colTitleFile : a.colTitleDefault,
     id: 'primary',
-    width: filter => (filter === 'link' ? 'w-[50%]' : 'w-[35%]')
+    width: filter => (filter === 'link' ? 'w-[44%]' : 'w-[32%]')
   },
   {
     Cell: LocationCell,
@@ -623,7 +721,7 @@ const ARTIFACT_COLUMNS: readonly ArtifactColumn[] = [
     header: (filter, a) =>
       filter === 'link' ? a.colLocationLink : filter === 'file' ? a.colLocationFile : a.colLocationDefault,
     id: 'location',
-    width: filter => (filter === 'link' ? 'w-[30%]' : 'w-[41%]')
+    width: filter => (filter === 'link' ? 'w-[28%]' : 'w-[36%]')
   },
   {
     Cell: SessionCell,
@@ -631,6 +729,13 @@ const ARTIFACT_COLUMNS: readonly ArtifactColumn[] = [
     header: (_filter, a) => a.colSession,
     id: 'session',
     width: filter => (filter === 'link' ? 'w-[20%]' : 'w-[24%]')
+  },
+  {
+    Cell: ActionsCell,
+    bodyClassName: 'p-0',
+    header: (_filter, a) => a.colActions,
+    id: 'actions',
+    width: _filter => 'w-[8%]'
   }
 ]
 

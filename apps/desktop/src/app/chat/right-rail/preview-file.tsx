@@ -216,9 +216,9 @@ function looksBinaryBytes(bytes: Uint8Array) {
   return suspicious / Math.min(bytes.length, 4096) > 0.12
 }
 
-async function readTextPreview(filePath: string) {
+async function readTextPreview(filePath: string, profile?: string) {
   try {
-    return await readDesktopFileText(filePath)
+    return await readDesktopFileText(filePath, profile)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
 
@@ -628,7 +628,7 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
         if (isImage) {
           // Prefer bytes the caller already handed us (a pasted/dropped
           // screenshot) over re-reading a path that may be transient/unreadable.
-          const dataUrl = target.dataUrl || (await readDesktopFileDataUrl(filePath))
+          const dataUrl = target.dataUrl || (await readDesktopFileDataUrl(filePath, target.profile))
 
           if (active) {
             setState({ dataUrl, loading: false })
@@ -637,7 +637,7 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
           return
         }
 
-        const result = await readTextPreview(filePath)
+        const result = await readTextPreview(filePath, target.profile)
 
         if (active) {
           const shouldBlock = !forcePreview && (result.binary || (result.byteSize ?? 0) > TEXT_PREVIEW_MAX_BYTES)
@@ -656,8 +656,8 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
           // Empty (clean file / not a repo / remote) just hides the option.
           if (!shouldBlock) {
             try {
-              const root = await desktopGitRoot(filePath)
-              const diff = root ? await desktopFileDiff(root, filePath) : ''
+              const root = await desktopGitRoot(filePath, target.profile)
+              const diff = root ? await desktopFileDiff(root, filePath, target.profile) : ''
 
               if (active && diff.trim()) {
                 setState(prev => (prev.text === result.text ? { ...prev, diff } : prev))
@@ -682,7 +682,18 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
     return () => {
       active = false
     }
-  }, [blockedByTarget, filePath, forcePreview, isImage, isText, reloadKey, selfReload, target.dataUrl, target.language])
+  }, [
+    blockedByTarget,
+    filePath,
+    forcePreview,
+    isImage,
+    isText,
+    reloadKey,
+    selfReload,
+    target.dataUrl,
+    target.language,
+    target.profile
+  ])
 
   // Editing is only offered for whole, readable text — never images, binaries,
   // or files we only loaded the first 512 KB of (saving would drop the tail).
@@ -797,7 +808,7 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
         }
       }
 
-      await writeDesktopFileText(filePath, draftRef.current)
+      await writeDesktopFileText(filePath, draftRef.current, target.profile)
       baselineRef.current = draftRef.current
       setDirty(false)
       setConflict(false)

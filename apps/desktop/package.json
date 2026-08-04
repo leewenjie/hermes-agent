@@ -5,6 +5,7 @@
   "version": "0.17.0",
   "description": "Native desktop shell for Hermes Agent.",
   "author": "Nous Research",
+  "homepage": "https://hermes-agent.nousresearch.com/",
   "type": "module",
   "main": "dist/electron-main.mjs",
   "engines": {

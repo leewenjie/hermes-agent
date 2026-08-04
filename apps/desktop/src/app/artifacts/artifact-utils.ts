@@ -1,4 +1,5 @@
 import { readDesktopFileDataUrl } from '@/lib/desktop-fs'
+import { localPreviewTarget } from '@/lib/local-preview'
 import { filePathFromMediaPath, isRemoteGateway, mediaExternalUrl } from '@/lib/media'
 import type { SessionInfo, SessionMessage } from '@/types/hermes'
 
@@ -7,11 +8,13 @@ export type ArtifactFilter = 'all' | ArtifactKind
 export const ARTIFACT_FILTERS: readonly ArtifactFilter[] = ['all', 'image', 'file', 'link']
 
 export interface ArtifactRecord {
+  cwd?: null | string
   id: string
   kind: ArtifactKind
   value: string
   href: string
   label: string
+  profile?: string
   sessionId: string
   sessionTitle: string
   timestamp: number
@@ -22,8 +25,12 @@ const MARKDOWN_LINK_RE = /\[([^\]]+)\]\(([^)\s]+)\)/g
 const URL_RE = /https?:\/\/[^\s<>"')]+/g
 const PATH_RE = /(^|[\s("'`])((?:\/|~\/|\.\.?\/)[^\s"'`<>]+(?:\.[a-z0-9]{1,8})?)/gi
 const IMAGE_EXT_RE = /\.(?:png|jpe?g|gif|webp|svg|bmp)(?:\?.*)?$/i
-const FILE_EXT_RE = /\.(?:png|jpe?g|gif|webp|svg|bmp|pdf|txt|json|md|csv|zip|tar|gz|mp3|wav|mp4|mov)(?:\?.*)?$/i
+
+const FILE_EXT_RE =
+  /\.(?:png|jpe?g|gif|webp|svg|bmp|pdf|txt|json|jsonl|md|html?|csv|tsv|parquet|arrow|feather|xlsx?|ods|sqlite3?|db|zip|tar|gz|mp3|wav|mp4|mov)(?:\?.*)?$/i
+
 const KEY_HINT_RE = /(path|file|url|image|artifact|output|download|result|target)/i
+const PREVIEWABLE_FILE_EXT_RE = /\.(?:bmp|gif|jpe?g|png|svg|webp|txt|log|json|jsonl|md|html?|csv|tsv|xml|ya?ml|toml|ini|conf|css|jsx?|mjs|tsx?|py|rb|rs|go|java|c|cpp|h|hpp|sh|zsh|sql|graphql)(?:\?.*)?$/i
 
 function artifactSessionTitle(session: SessionInfo): string {
   return session.title?.trim() || session.preview?.trim() || 'Untitled session'
@@ -100,16 +107,31 @@ function artifactHref(value: string): string {
   return value
 }
 
-export async function artifactImageSrc(value: string, href = artifactHref(value)): Promise<string> {
+export function isArtifactPreviewable(artifact: ArtifactRecord): boolean {
+  if (artifact.kind === 'image') {
+    return !/^(?:https?:|data:)/i.test(artifact.value)
+  }
+
+  return artifact.kind === 'file' && PREVIEWABLE_FILE_EXT_RE.test(artifact.value)
+}
+
+export async function artifactImageSrc(
+  value: string,
+  href = artifactHref(value),
+  cwd?: string | null,
+  profile?: string
+): Promise<string> {
   if (/^(?:https?|data):/i.test(value)) {
     return href
   }
 
   if (typeof window !== 'undefined' && window.hermesDesktop && isRemoteGateway()) {
-    return readDesktopFileDataUrl(filePathFromMediaPath(value))
+    const target = localPreviewTarget(filePathFromMediaPath(value), cwd)
+
+    return readDesktopFileDataUrl(target?.path || filePathFromMediaPath(value), profile)
   }
 
-  return href
+  return localPreviewTarget(value, cwd)?.url || href
 }
 
 function artifactLabel(value: string): string {
@@ -266,11 +288,13 @@ export function collectArtifactsForSession(session: SessionInfo, messages: Sessi
       }
 
       found.set(key, {
+        cwd: session.cwd,
         id: key,
         kind: artifactKind(value),
         value,
         href: artifactHref(value),
         label: artifactLabel(value),
+        profile: session.profile,
         sessionId: session.id,
         sessionTitle: title,
         timestamp: message.timestamp || session.last_active || session.started_at || Date.now()

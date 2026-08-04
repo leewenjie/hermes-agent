@@ -1232,6 +1232,8 @@ export interface Translations {
     noArtifactsDesc: string
     failedLoad: string
     openFailed: string
+    previewFailed: string
+    previewUnavailable: string
     itemsImage: string
     itemsLink: string
     itemsFile: string
@@ -1246,10 +1248,13 @@ export interface Translations {
     colLocationFile: string
     colLocationDefault: string
     colSession: string
+    colActions: string
     kindImage: string
     kindFile: string
     kindLink: string
     chat: string
+    preview: string
+    openOrDownload: string
     copyUrl: string
     copyPath: string
   }

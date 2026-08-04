@@ -28,6 +28,9 @@ export interface PreviewTarget {
   mimeType?: string
   path?: string
   previewKind?: 'binary' | 'html' | 'image' | 'text'
+  /** Backend profile that owns this file. File reads must not depend on the
+   * currently selected chat because artifact tabs persist across switches. */
+  profile?: string
   renderMode?: 'preview' | 'source'
   source: string
   url: string
@@ -113,6 +116,7 @@ function isSamePreviewTarget(a: PreviewTarget | null, b: PreviewTarget | null): 
   return (
     a.kind === b.kind &&
     a.label === b.label &&
+    a.profile === b.profile &&
     a.renderMode === b.renderMode &&
     a.source === b.source &&
     a.url === b.url
@@ -141,7 +145,7 @@ export function setPreviewTarget(target: PreviewTarget | null) {
 }
 
 export function filePreviewTabId(target: PreviewTarget): `file:${string}` {
-  return `file:${target.url}`
+  return `file:${target.profile || ''}:${target.url}`
 }
 
 function openFilePreviewTarget(target: PreviewTarget) {
@@ -153,6 +157,18 @@ function openFilePreviewTarget(target: PreviewTarget) {
   $filePreviewTabs.set(index === -1 ? [...current, tab] : current.map((item, i) => (i === index ? tab : item)))
   setPaneOpen(PREVIEW_PANE_ID, true)
   selectRightRailTab(id)
+}
+
+/** Opens a generated artifact in a persistent file tab. HTML artifacts render
+ * as reports; text/data artifacts retain the preview target's safe source view. */
+export function openArtifactPreviewTarget(target: PreviewTarget): boolean {
+  if (target.kind !== 'file') {
+    return false
+  }
+
+  openFilePreviewTarget(previewTargetForSource(target, 'tool-result'))
+
+  return true
 }
 
 // Manual/file-browser opens are "peeking at a file" → source view in the file

@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">Night Quantitative Trading Dashboard</title>
+  <desc id="desc">A dark navy quantitative trading dashboard with cyan and amber candlestick charts, equity curve, and risk metrics.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#071426"/><stop offset="1" stop-color="#0b1d35"/></linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#102641"/><stop offset="1" stop-color="#0b1d34"/></linearGradient>
+    <linearGradient id="cyanFill" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#28e1e8" stop-opacity=".28"/><stop offset="1" stop-color="#28e1e8" stop-opacity="0"/></linearGradient>
+    <filter id="glowCyan"><feGaussianBlur stdDeviation="5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <filter id="glowAmber"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <pattern id="grid" width="56" height="42" patternUnits="userSpaceOnUse"><path d="M56 0H0V42" fill="none" stroke="#1a3a58" stroke-width="1" opacity=".52"/></pattern>
+    <style>
+      .label{font:500 14px Inter,Arial,sans-serif;letter-spacing:1.4px;fill:#7595b5}.value{font:600 27px Inter,Arial,sans-serif;fill:#e5f5ff}.small{font:500 12px Inter,Arial,sans-serif;fill:#7393b3}.axis{font:500 12px Inter,Arial,sans-serif;fill:#61809e}.mono{font:500 13px 'JetBrains Mono',Consolas,monospace;fill:#a7c6de}.metric{font:600 19px Inter,Arial,sans-serif;fill:#ddf5ff}.muted{fill:#80a0bd}.cyan{fill:#35e5ed}.amber{fill:#ffbd59}
+    </style>
+  </defs>
+  <rect width="1600" height="900" fill="url(#bg)"/>
+  <circle cx="1320" cy="-80" r="390" fill="#0c3458" opacity=".25"/>
+  <circle cx="1500" cy="780" r="330" fill="#063e52" opacity=".14"/>
+
+  <!-- Header -->
+  <rect x="38" y="28" width="1524" height="92" rx="16" fill="#0b1b31" stroke="#204363"/>
+  <rect x="61" y="51" width="44" height="44" rx="12" fill="#1bd8df" opacity=".15" stroke="#2ce3eb"/>
+  <path d="M72 80l8-11 7 7 11-17" fill="none" stroke="#36edf1" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="125" y="69" font-family="Inter,Arial,sans-serif" font-size="22" font-weight="600" fill="#e7f8ff">NOVA / QUANT</text>
+  <text x="125" y="91" class="small">SYSTEMATIC STRATEGIES · LIVE RESEARCH TERMINAL</text>
+  <circle cx="1260" cy="73" r="6" fill="#35e5ed" filter="url(#glowCyan)"/><text x="1277" y="79" class="mono">MARKET OPEN</text>
+  <text x="1433" y="79" class="mono">21:47:08 UTC</text>
+
+  <!-- KPI row -->
+  <g>
+    <rect x="38" y="144" width="242" height="112" rx="14" fill="url(#panel)" stroke="#1c3c5b"/><text x="60" y="173" class="label">PORTFOLIO VALUE</text><text x="60" y="213" class="value">$4,827,391</text><text x="60" y="237" class="cyan mono">+12.84%  YTD</text>
+    <rect x="296" y="144" width="242" height="112" rx="14" fill="url(#panel)" stroke="#1c3c5b"/><text x="318" y="173" class="label">TODAY'S P&amp;L</text><text x="318" y="213" class="value">+$38,642</text><text x="318" y="237" class="cyan mono">+0.81%  ▲ 4.2σ</text>
+    <rect x="554" y="144" width="242" height="112" rx="14" fill="url(#panel)" stroke="#1c3c5b"/><text x="576" y="173" class="label">SHARPE RATIO</text><text x="576" y="213" class="value">2.41</text><text x="576" y="237" class="amber mono">TARGET  &gt; 1.80</text>
+    <rect x="812" y="144" width="242" height="112" rx="14" fill="url(#panel)" stroke="#1c3c5b"/><text x="834" y="173" class="label">MAX DRAWDOWN</text><text x="834" y="213" class="value">−6.18%</text><text x="834" y="237" class="cyan mono">WITHIN LIMIT</text>
+    <rect x="1070" y="144" width="492" height="112" rx="14" fill="url(#panel)" stroke="#1c3c5b"/><text x="1094" y="173" class="label">MODEL STATUS</text><circle cx="1098" cy="207" r="7" fill="#35e5ed" filter="url(#glowCyan)"/><text x="1117" y="214" class="metric">ORION-7  /  EXECUTING</text><text x="1094" y="239" class="mono">alpha confidence  87.3%     latency  3.8ms</text>
+  </g>
+
+  <!-- Main chart panel -->
+  <rect x="38" y="280" width="1006" height="584" rx="16" fill="url(#panel)" stroke="#1c3c5b"/>
+  <text x="68" y="319" class="metric">ES FUTURES · 5 MIN</text><text x="68" y="344" class="small">NQH6  ·  NASDAQ 100 E-MINI</text>
+  <text x="740" y="320" class="mono">18,642.25</text><text x="870" y="320" class="cyan mono">+0.64%</text>
+  <rect x="68" y="367" width="932" height="336" fill="url(#grid)" opacity=".9"/>
+  <!-- chart axis labels -->
+  <text x="953" y="391" class="axis">18,700</text><text x="953" y="458" class="axis">18,650</text><text x="953" y="525" class="axis">18,600</text><text x="953" y="592" class="axis">18,550</text><text x="953" y="659" class="axis">18,500</text>
+  <!-- candlesticks -->
+  <g stroke-linecap="round">
+    <g stroke="#28e1e8" fill="#28e1e8"><path d="M106 548V585M106 557h14v17h-14z"/><path d="M142 524V566M142 538h14v20h-14z"/><path d="M178 552V601M178 561h14v26h-14z"/><path d="M214 518V567M214 529h14v23h-14z"/><path d="M250 493V549M250 505h14v28h-14z"/><path d="M286 472V526M286 483h14v23h-14z"/><path d="M322 455V504M322 464h14v23h-14z"/><path d="M358 429V486M358 441h14v27h-14z"/><path d="M394 448V501M394 456h14v25h-14z"/><path d="M430 414V468M430 425h14v26h-14z"/><path d="M466 390V447M466 400h14v28h-14z"/><path d="M502 402V463M502 414h14v29h-14z"/><path d="M538 376V431M538 387h14v25h-14z"/><path d="M574 363V419M574 375h14v25h-14z"/><path d="M610 381V438M610 391h14v29h-14z"/><path d="M646 349V408M646 360h14v27h-14z"/><path d="M682 335V393M682 346h14v27h-14z"/><path d="M718 352V413M718 365h14v27h-14z"/><path d="M754 325V382M754 336h14v27h-14z"/><path d="M790 311V370M790 322h14v26h-14z"/><path d="M826 328V382M826 337h14v25h-14z"/><path d="M862 303V354M862 312h14v25h-14z"/></g>
+    <g stroke="#ffb84f" fill="#ffb84f"><path d="M898 292V348M898 300h14v29h-14z"/><path d="M934 315V363M934 322h14v24h-14z"/></g>
+  </g>
+  <!-- cyan trend -->
+  <path d="M76 615 C160 580 205 592 260 541 S355 479 412 454 S500 430 550 399 S640 373 690 360 S780 336 835 329 S916 305 976 307" fill="none" stroke="#32e6ec" stroke-width="2" opacity=".55"/>
+  <!-- volume -->
+  <text x="68" y="728" class="label">VOLUME</text><g fill="#1c8298" opacity=".6"><rect x="110" y="778" width="17" height="32"/><rect x="146" y="766" width="17" height="44"/><rect x="182" y="787" width="17" height="23"/><rect x="218" y="751" width="17" height="59"/><rect x="254" y="738" width="17" height="72"/><rect x="290" y="765" width="17" height="45"/><rect x="326" y="720" width="17" height="90"/><rect x="362" y="754" width="17" height="56"/><rect x="398" y="732" width="17" height="78"/><rect x="434" y="770" width="17" height="40"/><rect x="470" y="712" width="17" height="98"/><rect x="506" y="746" width="17" height="64"/><rect x="542" y="700" width="17" height="110"/><rect x="578" y="735" width="17" height="75"/><rect x="614" y="718" width="17" height="92"/><rect x="650" y="692" width="17" height="118"/><rect x="686" y="730" width="17" height="80"/><rect x="722" y="708" width="17" height="102"/><rect x="758" y="680" width="17" height="130"/><rect x="794" y="716" width="17" height="94"/><rect x="830" y="673" width="17" height="137"/><rect x="866" y="700" width="17" height="110"/><rect x="902" y="682" width="17" height="128"/><rect x="938" y="720" width="17" height="90"/></g>
+  <text x="92" y="845" class="axis">19:00</text><text x="300" y="845" class="axis">20:00</text><text x="510" y="845" class="axis">21:00</text><text x="720" y="845" class="axis">22:00</text><text x="916" y="845" class="axis">23:00</text>
+
+  <!-- Right panels -->
+  <rect x="1068" y="280" width="494" height="282" rx="16" fill="url(#panel)" stroke="#1c3c5b"/>
+  <text x="1098" y="319" class="metric">EQUITY CURVE</text><text x="1098" y="344" class="small">CUMULATIVE STRATEGY PERFORMANCE</text><text x="1438" y="320" class="cyan mono">+28.7%</text>
+  <rect x="1098" y="368" width="434" height="142" fill="url(#grid)"/>
+  <path d="M1104 482 C1140 478 1154 489 1182 460 S1225 468 1248 443 S1282 451 1308 421 S1350 439 1377 402 S1418 419 1440 389 S1484 398 1524 377 L1524 510 L1104 510Z" fill="url(#cyanFill)"/>
+  <path d="M1104 482 C1140 478 1154 489 1182 460 S1225 468 1248 443 S1282 451 1308 421 S1350 439 1377 402 S1418 419 1440 389 S1484 398 1524 377" fill="none" stroke="#39e8ee" stroke-width="3" filter="url(#glowCyan)"/>
+  <line x1="1098" y1="510" x2="1532" y2="510" stroke="#2b4b68"/><text x="1100" y="536" class="axis">JAN</text><text x="1300" y="536" class="axis">JUN</text><text x="1500" y="536" class="axis">DEC</text>
+
+  <rect x="1068" y="586" width="494" height="278" rx="16" fill="url(#panel)" stroke="#1c3c5b"/>
+  <text x="1098" y="625" class="metric">RISK MONITOR</text><text x="1098" y="650" class="small">REAL-TIME EXPOSURE &amp; LIMITS</text>
+  <text x="1098" y="692" class="mono">NET EXPOSURE</text><text x="1450" y="692" class="metric">42.6%</text><rect x="1098" y="704" width="434" height="8" rx="4" fill="#173650"/><rect x="1098" y="704" width="185" height="8" rx="4" fill="#36e5eb"/>
+  <text x="1098" y="744" class="mono">1D VAR  /  95%</text><text x="1450" y="744" class="metric amber">$72.4K</text><rect x="1098" y="756" width="434" height="8" rx="4" fill="#173650"/><rect x="1098" y="756" width="116" height="8" rx="4" fill="#ffb84f" filter="url(#glowAmber)"/>
+  <text x="1098" y="796" class="mono">VOLATILITY</text><text x="1450" y="796" class="metric">14.8%</text><rect x="1098" y="808" width="434" height="8" rx="4" fill="#173650"/><rect x="1098" y="808" width="163" height="8" rx="4" fill="#36e5eb"/>
+  <text x="1098" y="845" class="small">LAST REBALANCE  ·  21:45:00 UTC</text>
+</svg>

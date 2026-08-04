@@ -14,6 +14,7 @@ import {
   closeActiveRightRailTab,
   dismissPreviewTarget,
   getSessionPreviewRecord,
+  openArtifactPreviewTarget,
   type PreviewTarget,
   progressPreviewServerRestart,
   setCurrentSessionPreviewTarget
@@ -134,5 +135,33 @@ describe('preview store', () => {
     expect($filePreviewTarget.get()).toBeNull()
     expect($rightRailActiveTabId.get()).toBe(RIGHT_RAIL_PREVIEW_TAB_ID)
     expect($previewTarget.get()).toEqual(withRenderMode(live, 'preview'))
+  })
+
+  it('keeps multiple generated artifacts open as rendered report and data tabs', () => {
+    const report = previewTarget('/work/backtest/report.html')
+    const trades = { ...previewTarget('/work/backtest/trades.csv'), language: 'csv', previewKind: 'text' as const }
+
+    expect(openArtifactPreviewTarget(report)).toBe(true)
+    expect(openArtifactPreviewTarget(trades)).toBe(true)
+
+    expect($filePreviewTabs.get().map(tab => tab.target)).toEqual([
+      withRenderMode(report, 'preview'),
+      trades
+    ])
+    expect($filePreviewTarget.get()).toEqual(trades)
+    expect($paneOpen(PREVIEW_PANE_ID).get()).toBe(true)
+  })
+
+  it('keeps identical remote paths separate when profiles differ', () => {
+    const path = '/workspace/backtest/report.html'
+    const quant = { ...previewTarget(path), profile: 'quant' }
+    const research = { ...previewTarget(path), profile: 'research' }
+
+    openArtifactPreviewTarget(quant)
+    openArtifactPreviewTarget(research)
+
+    expect($filePreviewTabs.get()).toHaveLength(2)
+    expect($filePreviewTabs.get().map(tab => tab.target.profile)).toEqual(['quant', 'research'])
+    expect($filePreviewTarget.get()?.profile).toBe('research')
   })
 })

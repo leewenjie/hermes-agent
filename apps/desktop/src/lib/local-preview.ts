@@ -108,13 +108,13 @@ export function localPreviewTarget(rawTarget: string, cwd?: string | null): Prev
   }
 }
 
-async function enrichPreviewTarget(target: PreviewTarget | null): Promise<PreviewTarget | null> {
+async function enrichPreviewTarget(target: PreviewTarget | null, profile?: string): Promise<PreviewTarget | null> {
   if (!isDesktopFsRemoteMode() || !target || target.kind !== 'file' || target.previewKind === 'image') {
-    return target
+    return target && profile ? { ...target, profile } : target
   }
 
   try {
-    const result = await readDesktopFileText(target.path || target.source)
+    const result = await readDesktopFileText(target.path || target.source, profile)
 
     return {
       ...target,
@@ -122,27 +122,29 @@ async function enrichPreviewTarget(target: PreviewTarget | null): Promise<Previe
       byteSize: result.byteSize,
       language: result.language || target.language,
       large: (result.byteSize ?? 0) > 512 * 1024,
-      mimeType: result.mimeType
+      mimeType: result.mimeType,
+      profile
     }
   } catch {
-    return target
+    return profile ? { ...target, profile } : target
   }
 }
 
 export async function normalizeOrLocalPreviewTarget(
   rawTarget: string,
-  cwd?: string | null
+  cwd?: string | null,
+  profile?: string
 ): Promise<PreviewTarget | null> {
   try {
     const normalized = await window.hermesDesktop?.normalizePreviewTarget?.(rawTarget, cwd || undefined)
 
     if (normalized) {
-      return enrichPreviewTarget(normalized)
+      return enrichPreviewTarget(normalized, profile)
     }
   } catch {
     // Running Electron may still have the old HTML-only preview IPC. Fall
     // through to renderer-side local classification so text/images still open.
   }
 
-  return enrichPreviewTarget(localPreviewTarget(rawTarget, cwd))
+  return enrichPreviewTarget(localPreviewTarget(rawTarget, cwd), profile)
 }
