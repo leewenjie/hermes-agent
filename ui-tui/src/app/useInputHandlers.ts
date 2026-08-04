@@ -4,6 +4,7 @@ import { useEffect, useRef } from 'react'
 
 import { DASHBOARD_TUI_MODE } from '../config/env.js'
 import { TYPING_IDLE_MS } from '../config/timing.js'
+import { nextDetailsMode } from '../domain/details.js'
 import type {
   ApprovalRespondResponse,
   ConfigSetResponse,
@@ -26,7 +27,7 @@ import type {
 import { $isBlocked, $overlayState, patchOverlayState } from './overlayStore.js'
 import { turnController } from './turnController.js'
 import { patchTurnState } from './turnStore.js'
-import { getUiState } from './uiStore.js'
+import { getUiState, patchUiState } from './uiStore.js'
 
 const isCtrl = (key: { ctrl: boolean }, ch: string, target: string) => key.ctrl && ch.toLowerCase() === target
 const DASHBOARD_NEW_SESSION_MESSAGE = 'starting a fresh dashboard chat...'
@@ -560,6 +561,19 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
           type: 'dashboard.new_session_requested'
         })
       })
+    }
+
+    // Ctrl+Shift+D cycles research details visibility (hidden → collapsed →
+    // expanded) so users can watch reasoning/tool activity live or tuck it
+    // away without hunting for /details. Must precede the Ctrl+D exit check
+    // below (isAction matches Ctrl regardless of Shift).
+    if (key.ctrl && key.shift && ch.toLowerCase() === 'd') {
+      const current = getUiState().detailsMode
+      const next = nextDetailsMode(current)
+      patchUiState({ detailsMode: next, detailsModeCommandOverride: true })
+      actions.sys(`research details: ${next}`)
+
+      return
     }
 
     if (isAction(key, ch, 'd')) {

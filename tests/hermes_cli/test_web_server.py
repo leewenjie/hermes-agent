@@ -7371,6 +7371,69 @@ class TestPtyWebSocket:
                 pass
         assert captured.get("resume") == "sess-42"
 
+    def test_pty_ws_resume_latest_resolves_newest_session_for_trusted_context(self, monkeypatch):
+        """?resume=latest — the Oxaide bridge's explicit continue-intent marker
+        — resolves to the newest durable research session for the trusted user,
+        never the literal ``latest`` string."""
+        captured: dict = {}
+
+        def fake_resolve(resume=None, sidecar_url=None, profile=None, active_session_file=None, trusted_context=None):
+            captured["resume"] = resume
+            return (["/bin/sh", "-c", "printf resume-latest-ok"], None, None)
+
+        monkeypatch.setattr(self.ws_module, "_resolve_chat_argv", fake_resolve)
+        monkeypatch.setattr(
+            self.ws_module,
+            "_oxaide_latest_resume_session_id",
+            lambda trusted: "user-a-live-tip",
+        )
+        # Trusted Oxaide launch context (internal credential path).
+        monkeypatch.setattr(
+            self.ws_module,
+            "_ws_auth_context",
+            lambda ws: (None, "internal", {"user_id": "user-a", "access_state": "active"}),
+        )
+        monkeypatch.setattr(self.ws_module, "_ws_host_origin_reason", lambda ws: None)
+        monkeypatch.setattr(self.ws_module, "_ws_client_reason", lambda ws: None)
+
+        with self.client.websocket_connect(self._url(resume="latest")) as conn:
+            try:
+                conn.receive_bytes()
+            except Exception:
+                pass
+        assert captured.get("resume") == "user-a-live-tip"
+
+    def test_pty_ws_bare_chat_forges_fresh_for_trusted_context(self, monkeypatch):
+        """A bare /chat load (no fresh / resume / channel breadcrumb) must NOT
+        auto-resume the latest session — the Oxaide desk starts clean and past
+        research is reached through the explicit resume action."""
+        captured: dict = {}
+
+        def fake_resolve(resume=None, sidecar_url=None, profile=None, active_session_file=None, trusted_context=None):
+            captured["resume"] = resume
+            return (["/bin/sh", "-c", "printf fresh-ok"], None, None)
+
+        monkeypatch.setattr(self.ws_module, "_resolve_chat_argv", fake_resolve)
+        monkeypatch.setattr(
+            self.ws_module,
+            "_oxaide_latest_resume_session_id",
+            lambda trusted: "should-not-resolve",
+        )
+        monkeypatch.setattr(
+            self.ws_module,
+            "_ws_auth_context",
+            lambda ws: (None, "internal", {"user_id": "user-a", "access_state": "active"}),
+        )
+        monkeypatch.setattr(self.ws_module, "_ws_host_origin_reason", lambda ws: None)
+        monkeypatch.setattr(self.ws_module, "_ws_client_reason", lambda ws: None)
+
+        with self.client.websocket_connect(self._url()) as conn:
+            try:
+                conn.receive_bytes()
+            except Exception:
+                pass
+        assert captured.get("resume") is None
+
     def test_channel_param_propagates_sidecar_url(self, monkeypatch):
         """When /api/pty is opened with ?channel=, the PTY child gets a
         HERMES_TUI_SIDECAR_URL env var pointing back at /api/pub on the

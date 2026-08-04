@@ -24,7 +24,7 @@ import "@xterm/xterm/css/xterm.css";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Typography } from "@nous-research/ui/ui/components/typography/index";
 import { cn } from "@/lib/utils";
-import { Copy, PanelRight, RotateCcw, Share2, X } from "lucide-react";
+import { Copy, PanelRight, RotateCcw, Share2, Square, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
@@ -188,6 +188,11 @@ export default function ChatPage({
     useState<PtyConnectionState>("connecting");
   const ptyStateRef = useRef<PtyConnectionState>("connecting");
   const [lastCloseCode, setLastCloseCode] = useState<number | null>(null);
+  // Live "research is running" signal for the Stop affordance. Driven by the
+  // PTY child's dispatcher events (message.start / message.complete) through
+  // the same /api/events feed the sidebar uses, so the button reflects the
+  // actual agent turn and clears even when a turn is interrupted.
+  const [turnRunning, setTurnRunning] = useState(false);
   // NS-504: when the agent process exits cleanly (the user typed `/exit`, or
   // started a new session that ended the current PTY child), the PTY socket
   // closes with a normal code. Before this fix the terminal just printed
@@ -214,6 +219,7 @@ export default function ChatPage({
     mobileReplacementInputUntilRef.current = 0;
     setBanner(null);
     setLastCloseCode(null);
+    setTurnRunning(false);
     setPtyState("connecting");
     setReconnectNonce((n) => n + 1);
   }, [clearReconnectTimer]);
@@ -227,6 +233,7 @@ export default function ChatPage({
     mobileReplacementInputUntilRef.current = 0;
     setBanner(null);
     setLastCloseCode(null);
+    setTurnRunning(false);
     setPtyState("connecting");
     setReconnectNonce((n) => n + 1);
   }, [clearReconnectTimer, frozen]);
@@ -244,9 +251,19 @@ export default function ChatPage({
     setSearchParams(next, { replace: true });
     setBanner(null);
     setLastCloseCode(null);
+    setTurnRunning(false);
     setPtyState("connecting");
     setReconnectNonce((n) => n + 1);
   }, [clearReconnectTimer, frozen, searchParams, setSearchParams]);
+  // Sends the terminal interrupt byte (Ctrl+C) over the PTY, driving the
+  // TUI's interrupt path: partial output is preserved, the turn is marked
+  // interrupted, and the agent winds down compute instead of running on.
+  const requestStop = useCallback(() => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send("\x03");
+    termRef.current?.focus();
+  }, []);
   // Raw state for the mobile side-sheet + a derived value that force-
   // closes whenever the chat tab isn't active.  The *derived* value is
   // what side-effects (body-scroll lock, keydown listener, portal render)
@@ -340,7 +357,9 @@ export default function ChatPage({
   }, [isActive, sessionTitle, setTitle]);
 
   useEffect(() => {
-    if (!resumeParam) return;
+    // `?resume=latest` is a server-side sentinel (resolve newest research
+    // session), not a concrete session id — skip the detail lookups.
+    if (!resumeParam || resumeParam === "latest") return;
 
     let cancelled = false;
 
@@ -361,7 +380,7 @@ export default function ChatPage({
   }, [resumeParam, scopedProfile, handleSessionChange, handleSessionTitleChange]);
 
   useEffect(() => {
-    if (!resumeParam) return;
+    if (!resumeParam || resumeParam === "latest") return;
 
     let cancelled = false;
 
@@ -1347,6 +1366,42 @@ export default function ChatPage({
     term.options.theme = terminalTheme;
   }, [terminalTheme]);
 
+  // Track the live turn so a visible Stop control appears while research runs.
+  // Reuses the dispatcher broadcast the sidebar subscribes to (/api/events on
+  // this channel); best-effort — if the feed is unavailable the terminal's
+  // own Ctrl+C hint still covers stopping.
+  useEffect(() => {
+    if (!channel) return;
+    let unmounting = false;
+    let ws: WebSocket | null = null;
+    void (async () => {
+      let url: string;
+      try {
+        url = await api.buildWsUrl("/api/events", { channel });
+      } catch {
+        return;
+      }
+      if (unmounting) return;
+      const socket = new WebSocket(url);
+      ws = socket;
+      socket.addEventListener("message", (ev) => {
+        try {
+          const frame = JSON.parse(String(ev.data));
+          const type = frame?.params?.type;
+          if (type === "message.start") setTurnRunning(true);
+          else if (type === "message.complete") setTurnRunning(false);
+        } catch {
+          // Ignore malformed frames.
+        }
+      });
+    })();
+    return () => {
+      unmounting = true;
+      ws?.close();
+      ws = null;
+    };
+  }, [channel]);
+
   // Layout:
   //   outer flex column — sits inside the dashboard's content area
   //   row split — terminal pane (flex-1) + sidebar (fixed width, lg+)
@@ -1518,6 +1573,25 @@ export default function ChatPage({
                   Reconnect now
                 </Button>
               </div>
+            </div>
+          )}
+
+          {/* A visible Stop affordance while the agent is researching — not
+              just the terminal's Ctrl+C hint. Sends the interrupt byte over
+              the PTY so the running turn winds down (partial output kept). */}
+          {turnRunning && ptyState === "open" && (
+            <div className="absolute right-3 top-3 z-20 flex justify-end">
+              <Button
+                size="sm"
+                outlined
+                onClick={requestStop}
+                prefix={<Square className="h-3.5 w-3.5 fill-current" />}
+                aria-label="Stop research"
+                title="Stop the current research run (Ctrl+C)"
+                className="shrink-0 border border-danger/50 bg-black/70 px-3 py-1.5 text-xs font-medium tracking-wide text-danger shadow-lg hover:bg-black/90"
+              >
+                Stop
+              </Button>
             </div>
           )}
 

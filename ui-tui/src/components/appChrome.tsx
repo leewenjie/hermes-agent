@@ -427,15 +427,24 @@ export function StatusRule({
   const barColor = ctxBarColor(pct, t)
   const segs = statusBarSegments(cols)
 
+  // Oxaide's hosted research desk keeps the status rule calm: just the busy
+  // indicator + model. The developer-ish tail (context tokens/bar, session
+  // duration, idle clock, compressions, voice, session count, background
+  // tasks, subagent HUD, cost) is hidden so the bottom bar reads clean for a
+  // consumer research product instead of a pile of confusing metrics.
+  const oxaideQuiet = t.brand.org === 'Oxaide'
+
   // On narrow terminals the context read-out collapses to a bare token count
   // (`12k tok`) and the visual fill bar is dropped entirely.
-  const ctxLabel = usage.context_max
-    ? segs.compactCtx
-      ? `${fmtK(usage.context_used ?? 0)} tok`
-      : `${fmtK(usage.context_used ?? 0)}/${fmtK(usage.context_max)}`
-    : usage.total > 0
-      ? `${fmtK(usage.total)} tok`
-      : ''
+  const ctxLabel = oxaideQuiet
+    ? ''
+    : usage.context_max
+      ? segs.compactCtx
+        ? `${fmtK(usage.context_used ?? 0)} tok`
+        : `${fmtK(usage.context_used ?? 0)}/${fmtK(usage.context_max)}`
+      : usage.total > 0
+        ? `${fmtK(usage.total)} tok`
+        : ''
 
   const bar = !segs.compactCtx && usage.context_max ? ctxBar(pct) : ''
   const modelText = t.brand.org === 'Oxaide' ? 'research engine' : modelLabel(model, modelReasoningEffort, modelFast)
@@ -502,21 +511,21 @@ export function StatusRule({
       ? `Δ ${(usage.dev_credits_spent_micros / 10000).toFixed(1)}¢`
       : ''
 
-  const showBar = !!bar && fits(SEP + stringWidth(`[${bar}] ${pct != null ? `${pct}%` : ''}`))
-  const showDuration = segs.duration && !!sessionStartedAt && fits(SEP + MAX_DURATION_WIDTH)
+  const showBar = !oxaideQuiet && !!bar && fits(SEP + stringWidth(`[${bar}] ${pct != null ? `${pct}%` : ''}`))
+  const showDuration = !oxaideQuiet && segs.duration && !!sessionStartedAt && fits(SEP + MAX_DURATION_WIDTH)
 
   // Idle clock — time since the last final agent response. Hidden while busy
   // (the FaceTicker's elapsed tail covers the live turn) and before the first
   // turn completes. Shares the duration breakpoint and width reservation.
   const showIdle =
-    segs.duration && !busy && lastTurnEndedAt != null && fits(SEP + stringWidth('✓ ') + MAX_DURATION_WIDTH)
+    !oxaideQuiet && segs.duration && !busy && lastTurnEndedAt != null && fits(SEP + stringWidth('✓ ') + MAX_DURATION_WIDTH)
 
-  const showCompressions = segs.compressions && compressions > 0 && fits(SEP + stringWidth(`cmp ${compressions}`))
-  const showVoice = segs.voice && !!voiceLabel && fits(SEP + stringWidth(voiceLabel))
-  const showSessionCount = !!sessionCountText && fits(SEP + stringWidth(sessionCountText))
-  const showBg = segs.bg && bgCount > 0 && fits(SEP + stringWidth(`${bgCount} bg`))
+  const showCompressions = !oxaideQuiet && segs.compressions && compressions > 0 && fits(SEP + stringWidth(`cmp ${compressions}`))
+  const showVoice = !oxaideQuiet && segs.voice && !!voiceLabel && fits(SEP + stringWidth(voiceLabel))
+  const showSessionCount = !oxaideQuiet && !!sessionCountText && fits(SEP + stringWidth(sessionCountText))
+  const showBg = !oxaideQuiet && segs.bg && bgCount > 0 && fits(SEP + stringWidth(`${bgCount} bg`))
   const subagentCount = typeof usage.active_subagents === 'number' ? usage.active_subagents : 0
-  const showSubagents = segs.subagents && subagentCount > 0 && fits(SEP + stringWidth(`⛓ ${subagentCount}`))
+  const showSubagents = !oxaideQuiet && segs.subagents && subagentCount > 0 && fits(SEP + stringWidth(`⛓ ${subagentCount}`))
 
   // Parked-background reassurance: a top-level delegate_task runs in the
   // background, so the turn ends (idle) while the subagent keeps working and its
@@ -527,10 +536,10 @@ export function StatusRule({
   const resumeHintText =
     subagentCount === 1 ? '↩ resumes when subagent finishes' : `↩ resumes when ${subagentCount} subagents finish`
 
-  const showResumeHint = !busy && subagentCount > 0 && fits(SEP + stringWidth(resumeHintText))
+  const showResumeHint = !oxaideQuiet && !busy && subagentCount > 0 && fits(SEP + stringWidth(resumeHintText))
   // Dev-gated readout (HERMES_DEV_CREDITS), lowest priority,
   // so it consumes tail budget LAST and drops first on a narrow terminal.
-  const showDevCredits = !!devCreditsText && fits(SEP + stringWidth(devCreditsText))
+  const showDevCredits = !oxaideQuiet && !!devCreditsText && fits(SEP + stringWidth(devCreditsText))
 
   const handleSessionCountClick = (event: { stopImmediatePropagation?: () => void }) => {
     event.stopImmediatePropagation?.()
@@ -654,7 +663,7 @@ export function StatusRule({
         {/* SpawnHud isn't part of the tail budget (its width is dynamic), so it
             renders last — any overflow truncates the HUD itself rather than the
             budgeted segments before it. It self-hides when no delegation runs. */}
-        <SpawnHud t={t} />
+        {!oxaideQuiet ? <SpawnHud t={t} /> : null}
       </Box>
 
       {rightWidth > 0 ? (

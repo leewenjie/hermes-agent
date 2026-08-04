@@ -17782,10 +17782,15 @@ async def pty_ws(ws: WebSocket) -> None:
         elif not resume:
             resume = _read_active_session_file(active_session_file)
 
-    # A new browser has neither a channel breadcrumb nor an explicit resume
-    # query.  Resolve the primary Resume action from the trusted launch
-    # identity, while keeping ``fresh=1`` authoritative for Start New.
-    if trusted_context is not None and not force_fresh and not resume:
+    # ``?resume=latest`` is the explicit "continue saved research" marker the
+    # Oxaide bridge sets for the resume intent (see prod-proxy-login). Resolve
+    # it to the newest durable research session from the trusted launch
+    # identity. A bare ``/chat`` load with no fresh / resume / channel
+    # breadcrumb intentionally forges a fresh session instead — the desk
+    # starts from a clean slate, and past research is reached through the
+    # explicit resume action, the session list, or an active-session
+    # breadcrumb, never by accident on a plain visit.
+    if trusted_context is not None and resume == "latest":
         resume = await asyncio.to_thread(
             _oxaide_latest_resume_session_id,
             trusted_context,

@@ -27,8 +27,10 @@ describe('constants', () => {
 
   it('keeps Oxaide help focused on customer research actions', () => {
     const help = [...OXAIDE_RESEARCH_COMMANDS, ...OXAIDE_RESEARCH_SHORTCUTS].flat().join(' ')
-    expect(help).toMatch(/research|response|questions/i)
-    expect(help).not.toMatch(/quit|details|tool|shell|editor|gateway|model|system prompt/i)
+    expect(help).toMatch(/research|response|questions|reasoning|details/i)
+    // Watching reasoning live and stopping the run are customer research
+    // actions; developer surfaces (shell/editor/gateway/model) stay out.
+    expect(help).not.toMatch(/quit|shell|editor|gateway|model|system prompt/i)
   })
 
   it('HOTKEYS are [key, desc] pairs', () => {

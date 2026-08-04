@@ -275,6 +275,62 @@ describe('StatusRule managed Oxaide identity', () => {
 
     expect(rendered).toContain('gpt 5.6 luna')
   })
+
+  it('keeps the Oxaide desk calm: no context, timers, session count, or subagent HUD', () => {
+    const oxaideTheme = {
+      ...DEFAULT_THEME,
+      brand: { ...DEFAULT_THEME.brand, org: 'Oxaide' }
+    }
+
+    const element = StatusRule({
+      ...baseProps,
+      liveSessionCount: 3,
+      sessionStartedAt: Date.now() - 120_000,
+      t: oxaideTheme,
+      usage: {
+        calls: 0,
+        context_max: 200_000,
+        context_percent: 60,
+        context_used: 120_000,
+        input: 0,
+        output: 0,
+        total: 120_000
+      },
+      voiceLabel: 'voice off'
+    })
+
+    const rendered = textContent(element)
+
+    // Branded model label stays.
+    expect(rendered).toContain('research engine')
+    // The developer-ish tail is hidden entirely on the hosted desk.
+    expect(rendered).not.toContain('tok')
+    expect(rendered).not.toContain('session')
+    expect(rendered).not.toContain('bg')
+    expect(rendered).not.toContain('cmp')
+  })
+
+  it('keeps the live researching indicator on the Oxaide desk', () => {
+    const oxaideTheme = {
+      ...DEFAULT_THEME,
+      brand: { ...DEFAULT_THEME.brand, org: 'Oxaide' }
+    }
+
+    const element = StatusRule({
+      ...baseProps,
+      busy: true,
+      status: 'researching',
+      t: oxaideTheme,
+      turnStartedAt: Date.now() - 12_000
+    })
+
+    const rendered = textContent(element)
+
+    expect(rendered).toContain('research engine')
+    // Busy replaces the static status verb with the live FaceTicker
+    // (the indicator's animated content renders only when mounted).
+    expect(rendered).not.toContain('researching')
+  })
 })
 
 describe('StatusRule credits notice render priority', () => {
