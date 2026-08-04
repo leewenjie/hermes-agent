@@ -543,6 +543,7 @@ export const api = {
     const query = path ? `?path=${encodeURIComponent(path)}` : "";
     return fetchJSON<ManagedFilesResponse>(`/api/files${query}`);
   },
+  getFilesUsage: () => fetchJSON<ManagedFilesUsageResponse>("/api/files/usage"),
   readFile: (path: string) =>
     fetchJSON<ManagedFileReadResponse>(
       `/api/files/read?path=${encodeURIComponent(path)}`,
@@ -712,8 +713,12 @@ export const api = {
   // Managed Oxaide recurring research (intentionally not profile-scoped).
   getResearchSchedules: () =>
     fetchJSON<ResearchSchedule[]>("/api/research-schedules"),
-  getResearchScheduleOccurrences: () =>
-    fetchJSON<ResearchScheduleOccurrencesResponse>("/api/research-schedules/occurrences"),
+  getResearchScheduleOccurrences: (cursor?: { created_at: string; id: string }) => {
+    const query = cursor
+      ? `?cursor=${encodeURIComponent(JSON.stringify(cursor))}`
+      : "";
+    return fetchJSON<ResearchScheduleOccurrencesResponse>(`/api/research-schedules/occurrences${query}`);
+  },
   getScheduledResearchEmailConsent: () =>
     fetchJSON<ScheduledResearchEmailConsent>("/api/research-schedules/consent"),
   setScheduledResearchEmailConsent: (enabled: boolean, requestId = crypto.randomUUID()) =>
@@ -2145,6 +2150,14 @@ export interface ManagedFilesResponse {
   locked_root: string | null;
   can_change_path: boolean;
   entries: ManagedFileEntry[];
+}
+
+export interface ManagedFilesUsageResponse {
+  available: boolean;
+  used_bytes?: number;
+  free_bytes?: number;
+  limit_bytes?: number;
+  reason?: string;
 }
 
 export interface ManagedFileReadResponse {

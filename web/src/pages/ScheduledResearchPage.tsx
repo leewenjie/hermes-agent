@@ -73,6 +73,8 @@ function readableSchedule(schedule: ResearchSchedule): string {
 export default function ScheduledResearchPage() {
   const [schedules, setSchedules] = useState<ResearchSchedule[]>([]);
   const [occurrences, setOccurrences] = useState<ResearchScheduleOccurrence[]>([]);
+  const [occurrenceCursor, setOccurrenceCursor] = useState<{ created_at: string; id: string } | null>(null);
+  const [loadingMoreOccurrences, setLoadingMoreOccurrences] = useState(false);
   const [emailConsent, setEmailConsent] = useState<ScheduledResearchEmailConsent | null>(null);
   const [loading, setLoading] = useState(true);
   const [consentLoading, setConsentLoading] = useState(true);
@@ -111,6 +113,7 @@ export default function ScheduledResearchPage() {
       ]);
       setSchedules(scheduleItems);
       setOccurrences(history.occurrences);
+      setOccurrenceCursor(history.next_cursor);
       setEmailConsent(consent);
     } catch (error) {
       showToast(`Could not load scheduled research: ${error}`, "error");
@@ -132,6 +135,7 @@ export default function ScheduledResearchPage() {
         if (active) {
           setSchedules(items);
           setOccurrences(history.occurrences);
+          setOccurrenceCursor(history.next_cursor);
           setEmailConsent(consent);
         }
       })
@@ -220,7 +224,7 @@ export default function ScheduledResearchPage() {
     } finally {
       setSaving(false);
     }
-  }, [editingId, form, load, pendingMutation, resetForm, scheduleValue, showToast]);
+  }, [confirmedAccountEmail, editingId, form, load, pendingMutation, resetForm, scheduleValue, showToast]);
 
   const toggleEmailConsent = useCallback(async (enabled: boolean) => {
     if (!confirmedAccountEmail) {
@@ -508,12 +512,13 @@ export default function ScheduledResearchPage() {
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <p className="font-medium">{occurrence.name || "Scheduled research"}</p>
-                      <Badge>{occurrence.status}</Badge>
+                      <Badge>{occurrence.status === "completed" ? "Completed" : occurrence.status === "failed" ? "Failed" : occurrence.status === "running" ? "Running" : "Queued"}</Badge>
                     </div>
                     <p className="mt-1 text-xs text-muted-foreground">
                       Scheduled for {formatTimestamp(occurrence.nominal_fire_at)}
-                      {occurrence.error_message ? ` · ${occurrence.error_message}` : ""}
+                      {occurrence.completed_at ? ` · Completed ${formatTimestamp(occurrence.completed_at)}` : ""}
                     </p>
+                    {occurrence.error_message ? <p className="mt-1 text-xs text-destructive">{occurrence.error_message}</p> : null}
                   </div>
                   {occurrence.result_url ? (
                     <Button
@@ -528,6 +533,26 @@ export default function ScheduledResearchPage() {
                 </CardContent>
               </Card>
             ))}
+            {occurrenceCursor ? (
+              <Button
+                outlined
+                size="sm"
+                disabled={loadingMoreOccurrences}
+                prefix={loadingMoreOccurrences ? <Spinner /> : <RefreshCw />}
+                onClick={() => {
+                  setLoadingMoreOccurrences(true);
+                  void api.getResearchScheduleOccurrences(occurrenceCursor)
+                    .then((history) => {
+                      setOccurrences((current) => [...current, ...history.occurrences]);
+                      setOccurrenceCursor(history.next_cursor);
+                    })
+                    .catch((error) => showToast(`Could not load more results: ${error}`, "error"))
+                    .finally(() => setLoadingMoreOccurrences(false));
+                }}
+              >
+                Load older results
+              </Button>
+            ) : null}
           </div>
         )}
       </section>

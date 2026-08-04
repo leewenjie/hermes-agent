@@ -2426,6 +2426,24 @@ async def list_managed_files(request: Request, path: Optional[str] = None):
     }
 
 
+@app.get("/api/files/usage")
+async def managed_files_usage(request: Request):
+    """Return the storage pool available to the managed Files workspace."""
+    policy = _managed_files_policy(request, create_root=False)
+    if policy.locked_root is None:
+        return {"available": False, "reason": "workspace storage is not quota-managed"}
+    try:
+        usage = shutil.disk_usage(policy.locked_root)
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail="Storage usage is temporarily unavailable") from exc
+    return {
+        "available": True,
+        "used_bytes": usage.used,
+        "free_bytes": usage.free,
+        "limit_bytes": usage.total,
+    }
+
+
 @app.get("/api/files/read")
 async def read_managed_file(request: Request, path: str):
     policy, target, display_path = _resolve_managed_path(path, request)
@@ -11696,6 +11714,7 @@ def _hosted_schedule_control_sync(
     job_id: Optional[str] = None,
     body: Optional[ResearchScheduleMutation] = None,
     request_id: Optional[str] = None,
+    cursor: Optional[Dict[str, Any]] = None,
 ) -> Any:
     from hermes_cli.oxaide_scheduled_research_control import (
         ScheduledResearchControlError,
@@ -11708,7 +11727,12 @@ def _hosted_schedule_control_sync(
         if action == "list":
             return request_control(user_id, "list")
         if action == "list_occurrences":
-            return request_control(user_id, action)
+            return request_control(
+                user_id,
+                action,
+                before_created_at=cursor.get("created_at") if cursor else None,
+                before_id=cursor.get("id") if cursor else None,
+            )
         schedules = request_control(user_id, "list")
         current = next(
             (item for item in schedules if str(item.get("id") or "") == job_id),
@@ -11810,10 +11834,21 @@ async def list_research_schedules(request: Request):
 async def list_research_schedule_occurrences(request: Request):
     if not _is_oxaide_hosted_runtime():
         return {"occurrences": [], "next_cursor": None}
+    cursor = None
+    raw_cursor = request.query_params.get("cursor")
+    if raw_cursor:
+        try:
+            parsed_cursor = json.loads(raw_cursor)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="Invalid occurrence cursor") from exc
+        if not isinstance(parsed_cursor, dict):
+            raise HTTPException(status_code=400, detail="Invalid occurrence cursor")
+        cursor = {key: parsed_cursor[key] for key in ("created_at", "id") if key in parsed_cursor}
     return await run_in_threadpool(
         _hosted_schedule_control_sync,
         _hosted_research_user_id(request),
         "list_occurrences",
+        cursor=cursor,
     )
 
 

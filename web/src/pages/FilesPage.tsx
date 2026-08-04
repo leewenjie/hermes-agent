@@ -41,6 +41,7 @@ import type {
   ManagedFileEntry,
   ManagedFileReadResponse,
   ManagedFilesResponse,
+  ManagedFilesUsageResponse,
 } from "@/lib/api";
 import {
   managedFilePreviewKind,
@@ -115,6 +116,7 @@ export default function FilesPage() {
   });
   const [pathInput, setPathInput] = useState("");
   const [listing, setListing] = useState<ManagedFilesResponse | null>(null);
+  const [usage, setUsage] = useState<ManagedFilesUsageResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [draggingFiles, setDraggingFiles] = useState(false);
@@ -161,6 +163,15 @@ export default function FilesPage() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void load(currentPath);
   }, [currentPath]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!managedOxaide) return;
+    void api.getFilesUsage().then(setUsage).catch(() => setUsage(null));
+  }, [managedOxaide]);
+
+  const usagePercent = usage?.available && usage.limit_bytes
+    ? Math.min(100, (usage.used_bytes ?? 0) / usage.limit_bytes * 100)
+    : null;
 
   useEffect(() => {
     setAfterTitle(
@@ -449,6 +460,21 @@ export default function FilesPage() {
           </Button>
         </div>
       </div>
+
+      {managedOxaide && usage?.available && usagePercent !== null ? (
+        <div className="border border-border bg-background/20 px-4 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+            <span className="font-semibold uppercase tracking-[0.08em] text-foreground">Workspace storage</span>
+            <span className="tabular-nums text-text-secondary">
+              {formatBytes(usage.used_bytes ?? 0)} of {formatBytes(usage.limit_bytes ?? 0)} used
+            </span>
+          </div>
+          <div className="mt-2 h-1.5 overflow-hidden bg-border" aria-label={`${usagePercent.toFixed(0)}% storage used`} role="progressbar" aria-valuemax={100} aria-valuemin={0} aria-valuenow={usagePercent}>
+            <div className={`h-full ${usagePercent >= 90 ? "bg-destructive" : usagePercent >= 75 ? "bg-warning" : "bg-primary"}`} style={{ width: `${usagePercent}%` }} />
+          </div>
+          <p className="mt-1.5 text-xs text-text-secondary">Includes uploaded and generated research files.</p>
+        </div>
+      ) : null}
 
       <button
         type="button"
