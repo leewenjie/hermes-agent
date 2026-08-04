@@ -17,10 +17,11 @@ binds.
 from __future__ import annotations
 
 import logging
+from html import escape
 from typing import Awaitable, Callable
 
 from fastapi import HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from hermes_cli.dashboard_auth import list_session_providers
 from hermes_cli.dashboard_auth.audit import AuditEvent, audit_log
@@ -138,6 +139,91 @@ def _unauth_response(request: Request, *, reason: str) -> Response:
             status_code=401,
         )
     return RedirectResponse(url=login_url, status_code=302)
+
+
+def _provider_unavailable_response(request: Request) -> Response:
+    """Keep browser navigations usable when the identity provider is offline."""
+    if request.url.path.startswith("/api/"):
+        return JSONResponse(
+            {"detail": "Authentication refresh is temporarily unavailable"},
+            status_code=503,
+        )
+
+    from hermes_cli.dashboard_auth.prefix import prefix_from_request
+
+    retry_url = request.url.path
+    if request.url.query:
+        retry_url = f"{retry_url}?{request.url.query}"
+    retry_href = escape(retry_url, quote=True)
+    login_href = escape(f"{prefix_from_request(request)}/login", quote=True)
+    return HTMLResponse(
+        content=f"""<!doctype html>
+<html lang="en"><head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Connection unavailable — Hermes Agent</title>
+  <style>
+    :root {{ color-scheme: dark; }}
+    body {{ margin: 0; min-height: 100vh; display: grid; place-items: center;
+      padding: 1.5rem; box-sizing: border-box; background: #170d02;
+      color: #fff; font: 16px/1.5 system-ui, sans-serif; }}
+    main {{ width: min(100%, 30rem); padding: 2.25rem; box-sizing: border-box;
+      border: 1px solid #ffac024d; background: #211406;
+      box-shadow: 0 24px 60px #0009; }}
+    .eyebrow {{ color: #ffac02; font-size: .75rem; font-weight: 700;
+      letter-spacing: .16em; text-transform: uppercase; }}
+    h1 {{ margin: .7rem 0 .5rem; font-size: 1.8rem; }}
+    p {{ color: #d8d0c8; }}
+    .actions {{ display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1.5rem; }}
+    a {{ display: inline-block; padding: .75rem 1rem; text-decoration: none;
+      font-weight: 700; }}
+    .primary {{ background: #ffac02; color: #170d02; }}
+    .secondary {{ border: 1px solid #ffac0266; color: #ffcf70; }}
+    a:focus-visible {{ outline: 2px solid #fff; outline-offset: 3px; }}
+  </style>
+</head><body><main role="alert">
+  <div class="eyebrow">Hermes Agent</div>
+  <h1>We’re reconnecting</h1>
+    <p id="status">Your session is still safe. We’ll keep trying to restore the
+        app automatically.</p>
+  <div class="actions">
+        <a class="primary" href="{retry_href}">Try again now</a>
+    <a class="secondary" href="{login_href}">Go to sign in</a>
+  </div>
+</main>
+<script>
+    (() => {{
+        const status = document.getElementById("status");
+        const retryDelay = 5000;
+        let attempt = 0;
+        const reconnect = async () => {{
+            attempt += 1;
+            if (status) status.textContent = "Reconnecting… (attempt " + attempt + ")";
+            try {{
+                const response = await fetch(window.location.href, {{
+                    credentials: "same-origin",
+                    cache: "no-store",
+                    headers: {{ "Accept": "text/html" }}
+                }});
+                // A redirect means the session has genuinely expired; leave the
+                // sign-in fallback available rather than hiding it behind a reload.
+                if (response.ok && !response.redirected) {{
+                    window.location.reload();
+                    return;
+                }}
+            }} catch (_) {{
+                // Keep retrying while the dashboard or identity provider is offline.
+            }}
+            window.setTimeout(reconnect, retryDelay);
+        }};
+        window.setTimeout(reconnect, retryDelay);
+    }})();
+</script>
+</body></html>""",
+        status_code=503,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def _auto_sso_response(request: Request) -> Response | None:
@@ -372,10 +458,12 @@ async def gated_auth_middleware(
             # No provider could verify the token and at least one couldn't be
             # reached — treat as a transient outage rather than forcing a
             # re-login through a (possibly also-unreachable) refresh.
-            return JSONResponse(
-                {"detail": f"Auth provider {unreachable_provider!r} unreachable"},
-                status_code=503,
-            )
+            if path.startswith("/api/"):
+                return JSONResponse(
+                    {"detail": f"Auth provider {unreachable_provider!r} unreachable"},
+                    status_code=503,
+                )
+            return _provider_unavailable_response(request)
 
     if session is None:
         # Access token is expired/invalid. Before forcing re-login, try to
@@ -387,10 +475,7 @@ async def gated_auth_middleware(
             refreshed = _attempt_refresh(request, refresh_token=_rt)
         except ProviderError as e:
             _log.warning("dashboard-auth: refresh temporarily unavailable: %s", e)
-            return JSONResponse(
-                {"detail": "Authentication refresh is temporarily unavailable"},
-                status_code=503,
-            )
+            return _provider_unavailable_response(request)
         if refreshed is not None:
             new_session, refreshing_provider = refreshed
             request.state.session = new_session
@@ -463,10 +548,9 @@ def _attempt_refresh(request: Request, *, refresh_token):
     there's no RT or every provider's ``refresh_session`` failed with
     ``RefreshExpiredError`` (dead/revoked/reuse-detected RT → force re-login).
 
-    A ``ProviderError`` (Portal unreachable) is NOT swallowed into a re-login
-    here — re-raising would 500 the request; instead we log and return None so
-    the caller forces a clean re-login, which is the safer UX than a hard
-    error on a transient network blip during the narrow refresh window.
+    A ``ProviderError`` (Portal unreachable) is re-raised so the middleware
+    can preserve the cookies and show a recoverable outage response instead of
+    forcing a clean re-login during a transient network blip.
     """
     if not refresh_token:
         return None

@@ -643,6 +643,24 @@ def test_all_providers_unreachable_returns_503(_gated_state):
     assert "unreachable" in r.text.lower()
 
 
+def test_all_providers_unreachable_html_is_recoverable(_gated_state):
+    """A stale browser tab must not turn a dashboard route into raw JSON."""
+    register_provider(_UnreachableProvider())
+    client = _gated_state()
+    client.cookies.set(SESSION_AT_COOKIE, "some-opaque-token")
+
+    r = client.get("/skills", follow_redirects=False)
+
+    assert r.status_code == 503
+    assert r.headers["content-type"].startswith("text/html")
+    assert "We’re reconnecting" in r.text
+    assert "automatically" in r.text
+    assert "fetch(window.location.href" in r.text
+    assert 'href="/skills"' in r.text
+    assert 'href="/login"' in r.text
+    assert r.headers["cache-control"] == "no-store"
+
+
 def test_unverifiable_token_with_reachable_providers_redirects(_gated_state):
     """When every provider is REACHABLE but none recognises the token (all
     return None, none raises), the gate falls through to re-login — NOT 503."""
