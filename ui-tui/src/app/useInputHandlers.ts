@@ -568,10 +568,16 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
     // away without hunting for /details. Must precede the Ctrl+D exit check
     // below (isAction matches Ctrl regardless of Shift).
     if (key.ctrl && key.shift && ch.toLowerCase() === 'd') {
-      const current = getUiState().detailsMode
-      const next = nextDetailsMode(current)
-      patchUiState({ detailsMode: next, detailsModeCommandOverride: true })
-      actions.sys(`research details: ${next}`)
+      // Hosted Oxaide filters reasoning/tool trails out of the transcript by
+      // design (see managedPresentation), so the detail cycle has nothing to
+      // reveal there. Keep the hotkey active only where it expands/collapses
+      // the thinking + tool trails (self-hosted terminals).
+      if (getUiState().theme.brand.org !== 'Oxaide') {
+        const current = getUiState().detailsMode
+        const next = nextDetailsMode(current)
+        patchUiState({ detailsMode: next, detailsModeCommandOverride: true })
+        actions.sys(`research details: ${next}`)
+      }
 
       return
     }

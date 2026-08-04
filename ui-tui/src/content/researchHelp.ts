@@ -20,7 +20,5 @@ export const isOxaideResearchCommand = (name: string): boolean =>
 export const OXAIDE_RESEARCH_SHORTCUTS: [string, string][] = [
   ['Shift+Enter', 'add a new line'],
   ['↑ / ↓', 'browse recent questions'],
-  ['Ctrl+C', 'stop the current research response'],
-  ['Ctrl+Shift+D', 'show or hide research details'],
-  ['/details', 'expand or collapse reasoning steps']
+  ['Ctrl+C', 'stop the current research response']
 ]

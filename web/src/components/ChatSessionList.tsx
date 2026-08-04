@@ -87,9 +87,10 @@ export function ChatSessionList({
   // stale list out of order.
   const reqRef = useRef(0);
 
-  const load = useCallback(() => {
+  const load = useCallback((options?: { silent?: boolean }) => {
+    const silent = options?.silent ?? false;
     const myReq = ++reqRef.current;
-    setLoading(true);
+    if (!silent) setLoading(true);
     setError(null);
     api
       .getSessions(SESSION_LIMIT, 0, scopeKey, "recent")
@@ -102,7 +103,7 @@ export function ChatSessionList({
         setError(e.message || "failed to load sessions");
       })
       .finally(() => {
-        if (reqRef.current === myReq) setLoading(false);
+        if (reqRef.current === myReq && !silent) setLoading(false);
       });
   }, [scopeKey]);
 
@@ -114,6 +115,22 @@ export function ChatSessionList({
     load();
     // `reloadNonce` is a manual refetch trigger (Refresh button / row pick).
   }, [load, reloadNonce]);
+
+  // A completed turn can create or retitle a session without navigating away
+  // from Chat. Refresh the compact recent list on a gentle cadence and when
+  // the user returns to the tab, so it stays useful without competing with
+  // the active PTY or flickering its loading state.
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") load({ silent: true });
+    }, 15_000);
+    const onFocus = () => load({ silent: true });
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [load]);
 
   useEffect(() => {
     let cancelled = false;

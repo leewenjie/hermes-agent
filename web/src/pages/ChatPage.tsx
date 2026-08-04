@@ -24,7 +24,7 @@ import "@xterm/xterm/css/xterm.css";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Typography } from "@nous-research/ui/ui/components/typography/index";
 import { cn } from "@/lib/utils";
-import { Copy, PanelRight, RotateCcw, Share2, Square, X } from "lucide-react";
+import { Copy, Eye, EyeOff, PanelRight, RotateCcw, Share2, Square, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
@@ -193,6 +193,10 @@ export default function ChatPage({
   // the same /api/events feed the sidebar uses, so the button reflects the
   // actual agent turn and clears even when a turn is interrupted.
   const [turnRunning, setTurnRunning] = useState(false);
+  // Mirrors the embedded TUI's detail cycle. The browser cannot inspect the
+  // PTY's internal UI store, so this is intentionally a local affordance
+  // state; the command itself remains authoritative inside the TUI.
+  const [detailsMode, setDetailsMode] = useState<"hidden" | "collapsed" | "expanded">("collapsed");
   // NS-504: when the agent process exits cleanly (the user typed `/exit`, or
   // started a new session that ended the current PTY child), the PTY socket
   // closes with a normal code. Before this fix the terminal just printed
@@ -220,6 +224,7 @@ export default function ChatPage({
     setBanner(null);
     setLastCloseCode(null);
     setTurnRunning(false);
+    setDetailsMode("collapsed");
     setPtyState("connecting");
     setReconnectNonce((n) => n + 1);
   }, [clearReconnectTimer]);
@@ -234,6 +239,7 @@ export default function ChatPage({
     setBanner(null);
     setLastCloseCode(null);
     setTurnRunning(false);
+    setDetailsMode("collapsed");
     setPtyState("connecting");
     setReconnectNonce((n) => n + 1);
   }, [clearReconnectTimer, frozen]);
@@ -252,6 +258,7 @@ export default function ChatPage({
     setBanner(null);
     setLastCloseCode(null);
     setTurnRunning(false);
+    setDetailsMode("collapsed");
     setPtyState("connecting");
     setReconnectNonce((n) => n + 1);
   }, [clearReconnectTimer, frozen, searchParams, setSearchParams]);
@@ -264,6 +271,23 @@ export default function ChatPage({
     ws.send("\x03");
     termRef.current?.focus();
   }, []);
+  const cycleResearchDetails = useCallback(() => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN || frozenRef.current) return;
+    const nextMode =
+      detailsMode === "hidden"
+        ? "collapsed"
+        : detailsMode === "collapsed"
+          ? "expanded"
+          : "hidden";
+    ws.send("/details cycle");
+    window.setTimeout(() => {
+      const current = wsRef.current;
+      if (current && current.readyState === WebSocket.OPEN) current.send("\r");
+    }, 100);
+    setDetailsMode(nextMode);
+    termRef.current?.focus();
+  }, [detailsMode]);
   // Raw state for the mobile side-sheet + a derived value that force-
   // closes whenever the chat tab isn't active.  The *derived* value is
   // what side-effects (body-scroll lock, keydown listener, portal render)
@@ -1424,6 +1448,12 @@ export default function ChatPage({
         }. Reconnecting...`
       : null;
   const visibleBanner = banner ?? reconnectBanner;
+  const detailsLabel =
+    detailsMode === "hidden"
+      ? "Research details hidden"
+      : detailsMode === "collapsed"
+        ? "Research details collapsed"
+        : "Research details expanded";
   const showReconnectOverlay =
     ptyState === "reconnecting" || (ptyState === "closed" && !banner);
   const mobileModelToolsPortal =
@@ -1580,7 +1610,26 @@ export default function ChatPage({
               just the terminal's Ctrl+C hint. Sends the interrupt byte over
               the PTY so the running turn winds down (partial output kept). */}
           {turnRunning && ptyState === "open" && (
-            <div className="absolute right-3 top-3 z-20 flex justify-end">
+            <div className="absolute right-3 top-3 z-20 flex items-center gap-2">
+              {/* The details cycle is a live TUI affordance (thinking/tool
+                  trails). Hosted Oxaide filters reasoning and tool trails from
+                  the transcript by design, and /details is not in the hosted
+                  command allowlist, so the button is only offered where it
+                  has an effect (self-hosted dashboards). */}
+              {!managedOxaide && (
+                <Button
+                  size="sm"
+                  outlined
+                  onClick={cycleResearchDetails}
+                  disabled={frozen}
+                  prefix={detailsMode === "hidden" ? <Eye /> : <EyeOff />}
+                  aria-label="Toggle research details"
+                  title="Cycle hidden, collapsed, and expanded research details"
+                  className="shrink-0 border border-current/30 bg-black/70 px-3 py-1.5 text-xs font-medium tracking-wide text-white/80 shadow-lg hover:bg-black/90"
+                >
+                  {detailsLabel}
+                </Button>
+              )}
               <Button
                 size="sm"
                 outlined
@@ -1591,6 +1640,23 @@ export default function ChatPage({
                 className="shrink-0 border border-danger/50 bg-black/70 px-3 py-1.5 text-xs font-medium tracking-wide text-danger shadow-lg hover:bg-black/90"
               >
                 Stop
+              </Button>
+            </div>
+          )}
+
+          {!turnRunning && ptyState === "open" && !managedOxaide && (
+            <div className="absolute right-3 top-3 z-20 flex justify-end">
+              <Button
+                size="sm"
+                outlined
+                onClick={cycleResearchDetails}
+                disabled={frozen}
+                prefix={detailsMode === "hidden" ? <Eye /> : <EyeOff />}
+                aria-label="Toggle research details"
+                title="Cycle hidden, collapsed, and expanded research details"
+                className="shrink-0 border border-current/30 bg-black/70 px-3 py-1.5 text-xs font-medium tracking-wide text-white/80 shadow-lg hover:bg-black/90"
+              >
+                {detailsLabel}
               </Button>
             </div>
           )}
