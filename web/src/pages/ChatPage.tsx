@@ -1527,15 +1527,15 @@ export default function ChatPage({
           {ptyState === "ended" && (
             <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-black/60">
               <div className="text-sm tracking-wide text-white/80">
-                {frozen ? "Saved research session ended." : "Session ended."}
+                {frozen ? "Saved research session ended." : "This research session ended."}
               </div>
               {!frozen ? (
                 <Button
                   onClick={startFreshPty}
                   prefix={<RotateCcw className="h-4 w-4" />}
-                  aria-label="Start a new chat session"
+                  aria-label="Start fresh research"
                 >
-                  Start new session
+                  Start fresh research
                 </Button>
               ) : null}
             </div>

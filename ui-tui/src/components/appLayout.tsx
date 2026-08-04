@@ -435,7 +435,7 @@ const ComposerPane = memo(function ComposerPane({
                         ? OXAIDE_PLACEHOLDER
                         : PLACEHOLDER
                       : ui.busy
-                        ? 'Ctrl+C to interrupt…'
+                        ? 'Ctrl+C to stop research…'
                         : ''
                   }
                   value={composer.input}
