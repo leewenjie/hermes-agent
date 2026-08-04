@@ -706,11 +706,55 @@ def _run_occurrence(db: SessionDB, claim: dict[str, Any]) -> None:
             _teardown_cron_agent_async(deferred_agent, occurrence_id)
 
 
+def _reconcile_orphaned_occurrences(db: SessionDB | None = None) -> None:
+    """Terminate occurrences whose execution lease expired while running.
+
+    A hard kill or container teardown can leave an occurrence in ``running``
+    with ``execution_phase='executing'`` and no live renewal thread — the
+    owning process is gone and no other instance can resume it. Failing it
+    moves the authoritative occurrence to a terminal state instead of wedging
+    at ``accepted``/``running`` forever (the recurring orphaned-runtime-session
+    pattern in production).
+    """
+    owns_db = db is None
+    db = db or _session_db()
+    try:
+        for orphan in db.list_orphaned_executing_occurrences():
+            payload = orphan["payload"]
+            occurrence_id = payload["occurrence_id"]
+            terminal_event_id, terminal_event_body = _event_body(
+                payload,
+                "failed",
+                error_code="execution_interrupted",
+                error_message=(
+                    "Scheduled research execution was interrupted by a runtime restart."
+                ),
+            )
+            if db.finish_orphaned_executing_occurrence(
+                occurrence_id,
+                orphan["lease_token"],
+                "execution_interrupted",
+                "Scheduled research execution was interrupted by a runtime restart.",
+                terminal_event_id,
+                terminal_event_body,
+            ):
+                logger.warning(
+                    "Reconciled orphaned scheduled research occurrence id=%s",
+                    occurrence_id,
+                )
+    except Exception:
+        logger.exception("Scheduled research orphan reconciliation failed")
+    finally:
+        if owns_db:
+            db.close()
+
+
 def _worker_loop() -> None:
     while True:
         _worker_wake.clear()
         db = _session_db()
         try:
+            _reconcile_orphaned_occurrences(db)
             flush_occurrence_events(db)
             while True:
                 claim = db.claim_scheduled_research_occurrence(
@@ -744,4 +788,6 @@ def wake_occurrence_worker() -> None:
 
 def resume_pending_occurrences() -> None:
     """Resume accepted work and event delivery after a process restart."""
+    _reconcile_orphaned_occurrences()
+    flush_occurrence_events()
     wake_occurrence_worker()

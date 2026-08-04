@@ -1930,6 +1930,76 @@ class SessionDB:
 
         return self._execute_write(_renew)
 
+    def list_orphaned_executing_occurrences(
+        self,
+        *,
+        now: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return occurrences stuck mid-execution with an expired local lease.
+
+        The per-instance renewal thread keeps the lease fresh while its process
+        is alive. An expired ``executing`` lease therefore proves the owning
+        process died (hard kill / container teardown) and no other instance can
+        resume the turn — the occurrence is genuinely orphaned and safe to
+        terminate in a reconciliation pass.
+        """
+        now = time.time() if now is None else now
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT * FROM scheduled_research_occurrences
+                   WHERE status = 'running' AND execution_phase = 'executing'
+                     AND lease_expires_at < ?
+                   ORDER BY accepted_at, occurrence_id""",
+                (now,),
+            ).fetchall()
+        return [
+            {**dict(row), "payload": json.loads(row["payload_json"])}
+            for row in rows
+        ]
+
+    def finish_orphaned_executing_occurrence(
+        self,
+        occurrence_id: str,
+        lease_token: str,
+        error_code: Optional[str],
+        error: Optional[str],
+        terminal_event_id: str,
+        terminal_event_body: str,
+    ) -> bool:
+        """Terminate an expired-executing occurrence whose owner is gone.
+
+        Unlike ``finish_scheduled_research_occurrence`` this deliberately runs
+        with an *expired* lease: the lease being stale is exactly what proves
+        the original executor is dead. Gated on ``execution_phase = 'executing'``
+        so an abandoned pre-execution authorization (already reclaimable by the
+        worker) is never terminated here.
+        """
+        now = time.time()
+
+        def _finish(conn: sqlite3.Connection) -> bool:
+            cursor = conn.execute(
+                """UPDATE scheduled_research_occurrences
+                   SET status = 'failed', lease_token = NULL, lease_expires_at = NULL,
+                       completed_at = ?, last_error_code = ?, last_error = ?,
+                       updated_at = ?
+                   WHERE occurrence_id = ? AND status = 'running'
+                     AND execution_phase = 'executing'
+                     AND lease_token = ? AND lease_expires_at < ?""",
+                (now, error_code, error, now, occurrence_id, lease_token, now),
+            )
+            if cursor.rowcount != 1:
+                return False
+            conn.execute(
+                """INSERT INTO scheduled_research_event_outbox (
+                       event_id, occurrence_id, sequence, raw_body,
+                       available_at, created_at
+                   ) VALUES (?, ?, 3, ?, ?, ?)""",
+                (terminal_event_id, occurrence_id, terminal_event_body, now, now),
+            )
+            return True
+
+        return self._execute_write(_finish)
+
     def enqueue_scheduled_research_event(
         self,
         occurrence_id: str,

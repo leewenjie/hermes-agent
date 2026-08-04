@@ -463,6 +463,122 @@ def test_expired_executing_occurrence_is_not_automatically_replayed(tmp_path):
     assert health["oldest_running_age_seconds"] is not None
 
 
+def test_orphaned_executing_list_requires_an_expired_lease(tmp_path):
+    """Only executions whose local lease has expired are orphans (owner dead);
+    a live lease is never listed, even when the phase is executing."""
+    db = SessionDB(tmp_path / "state.db")
+    payload = _payload()
+    _accept_and_authorize(db, payload)
+    claim = db.claim_scheduled_research_occurrence(lease_seconds=30)
+    assert claim is not None
+    assert db.begin_scheduled_research_execution(
+        payload["occurrence_id"],
+        claim["lease_token"],
+        claim["billing_event_id"],
+    )
+
+    assert db.list_orphaned_executing_occurrences() == []
+
+    with db._lock:
+        db._conn.execute(
+            "UPDATE scheduled_research_occurrences SET lease_expires_at = 0 "
+            "WHERE occurrence_id = ?",
+            (payload["occurrence_id"],),
+        )
+        db._conn.commit()
+
+    orphans = db.list_orphaned_executing_occurrences()
+    assert len(orphans) == 1
+    assert orphans[0]["occurrence_id"] == payload["occurrence_id"]
+    assert orphans[0]["payload"]["occurrence_id"] == payload["occurrence_id"]
+
+
+def test_orphaned_executing_finish_requires_an_expired_lease(tmp_path):
+    """A still-live execution must never be terminated by the reconciliation
+    path — only an expired lease proves the owning process is gone."""
+    db = SessionDB(tmp_path / "state.db")
+    payload = _payload()
+    _accept_and_authorize(db, payload)
+    claim = db.claim_scheduled_research_occurrence(lease_seconds=30)
+    assert claim is not None
+    assert db.begin_scheduled_research_execution(
+        payload["occurrence_id"],
+        claim["lease_token"],
+        claim["billing_event_id"],
+    )
+
+    assert not db.finish_orphaned_executing_occurrence(
+        payload["occurrence_id"],
+        claim["lease_token"],
+        "execution_interrupted",
+        "interrupted",
+        "terminal-event",
+        '{"status":"failed"}',
+    )
+    health = db.get_scheduled_research_health()
+    assert health["running_count"] == 1
+    assert health["expired_leases"] == {"authorizing": 0, "executing": 0}
+
+    with db._lock:
+        db._conn.execute(
+            "UPDATE scheduled_research_occurrences SET lease_expires_at = 0 "
+            "WHERE occurrence_id = ?",
+            (payload["occurrence_id"],),
+        )
+        db._conn.commit()
+
+    assert db.finish_orphaned_executing_occurrence(
+        payload["occurrence_id"],
+        claim["lease_token"],
+        "execution_interrupted",
+        "interrupted",
+        "terminal-event",
+        '{"status":"failed"}',
+    )
+    assert db.list_orphaned_executing_occurrences() == []
+    row = db.get_scheduled_research_occurrence_payload(payload["occurrence_id"])
+    assert row["occurrence_id"] == payload["occurrence_id"]
+
+
+def test_orphaned_executing_finish_enqueues_terminal_event(tmp_path):
+    """Reconciling an orphaned execution marks it failed and publishes the
+    terminal lifecycle event so the authoritative occurrence reaches a
+    terminal state instead of wedging at accepted/running forever."""
+    db = SessionDB(tmp_path / "state.db")
+    payload = _payload()
+    _accept_and_authorize(db, payload)
+    claim = db.claim_scheduled_research_occurrence(lease_seconds=30)
+    assert claim is not None
+    assert db.begin_scheduled_research_execution(
+        payload["occurrence_id"],
+        claim["lease_token"],
+        claim["billing_event_id"],
+    )
+    with db._lock:
+        db._conn.execute(
+            "UPDATE scheduled_research_occurrences SET lease_expires_at = 0 "
+            "WHERE occurrence_id = ?",
+            (payload["occurrence_id"],),
+        )
+        db._conn.commit()
+
+    terminal_event_id = "00000000-0000-4000-8000-0000000000ee"
+    assert db.finish_orphaned_executing_occurrence(
+        payload["occurrence_id"],
+        claim["lease_token"],
+        "execution_interrupted",
+        "Scheduled research execution was interrupted by a runtime restart.",
+        terminal_event_id,
+        '{"status":"failed"}',
+    )
+
+    pending = db.list_pending_scheduled_research_events()
+    assert [event["event_id"] for event in pending] == [terminal_event_id]
+    health = db.get_scheduled_research_health()
+    assert health["running_count"] == 0
+    assert health["expired_leases"] == {"authorizing": 0, "executing": 0}
+
+
 def test_scheduled_research_health_reports_outbox_settlement_state(tmp_path):
     db = SessionDB(tmp_path / "state.db")
     payload = _payload()
