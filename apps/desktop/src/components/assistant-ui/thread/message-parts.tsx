@@ -46,25 +46,25 @@ const ThinkingDisclosure: FC<{
   timerKey?: string
 }> = ({ children, messageRunning = false, pending = false, timerKey }) => {
   const { t } = useI18n()
-  // `null` = no explicit user toggle yet, defer to the streaming default.
-  // The default is "auto-open while streaming, auto-collapse when done" so
-  // reasoning surfaces a live preview without manual interaction. The first
-  // explicit toggle wins from then on.
-  const [userOpen, setUserOpen] = useState<boolean | null>(null)
+  // Reasoning is an explicit detail view. Streaming state owns the visible
+  // activity signal (shimmer + timer), but must never open raw reasoning on
+  // its own. This keeps an arriving reasoning event from becoming an
+  // accidental transcript disclosure; the first click is the user's opt-in.
+  const [userOpen, setUserOpen] = useState(false)
   const elapsed = useElapsedSeconds(pending, timerKey)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const contentRef = useRef<HTMLDivElement | null>(null)
   const enterRef = useEnterAnimation(messageRunning, timerKey)
 
-  const open = userOpen ?? pending
-  const isPreview = pending && userOpen === null
+  const open = userOpen
+  const isLivePreview = pending && userOpen
 
-  // While the preview is live, pin the scroll container to the bottom on
-  // every content growth so the latest tokens are always visible. Combined
-  // with the top mask in styles.css, this reads as text settling in from
-  // below while older lines fade out at the top.
+  // Once the user opts into the live detail view, pin the scroll container to
+  // the bottom on every content growth so the latest tokens are visible.
+  // Combined with the top mask in styles.css, this reads as text settling in
+  // from below while older lines fade out at the top.
   useEffect(() => {
-    if (!isPreview) {
+    if (!isLivePreview) {
       return
     }
 
@@ -86,7 +86,7 @@ const ThinkingDisclosure: FC<{
     return () => observer.disconnect()
     // Re-run when the disclosure toggles so the observer attaches to the new
     // DOM after expand/collapse (refs are conditionally rendered on `open`).
-  }, [isPreview, open])
+  }, [isLivePreview, open])
 
   return (
     <div
@@ -119,7 +119,7 @@ const ThinkingDisclosure: FC<{
             // and inherits the disclosure-level opacity fade defined in
             // styles.css (~0.67 at rest, 1 on hover/focus).
             'mt-0.5 w-full min-w-0 max-w-full overflow-hidden wrap-anywhere pb-1',
-            isPreview && 'thinking-preview max-h-40'
+            isLivePreview && 'thinking-preview max-h-40'
           )}
           ref={scrollRef}
         >

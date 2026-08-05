@@ -474,9 +474,12 @@ describe('assistant-ui streaming renderer', () => {
     const ui = within(container)
     const thinkingToggle = ui.getByRole('button', { name: /thinking/i })
 
-    if (thinkingToggle.getAttribute('aria-expanded') !== 'true') {
-      fireEvent.click(thinkingToggle)
-    }
+    expect(thinkingToggle.getAttribute('aria-expanded')).toBe('false')
+    expect(container.querySelector('[data-slot="aui_reasoning-text"]')).toBeNull()
+    expect(container.textContent).toContain('Thinking')
+    expect(container.textContent).toMatch(/(?:\d+s|\d+:\d{2})/)
+
+    fireEvent.click(thinkingToggle)
 
     await waitFor(() => {
       expect(container.querySelector('[data-slot="code-card"]')).toBeTruthy()
@@ -520,8 +523,9 @@ describe('assistant-ui streaming renderer', () => {
     expect(disclosures.length).toBe(2)
 
     expect(disclosures[0].querySelector('button')?.getAttribute('aria-expanded')).toBe('false')
-    expect(disclosures[1].querySelector('button')?.getAttribute('aria-expanded')).toBe('true')
+    expect(disclosures[1].querySelector('button')?.getAttribute('aria-expanded')).toBe('false')
     expect(container.textContent).not.toContain('Complete first thought.')
+    expect(container.textContent).not.toContain('Streaming second thought.')
     expect(container.textContent).toContain('Interim answer.')
   })
 
