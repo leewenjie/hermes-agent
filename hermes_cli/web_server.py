@@ -682,7 +682,10 @@ async def security_headers_middleware(request: Request, call_next):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Robots-Tag", "noindex, nofollow, noarchive")
     frame_parent = request.headers.get("referer", "").lower().startswith("https://oxaide.com/")
-    oxaide_embed = request.headers.get("sec-fetch-dest", "").lower() == "iframe" and frame_parent
+    # Cloudflare may remove Sec-Fetch-Dest before the container sees the
+    # request. The branded parent origin is the stable boundary here; direct
+    # navigation still works normally, but only Oxaide can frame the runtime.
+    oxaide_embed = frame_parent
     response.headers.setdefault("X-Frame-Options", "DENY")
     if oxaide_embed:
         response.headers.pop("X-Frame-Options", None)
