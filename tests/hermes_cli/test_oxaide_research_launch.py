@@ -10,6 +10,7 @@ from hermes_cli import oxaide_research_launch as launch
 from hermes_cli import web_server
 from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 from hermes_state import OxaideResearchLaunchConflict, SessionDB
+from tui_gateway.oxaide_turns import OxaideTurnClient
 
 
 @pytest.fixture
@@ -98,6 +99,20 @@ def test_dispatch_lease_recovers_only_after_expiry(launch_env):
         assert db.claim_oxaide_research_launch_dispatch(payload["dispatch_id"], lease_seconds=30)
     finally:
         db.close()
+
+
+def test_machine_transport_declares_a_complete_turn_context(launch_env, monkeypatch):
+    monkeypatch.setenv(
+        "HERMES_OXAIDE_USAGE_SIGNING_SECRET",
+        "usage-signing-test-secret-at-least-32-bytes",
+    )
+
+    transport = launch._MachineTransport(_payload())
+    assert transport.trusted_context["context_kind"] == "machine_launch"
+    assert transport.trusted_context["dispatch_id"] == _payload()["dispatch_id"]
+
+    client = OxaideTurnClient(transport.trusted_context)
+    assert client.context_kind == "machine_launch"
 
 
 def test_session_attachment_rolls_back_when_dispatch_lease_is_lost(launch_env):

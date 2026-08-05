@@ -113,6 +113,7 @@ class OxaideTurnClient:
         ).strip()
         self.runtime_key = str(trusted_context.get("runtime_key") or "").strip()
         self.user_id = str(trusted_context.get("user_id") or "").strip()
+        self.dispatch_id = str(trusted_context.get("dispatch_id") or "").strip()
         self.scheduled_research_occurrence_id = str(
             trusted_context.get("scheduled_research_occurrence_id") or ""
         ).strip()
@@ -129,6 +130,7 @@ class OxaideTurnClient:
             self.user_id,
         ))
         browser_context_complete = bool(self.jti and self.expires_at)
+        machine_context_complete = bool(self.dispatch_id)
         scheduled_context_complete = bool(self.scheduled_research_occurrence_id)
         if scheduled_context_complete:
             try:
@@ -141,8 +143,13 @@ class OxaideTurnClient:
                 ) from exc
         if (
             not required_identity
-            or self.context_kind not in {"browser_launch", "scheduled_research"}
+            or self.context_kind not in {
+                "browser_launch",
+                "machine_launch",
+                "scheduled_research",
+            }
             or (self.context_kind == "browser_launch" and not browser_context_complete)
+            or (self.context_kind == "machine_launch" and not machine_context_complete)
             or (self.context_kind == "scheduled_research" and not scheduled_context_complete)
         ):
             raise OxaideTurnError("trusted Oxaide launch context is incomplete")

@@ -39,6 +39,7 @@ class _MachineTransport:
 
     def __init__(self, payload: dict[str, Any]):
         self.trusted_context = {
+            "context_kind": "machine_launch",
             "workspace_id": payload["workspace_id"],
             "user_id": payload["user_id"],
             "runtime_key": payload["runtime_key"],
