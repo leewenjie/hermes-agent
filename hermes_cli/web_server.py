@@ -681,7 +681,12 @@ async def security_headers_middleware(request: Request, call_next):
     response = await call_next(request)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Robots-Tag", "noindex, nofollow, noarchive")
+    frame_parent = request.headers.get("referer", "").lower().startswith("https://oxaide.com/")
+    oxaide_embed = request.headers.get("sec-fetch-dest", "").lower() == "iframe" and frame_parent
     response.headers.setdefault("X-Frame-Options", "DENY")
+    if oxaide_embed:
+        response.headers.pop("X-Frame-Options", None)
+        response.headers["Content-Security-Policy"] = "frame-ancestors https://oxaide.com"
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault(
         "Permissions-Policy",
@@ -700,6 +705,13 @@ async def security_headers_middleware(request: Request, call_next):
             "font-src 'self'; connect-src 'self' https://cloudflareinsights.com; form-action 'self'; "
             "frame-ancestors 'none'; base-uri 'none'",
         )
+        if oxaide_embed:
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'none'; style-src 'unsafe-inline'; "
+                "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com; "
+                "font-src 'self'; connect-src 'self' https://cloudflareinsights.com; form-action 'self'; "
+                "frame-ancestors https://oxaide.com; base-uri 'none'"
+            )
     return response
 
 
