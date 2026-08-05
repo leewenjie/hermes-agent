@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 def _classify_responses_issuer(
     *,
     is_xai_responses: bool = False,
+    is_deepseek_responses: bool = False,
     is_github_responses: bool = False,
     is_codex_backend: bool = False,
     base_url: Optional[str] = None,
@@ -38,9 +39,15 @@ def _classify_responses_issuer(
     persisted reasoning items and filtering at replay time lets a single
     conversation switch models without poisoning history with un-decryptable
     reasoning blocks.
+
+    DeepSeek's Responses surface (``deepseek-v4-flash``) is included so a
+    session that switches between DeepSeek and another Responses provider
+    correctly drops foreign-issuer reasoning blobs.
     """
     if is_xai_responses:
         return "xai_responses"
+    if is_deepseek_responses:
+        return "deepseek_responses"
     if is_github_responses:
         return "github_responses"
     if is_codex_backend:
@@ -314,6 +321,7 @@ def _chat_messages_to_responses_input(
     messages: List[Dict[str, Any]],
     *,
     is_xai_responses: bool = False,
+    is_deepseek_responses: bool = False,
     is_github_responses: bool = False,
     replay_encrypted_reasoning: bool = True,
     current_issuer_kind: Optional[str] = None,
@@ -1376,6 +1384,22 @@ def _normalize_codex_response(
         finish_reason = "incomplete"
     elif saw_streaming_or_item_incomplete:
         finish_reason = "incomplete"
+    elif (
+        issuer_kind == "deepseek_responses"
+        and final_text
+        and not saw_streaming_or_item_incomplete
+        and not has_incomplete_items
+    ):
+        # DeepSeek's /responses surface does not reliably tag the final
+        # answer message with ``phase="final_answer"`` — the concluding
+        # message is frequently emitted with ``phase="commentary"`` or no
+        # phase at all (verified live against deepseek-v4-flash, 2026-08).
+        # The Codex-specific heuristic below would therefore mark a
+        # completed, fully-answered DeepSeek turn as ``incomplete`` and
+        # burn 3 fruitless continuation retries before failing. When the
+        # response is completed with real final text, no tool calls, and
+        # no queued/in-progress items, treat it as a completed turn.
+        finish_reason = "stop"
     elif (has_incomplete_items or saw_commentary_phase) and not saw_final_answer_phase:
         finish_reason = "incomplete"
     elif (reasoning_items_raw or reasoning_parts or saw_reasoning_item) and not final_text:

@@ -68,6 +68,7 @@ class ResponsesApiTransport(ProviderTransport):
         from agent.codex_responses_adapter import _classify_responses_issuer
         return _classify_responses_issuer(
             is_xai_responses=params.get("is_xai_responses") is True,
+            is_deepseek_responses=params.get("is_deepseek_responses") is True,
             is_github_responses=params.get("is_github_responses") is True,
             is_codex_backend=params.get("is_codex_backend") is True,
             base_url=params.get("base_url"),
@@ -81,6 +82,7 @@ class ResponsesApiTransport(ProviderTransport):
         return _chat_messages_to_responses_input(
             messages,
             is_xai_responses=kwargs.get("is_xai_responses") is True,
+            is_deepseek_responses=kwargs.get("is_deepseek_responses") is True,
             is_github_responses=kwargs.get("is_github_responses") is True,
             replay_encrypted_reasoning=bool(
                 kwargs.get("replay_encrypted_reasoning", True)
@@ -120,6 +122,7 @@ class ResponsesApiTransport(ProviderTransport):
             is_github_responses: bool — Copilot/GitHub models backend
             is_codex_backend: bool — chatgpt.com/backend-api/codex
             is_xai_responses: bool — xAI/Grok backend
+            is_deepseek_responses: bool — DeepSeek Responses API backend
             github_reasoning_extra: dict | None — Copilot reasoning params
         """
         from agent.codex_responses_adapter import (
@@ -141,6 +144,7 @@ class ResponsesApiTransport(ProviderTransport):
         is_github_responses = params.get("is_github_responses") is True
         is_codex_backend = params.get("is_codex_backend") is True
         is_xai_responses = params.get("is_xai_responses") is True
+        is_deepseek_responses = params.get("is_deepseek_responses") is True
         replay_encrypted_reasoning = bool(
             params.get("replay_encrypted_reasoning", True)
         )
@@ -232,6 +236,35 @@ class ResponsesApiTransport(ProviderTransport):
                 filtered.append({"type": "web_search"})
                 response_tools = filtered
 
+        # DeepSeek server-side web search.
+        #
+        # deepseek-v4-flash on DeepSeek's /responses surface exposes a native,
+        # server-executed ``web_search`` built-in (declared as
+        # ``{"type": "web_search"}``) — same first-class treatment as xAI's
+        # Grok native search. When the agent has a client-side ``web_search``
+        # function (i.e. the web toolset is enabled), swap it for the native
+        # built-in so the search actually runs server-side and the turn
+        # completes with a real answer instead of a stalled
+        # ``web_search_call`` that never reconciles. DeepSeek's Responses API
+        # rejects two tools sharing the name ``web_search`` (HTTP 400
+        # "Duplicate tool names"), so we drop the client-side function for the
+        # DeepSeek path and let the native tool satisfy it.
+        #
+        # Unlike xAI, DeepSeek's native web search needs NO external backend
+        # (Firecrawl/Exa/Tavily/etc.) — the search runs inside the DeepSeek
+        # API itself. So even when Hermes has no client-side ``web_search``
+        # tool (no web provider configured), we still expose the native
+        # built-in: the model decides when to search, executes it server-side,
+        # and streams a final answer. This is scoped to the DeepSeek Responses
+        # surface only and never touches other providers.
+        if is_deepseek_responses and response_tools:
+            filtered = [
+                t for t in response_tools
+                if not (isinstance(t, dict) and t.get("name") == "web_search")
+            ]
+            filtered.append({"type": "web_search"})
+            response_tools = filtered
+
         # ``tools`` MUST be omitted entirely when there are no functions to
         # expose: the openai SDK's ``responses.stream()`` / ``responses.parse()``
         # eagerly call ``_make_tools(tools)`` which does ``for tool in tools``
@@ -246,6 +279,7 @@ class ResponsesApiTransport(ProviderTransport):
             "input": _chat_messages_to_responses_input(
                 payload_messages,
                 is_xai_responses=is_xai_responses,
+                is_deepseek_responses=is_deepseek_responses,
                 is_github_responses=is_github_responses,
                 replay_encrypted_reasoning=replay_encrypted_reasoning,
                 current_issuer_kind=issuer_kind,

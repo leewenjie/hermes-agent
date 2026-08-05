@@ -346,17 +346,17 @@ def test_active_managed_occurrence_hits_wall_clock_deadline(monkeypatch):
     monkeypatch.setattr(
         scheduler, "_OXAIDE_MANAGED_EXECUTION_TIMEOUT_SECONDS", 0.02
     )
-    monkeypatch.setenv("HERMES_OXAIDE_MODEL", "gpt-5.6-luna")
-    monkeypatch.setenv("HERMES_OXAIDE_PROVIDER", "azure-foundry")
+    monkeypatch.setenv("HERMES_OXAIDE_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("HERMES_OXAIDE_PROVIDER", "deepseek")
     monkeypatch.setattr(run_agent, "AIAgent", ActiveManagedAgent)
     resolver_kwargs = {}
 
     def resolve_managed_runtime(**kwargs):
         resolver_kwargs.update(kwargs)
         return {
-            "provider": "azure-foundry",
+            "provider": "deepseek",
             "api_mode": "codex_responses",
-            "base_url": "https://resource.openai.azure.com/openai/v1",
+            "base_url": "https://api.deepseek.com",
             "api_key": "test-key",
             "source": "test",
         }
@@ -384,8 +384,8 @@ def test_active_managed_occurrence_hits_wall_clock_deadline(monkeypatch):
         time.sleep(0.001)
     assert agent._interrupted is True
     assert "execution deadline" in agent._interrupt_msg
-    assert resolver_kwargs["requested"] == "azure-foundry"
-    assert resolver_kwargs["target_model"] == "gpt-5.6-luna"
+    assert resolver_kwargs["requested"] == "deepseek"
+    assert resolver_kwargs["target_model"] == "deepseek-v4-flash"
 
 
 def test_managed_deadline_is_bounded_when_interrupt_and_close_block(monkeypatch):
@@ -419,16 +419,16 @@ def test_managed_deadline_is_bounded_when_interrupt_and_close_block(monkeypatch)
     monkeypatch.setattr(
         scheduler, "_OXAIDE_MANAGED_EXECUTION_TIMEOUT_SECONDS", 0.02
     )
-    monkeypatch.setenv("HERMES_OXAIDE_MODEL", "gpt-5.6-luna")
-    monkeypatch.setenv("HERMES_OXAIDE_PROVIDER", "azure-foundry")
+    monkeypatch.setenv("HERMES_OXAIDE_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("HERMES_OXAIDE_PROVIDER", "deepseek")
     monkeypatch.setattr(run_agent, "AIAgent", BlockingShutdownAgent)
     monkeypatch.setattr(
         runtime_provider,
         "resolve_runtime_provider",
         lambda **_kwargs: {
-            "provider": "azure-foundry",
+            "provider": "deepseek",
             "api_mode": "codex_responses",
-            "base_url": "https://resource.openai.azure.com/openai/v1",
+            "base_url": "https://api.deepseek.com",
             "api_key": "test-key",
             "source": "test",
         },
@@ -472,16 +472,16 @@ def test_managed_deadline_is_bounded_when_interrupt_and_close_block(monkeypatch)
     [
         ("provider", "openrouter", "unapproved provider"),
         ("api_mode", "chat_completions", "unapproved API mode"),
-        ("base_url", "https://openrouter.ai/api/v1", "non-Azure endpoint"),
+        ("base_url", "https://openrouter.ai/api/v1", "non-DeepSeek endpoint"),
         (
             "base_url",
             "https://openai.azure.com.attacker.test/openai/v1",
-            "non-Azure endpoint",
+            "non-DeepSeek endpoint",
         ),
         (
             "base_url",
-            "https://resource.cognitiveservices.azure.com.attacker.test/openai/v1",
-            "non-Azure endpoint",
+            "https://api.deepseek.com.attacker.test",
+            "non-DeepSeek endpoint",
         ),
     ],
 )
@@ -490,9 +490,9 @@ def test_managed_runtime_rejects_unapproved_resolution(field, value, message):
     from cron.scheduler import _validate_oxaide_managed_runtime
 
     runtime = {
-        "provider": "azure-foundry",
+        "provider": "deepseek",
         "api_mode": "codex_responses",
-        "base_url": "https://resource.openai.azure.com/openai/v1",
+        "base_url": "https://api.deepseek.com",
     }
     runtime[field] = value
 
@@ -500,18 +500,13 @@ def test_managed_runtime_rejects_unapproved_resolution(field, value, message):
         _validate_oxaide_managed_runtime(runtime)
 
 
-def test_managed_runtime_accepts_approved_azure_hosts():
+def test_managed_runtime_accepts_approved_deepseek_host():
     from cron.scheduler import _validate_oxaide_managed_runtime
 
-    for host in (
-        "https://resource.openai.azure.com/openai/v1",
-        "https://resource.services.ai.azure.com/openai/v1",
-        "https://resource.cognitiveservices.azure.com/openai/v1",
-    ):
-        _validate_oxaide_managed_runtime(
-            {
-                "provider": "azure-foundry",
-                "api_mode": "codex_responses",
-                "base_url": host,
-            }
-        )
+    _validate_oxaide_managed_runtime(
+        {
+            "provider": "deepseek",
+            "api_mode": "codex_responses",
+            "base_url": "https://api.deepseek.com",
+        }
+    )

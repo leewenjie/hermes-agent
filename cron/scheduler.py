@@ -48,8 +48,8 @@ from utils import base_url_host_matches
 
 logger = logging.getLogger(__name__)
 _OXAIDE_MANAGED_EXECUTION_TIMEOUT_SECONDS = 180.0
-_OXAIDE_MANAGED_MODEL = "gpt-5.6-luna"
-_OXAIDE_MANAGED_PROVIDER = "azure-foundry"
+_OXAIDE_MANAGED_MODEL = "deepseek-v4-flash"
+_OXAIDE_MANAGED_PROVIDER = "deepseek"
 _OXAIDE_MANAGED_API_MODE = "codex_responses"
 
 
@@ -61,7 +61,7 @@ def _validate_oxaide_managed_runtime(runtime: dict[str, Any]) -> None:
     if str(runtime.get("provider") or "").strip().lower() != _OXAIDE_MANAGED_PROVIDER:
         raise RuntimeError(
             "Managed Scheduled Research resolved an unapproved provider; "
-            "only Azure Foundry is allowed"
+            f"only {_OXAIDE_MANAGED_PROVIDER} is allowed"
         )
     if str(runtime.get("api_mode") or "").strip().lower() != _OXAIDE_MANAGED_API_MODE:
         raise RuntimeError(
@@ -70,13 +70,9 @@ def _validate_oxaide_managed_runtime(runtime: dict[str, Any]) -> None:
         )
 
     base_url = str(runtime.get("base_url") or "").strip()
-    if not (
-        base_url_host_matches(base_url, "openai.azure.com")
-        or base_url_host_matches(base_url, "services.ai.azure.com")
-        or base_url_host_matches(base_url, "cognitiveservices.azure.com")
-    ):
+    if not base_url_host_matches(base_url, "deepseek.com"):
         raise RuntimeError(
-            "Managed Scheduled Research resolved a non-Azure endpoint; "
+            "Managed Scheduled Research resolved a non-DeepSeek endpoint; "
             "custom and OpenRouter endpoints are not allowed"
         )
 
