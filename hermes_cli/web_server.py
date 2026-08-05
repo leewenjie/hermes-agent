@@ -681,7 +681,7 @@ async def security_headers_middleware(request: Request, call_next):
     response = await call_next(request)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Robots-Tag", "noindex, nofollow, noarchive")
-    frame_parent = request.headers.get("referer", "").lower().startswith("https://oxaide.com/")
+    frame_parent = request.headers.get("x-oxaide-branded-embed") == "true"
     # Cloudflare may remove Sec-Fetch-Dest before the container sees the
     # request. The branded parent origin is the stable boundary here; direct
     # navigation still works normally, but only Oxaide can frame the runtime.
