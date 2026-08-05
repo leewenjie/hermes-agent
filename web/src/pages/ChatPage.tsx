@@ -168,12 +168,15 @@ export default function ChatPage({
   const reconnectAttemptRef = useRef(0);
   // Oxaide's explicit Start New action arrives as /chat?fresh=1. Seed the
   // one-shot flag before the first PTY effect so a stale localStorage attach
-  // token cannot reconnect the previous conversation.
-  const forceFreshPtyRef = useRef(
+  // token cannot reconnect the previous conversation. Fresh is authoritative:
+  // a stale handoff must not carry a contradictory resume target.
+  const freshRequested =
     searchParams.get("fresh") === "1" ||
-      searchParams.get("fresh") === "true" ||
-      searchParams.get("fresh") === "yes" ||
-      searchParams.get("fresh") === "on",
+    searchParams.get("fresh") === "true" ||
+    searchParams.get("fresh") === "yes" ||
+    searchParams.get("fresh") === "on";
+  const forceFreshPtyRef = useRef(
+    freshRequested,
   );
   const blockedInputNoticeRef = useRef(false);
   const lastResumeReconnectAtRef = useRef(0);
@@ -344,7 +347,14 @@ export default function ChatPage({
   // Sessions page relies on `/chat?resume=<id>` changing at runtime, so we must
   // treat the current resume target as part of the PTY identity and rebuild the
   // terminal session when it changes.
-  const resumeParam = searchParams.get("resume");
+  const resumeParam = freshRequested ? null : searchParams.get("resume");
+
+  useEffect(() => {
+    if (!freshRequested || !searchParams.has("resume")) return;
+    const next = new URLSearchParams(searchParams);
+    next.delete("resume");
+    setSearchParams(next, { replace: true });
+  }, [freshRequested, searchParams, setSearchParams]);
   // Profile-scoped chat: spawn the PTY under the globally selected
   // management profile. Changing it remounts the terminal (key below /
   // effect dep) so the user explicitly starts a fresh scoped session.
