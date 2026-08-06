@@ -7,26 +7,64 @@ streaming, or the _run_codex_stream() call path.
 
 import hashlib
 import json
+import re
 from typing import Any, Dict, List, Optional
 
 from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse, ToolCall
 
+# Cron fires build session_id as ``cron_<job_id>_<YYYYMMDD_HHMMSS>`` (see
+# cron/scheduler.py). The trailing timestamp is per-fire noise; stripped so
+# repeat fires of the same job share a cache scope (see #51395/#52295).
+_CRON_SESSION_ID_RE = re.compile(r"^(cron_.+)_\d{8}_\d{6}$")
 
-def _content_cache_key(instructions: str, tools: Optional[List[Dict[str, Any]]]) -> Optional[str]:
-    """Content-address the prompt cache key from the static request prefix.
 
-    Returns ``pck_<sha256[:24]>`` of (instructions + sorted tool schemas), or
-    None when there is nothing static to key on. The cache key is a routing
-    hint only — never a correctness boundary — so two requests sharing a system
-    prompt and tool set intentionally resolve to the same warm prefix bucket.
+def _cache_scope_from_session_id(session_id: Optional[str]) -> str:
+    """Normalize a physical session_id into a stable logical cache scope.
 
-    The fix this exists for: recurring cron jobs build session_id as
-    ``cron_<id>_<timestamp>``, so using session_id as the cache key made every
-    fire cache-cold. The static prefix (identity + tools) is identical across
-    fires, so hashing it gives a stable key that stays warm within the
-    provider's cache TTL. Sorting tools by name keeps the hash insertion-order
-    independent.
+    Every non-cron session_id already identifies one conversation/agent
+    instance (main run, a specific child/subagent, a sibling child, ...),
+    so it is used unchanged. Only cron's per-fire timestamp needs stripping.
+    """
+    sid = str(session_id or "")
+    match = _CRON_SESSION_ID_RE.match(sid)
+    return match.group(1) if match else sid
+
+
+def _bounded_prompt_cache_key(value: Any) -> Optional[str]:
+    """Return a provider-safe cache key without changing session identity."""
+    if value is None:
+        return None
+    key = str(value).strip()
+    if not key:
+        return None
+    if len(key) <= 64:
+        return key
+    # Match _content_cache_key's compact, collision-resistant routing-key shape.
+    digest = hashlib.sha256(key.encode("utf-8", errors="replace")).hexdigest()[:24]
+    return f"pck_{digest}"
+
+
+def _content_cache_key(
+    instructions: str,
+    tools: Optional[List[Dict[str, Any]]],
+    scope_id: str = "",
+) -> Optional[str]:
+    """Content-address the prompt cache key within a logical cache scope.
+
+    Returns ``pck_<sha256[:24]>`` of (scope_id + instructions + sorted tool
+    schemas), or None when there is nothing static to key on. The cache key
+    is a routing hint only — never a correctness boundary — so two requests
+    sharing a scope, system prompt, and tool set intentionally resolve to the
+    same warm prefix bucket.
+
+    ``scope_id`` (pass ``_cache_scope_from_session_id(session_id)``) keeps
+    unrelated sessions — independent conversations, main vs. child/subagent,
+    sibling children — from concentrating onto the same bucket merely because
+    their static prefix matches (see #78941), while still letting recurring
+    cron fires of one job share a stable key across their timestamped
+    session_ids (the original #51395/#52295 fix this built on). Sorting tools
+    by name keeps the hash insertion-order independent.
     """
     if not instructions and not tools:
         return None
@@ -39,9 +77,9 @@ def _content_cache_key(instructions: str, tools: Optional[List[Dict[str, Any]]])
         tools_part = json.dumps(
             sorted_tools, sort_keys=True, ensure_ascii=False, separators=(",", ":")
         )
-    # \x00 separator so instructions ending in the tool JSON can't collide with
-    # a request whose instructions contain that JSON and whose tools are empty.
-    content = f"{instructions or ''}\x00{tools_part}"
+    # \x00 separators so a scope/instructions/tools boundary can't be forged
+    # by content that happens to contain the same bytes.
+    content = f"{scope_id}\x00{instructions or ''}\x00{tools_part}"
     digest = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()[:24]
     return f"pck_{digest}"
 
@@ -293,16 +331,24 @@ class ResponsesApiTransport(ProviderTransport):
 
         session_id = params.get("session_id")
         # prompt_cache_key is content-addressed from the static prefix
-        # (instructions + tools), NOT session_id — recurring cron jobs carry a
-        # per-fire timestamp in session_id (cron_<id>_<ts>) that made every run
-        # cache-cold. session_id is left untouched for transcript isolation and
-        # the cache-scope routing headers below. Falls back to session_id when
-        # there is no static content to hash.
-        cache_key = _content_cache_key(instructions, response_tools) or session_id
+        # (instructions + tools) within a logical cache scope. The scope
+        # isolates unrelated sessions while letting recurring cron fires of
+        # the same job share a stable key across timestamped session_ids.
+        # Falls back to the scope id when there is no static content to hash.
+        _cache_scope = _cache_scope_from_session_id(session_id)
+        cache_key = _content_cache_key(instructions, response_tools, _cache_scope) or _cache_scope
         # xAI Responses takes prompt_cache_key in extra_body (set further
         # down); GitHub Models opts out of cache-key routing entirely.
         if not is_github_responses and not is_xai_responses and cache_key:
             kwargs["prompt_cache_key"] = cache_key
+
+        # Clamp over-long cache keys to provider-safe length.
+        if "prompt_cache_key" in kwargs:
+            bounded_cache_key = _bounded_prompt_cache_key(kwargs["prompt_cache_key"])
+            if bounded_cache_key is not None:
+                kwargs["prompt_cache_key"] = bounded_cache_key
+            else:
+                kwargs.pop("prompt_cache_key", None)
 
         if reasoning_enabled and is_xai_responses:
             from agent.model_metadata import grok_supports_reasoning_effort
@@ -368,11 +414,16 @@ class ResponsesApiTransport(ProviderTransport):
             # HTTP 400, but the OpenAI SDK's ``extra_headers`` kwarg maps
             # to actual HTTP request headers (not body fields).  We need
             # these headers for cache-scope routing so prompt cache hits
-            # remain high.  Send session_id / x-client-request-id as HTTP
+            # remain high.  Send scoped session_id / x-client-request-id as HTTP
             # headers while keeping ``prompt_cache_key`` in the body for
             # standard OpenAI routing as a belt-and-braces fallback.
-            cache_scope_id = str(session_id or "").strip()
-            if cache_scope_id:
+            bounded_scope = _bounded_prompt_cache_key(_cache_scope)
+            final_cache_key = kwargs.get("prompt_cache_key") or bounded_scope
+            if final_cache_key:
+                # Body routing key already set above; ensure header scope uses
+                # the normalized scope id for cross-session isolation.
+                pass
+            if _cache_scope:
                 existing_extra_headers = kwargs.get("extra_headers")
                 merged_extra_headers: Dict[str, str] = {}
                 if isinstance(existing_extra_headers, dict):
@@ -383,15 +434,26 @@ class ResponsesApiTransport(ProviderTransport):
                             if key and value is not None
                         }
                     )
-                merged_extra_headers["session_id"] = cache_scope_id
-                merged_extra_headers["x-client-request-id"] = cache_scope_id
+                merged_extra_headers["session_id"] = _cache_scope
+                merged_extra_headers["x-client-request-id"] = _cache_scope
                 kwargs["extra_headers"] = merged_extra_headers
+
+        # Guard request_overrides that may have injected long prompt_cache_key
+        # values via extra_body — clamp those too so provider validation
+        # doesn't reject the request for header/value length.
+        if isinstance(kwargs.get("extra_body"), dict) and "prompt_cache_key" in kwargs["extra_body"]:
+            extra_body = kwargs["extra_body"]
+            bounded = _bounded_prompt_cache_key(extra_body["prompt_cache_key"])
+            if bounded is not None:
+                extra_body["prompt_cache_key"] = bounded
+            else:
+                extra_body.pop("prompt_cache_key", None)
 
         max_tokens = params.get("max_tokens")
         if max_tokens is not None and not is_codex_backend:
             kwargs["max_output_tokens"] = max_tokens
 
-        if is_xai_responses and session_id:
+        if is_xai_responses and _cache_scope:
             existing_extra_headers = kwargs.get("extra_headers")
             merged_extra_headers: Dict[str, str] = {}
             if isinstance(existing_extra_headers, dict):
@@ -402,7 +464,7 @@ class ResponsesApiTransport(ProviderTransport):
                         if key and value is not None
                     }
                 )
-            merged_extra_headers["x-grok-conv-id"] = session_id
+            merged_extra_headers["x-grok-conv-id"] = _cache_scope
             kwargs["extra_headers"] = merged_extra_headers
 
             # xAI Responses cache-routing — body-level field per
@@ -413,7 +475,14 @@ class ResponsesApiTransport(ProviderTransport):
             merged_extra_body: Dict[str, Any] = {}
             if isinstance(existing_extra_body, dict):
                 merged_extra_body.update(existing_extra_body)
-            merged_extra_body.setdefault("prompt_cache_key", cache_key)
+            merged_extra_body.setdefault("prompt_cache_key", kwargs.get("prompt_cache_key", cache_key))
+            # Clamp the extra_body cache key as well.
+            if "prompt_cache_key" in merged_extra_body:
+                bounded_body = _bounded_prompt_cache_key(merged_extra_body["prompt_cache_key"])
+                if bounded_body is not None:
+                    merged_extra_body["prompt_cache_key"] = bounded_body
+                else:
+                    merged_extra_body.pop("prompt_cache_key", None)
             kwargs["extra_body"] = merged_extra_body
 
         return kwargs

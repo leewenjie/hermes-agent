@@ -990,23 +990,31 @@ class _CodexCompletionsAdapter:
 
         # Stable prompt-cache routing for the Codex/Responses aux path, mirroring
         # the main transport (agent/transports/codex.py::build_kwargs, which sets
-        # prompt_cache_key = _content_cache_key(instructions, tools)). Without
-        # this, MoA acting-aggregator and other auxiliary Responses calls stay
-        # cache-cold while the main Responses transport is warm (issue #53735).
-        # The key is content-addressed from the static prefix (instructions +
-        # tool schemas) so it stays warm across turns/fires. Guard the top-level
-        # field the same way the main transport does: xAI Responses takes the
-        # key in extra_body (not top-level) and GitHub/Copilot Responses opts
-        # out of cache-key routing entirely — for those hosts, skip it here.
+        # prompt_cache_key = _content_cache_key(instructions, tools, scope)).
+        # The scope isolates unrelated sessions while cron fires of one job share
+        # a stable key. Guard the top-level field the same way the main transport
+        # does: xAI Responses takes the key in extra_body (not top-level) and
+        # GitHub/Copilot Responses opts out of cache-key routing entirely.
         try:
-            from agent.transports.codex import _content_cache_key
+            from agent.transports.codex import (
+                _cache_scope_from_session_id,
+                _content_cache_key,
+            )
             from utils import base_url_host_matches
 
             _host_src = str(getattr(self._client, "base_url", "") or "")
             _is_xai = base_url_host_matches(_host_src, "x.ai") or base_url_host_matches(_host_src, "api.x.ai")
             _is_github = base_url_host_matches(_host_src, "githubcopilot.com")
             if not _is_xai and not _is_github and "prompt_cache_key" not in resp_kwargs:
-                _cache_key = _content_cache_key(instructions, resp_kwargs.get("tools"))
+                # Scope from the running turn's session_id (avoids cross-session bucket sharing).
+                try:
+                    from agent.turn_context import _runtime_main_value  # type: ignore
+
+                    _raw_sid = _runtime_main_value("session_id")
+                except Exception:
+                    _raw_sid = getattr(self, "_session_id", None) or ""
+                _scope = _cache_scope_from_session_id(_raw_sid)
+                _cache_key = _content_cache_key(instructions, resp_kwargs.get("tools"), _scope)
                 if _cache_key:
                     resp_kwargs["prompt_cache_key"] = _cache_key
         except Exception:
