@@ -101,7 +101,7 @@ def test_has_any_provider_configured_with_export_prefix(tmp_path, monkeypatch):
     # Blank any provider-shaped creds so os.environ short-circuit can't mask
     # the .env parse path.
     for key in list(__import__("os").environ):
-        if key.endswith(("_API_KEY", "_TOKEN")) and key != "BWS_ACCESS_TOKEN":
+        if key.endswith(("_API_KEY", "_TOKEN")):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     (tmp_path / ".env").write_text(
@@ -116,6 +116,6 @@ def test_has_any_provider_configured_with_export_prefix(tmp_path, monkeypatch):
     # load_hermes_dotenv may have populated at import/reload time, forcing the
     # function down its .env-reading branch.
     for key in list(__import__("os").environ):
-        if key.endswith(("_API_KEY", "_TOKEN")) and key != "BWS_ACCESS_TOKEN":
+        if key.endswith(("_API_KEY", "_TOKEN")):
             monkeypatch.delenv(key, raising=False)
     assert hmain._has_any_provider_configured() is True

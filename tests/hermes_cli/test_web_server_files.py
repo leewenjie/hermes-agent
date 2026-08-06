@@ -1020,7 +1020,6 @@ def test_other_credential_store_basenames_blocked(forced_files_client):
         "google_oauth_pending.json",
         "google_oauth.json",
         "webhook_subscriptions.json",
-        "bws_cache.json",
     ):
         p = root / name
         p.write_text("SECRET=abc123")

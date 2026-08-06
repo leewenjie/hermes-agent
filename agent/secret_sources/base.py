@@ -1,7 +1,7 @@
 """Secret-source contract: the ABC every secret backend implements.
 
 A *secret source* resolves credentials from an external secret manager
-(Bitwarden Secrets Manager, 1Password, an OS keystore, a user script, ...)
+(1Password, an OS keystore, a user script, ...)
 into environment-variable-shaped values at process startup, AFTER
 ``~/.hermes/.env`` has loaded and BEFORE the rest of Hermes reads
 ``os.environ``.
@@ -52,7 +52,7 @@ SECRET_SOURCE_API_VERSION = 1
 
 # Timeout the orchestrator enforces around fetch() when the source's
 # config section doesn't override it.  Generous because a first run may
-# include a one-time CLI binary auto-install (e.g. bws download+verify).
+# include a one-time CLI binary auto-install (e.g. op download+verify).
 DEFAULT_FETCH_TIMEOUT_SECONDS = 120.0
 
 # Default timeout for run_secret_cli() subprocess invocations.
@@ -86,8 +86,8 @@ class FetchResult:
     ``secrets`` holds what the source *would* contribute; whether each
     var is actually applied is the orchestrator's decision.  ``applied``
     and ``skipped`` exist for backward compatibility with the original
-    Bitwarden fetch-and-apply entry point and are left empty by
-    conforming ``fetch()`` implementations.
+    fetch-and-apply entry point and are left empty by conforming
+    ``fetch()`` implementations.
     """
 
     secrets: Dict[str, str] = field(default_factory=dict)
@@ -116,11 +116,11 @@ class SecretSource(ABC):
             Lowercase ``[a-z0-9_]+``.  Also the provenance label stored
             for every var this source supplies.
         label: Human-readable name used in startup messages and
-            ``hermes secrets status`` (e.g. ``"Bitwarden Secrets Manager"``).
+            ``hermes secrets status`` (e.g. ``"1Password"``).
         shape: ``"mapped"`` when the user explicitly binds env-var names
             to refs (1Password ``env:`` map, command source) or
             ``"bulk"`` when the backend injects whole projects/folders
-            of secrets implicitly (Bitwarden BSM).  The orchestrator
+            of secrets implicitly.  The orchestrator
             gives mapped sources precedence over bulk sources: an
             explicit binding is stronger intent than a project dump.
         scheme: Optional URI scheme this source owns for secret
@@ -168,8 +168,8 @@ class SecretSource(ABC):
         """Env vars the orchestrator must never let ANY source overwrite.
 
         Typically the source's own bootstrap-auth var (e.g.
-        ``BWS_ACCESS_TOKEN``) so a vault that contains its own access
-        token can't clobber the credential used to reach it.
+        ``OP_SERVICE_ACCOUNT_TOKEN``) so a vault that contains its own
+        access token can't clobber the credential used to reach it.
         """
         return frozenset()
 

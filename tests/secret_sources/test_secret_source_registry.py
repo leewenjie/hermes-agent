@@ -3,8 +3,8 @@
 Covers: registration gating (API version, name/scheme uniqueness, shape),
 apply_all precedence (mapped beats bulk, first-wins, override_existing,
 protected vars), conflict surfacing, timeout enforcement, provenance,
-and Bitwarden's SecretSource adapter — plus the conformance kit run
-against the bundled Bitwarden source.
+and 1Password's SecretSource adapter — plus the conformance kit run
+against the bundled 1Password source.
 """
 
 from __future__ import annotations
@@ -29,7 +29,6 @@ from agent.secret_sources.base import (  # noqa: E402
     scrub_ansi,
 )
 from agent.secret_sources import registry as reg  # noqa: E402
-from agent.secret_sources.bitwarden import BitwardenSource  # noqa: E402
 from tests.secret_sources.conformance import SecretSourceConformance  # noqa: E402
 
 
@@ -356,119 +355,6 @@ class TestHelpers:
 
 
 # ---------------------------------------------------------------------------
-# Bitwarden adapter
-# ---------------------------------------------------------------------------
-
-
-class TestBitwardenSource:
-    def test_identity(self):
-        src = BitwardenSource()
-        assert src.name == "bitwarden"
-        assert src.shape == "bulk"
-        assert src.scheme == "bws"
-
-    def test_override_existing_defaults_true(self):
-        src = BitwardenSource()
-        assert src.override_existing({}) is True
-        assert src.override_existing({"override_existing": False}) is False
-
-    def test_protected_vars_track_token_env(self):
-        src = BitwardenSource()
-        assert src.protected_env_vars({}) == frozenset({"BWS_ACCESS_TOKEN"})
-        assert src.protected_env_vars(
-            {"access_token_env": "CUSTOM_TOKEN"}
-        ) == frozenset({"CUSTOM_TOKEN"})
-
-    def test_fetch_missing_token_not_configured(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("BWS_ACCESS_TOKEN", raising=False)
-        result = BitwardenSource().fetch({"enabled": True}, tmp_path)
-        assert result.error_kind is ErrorKind.NOT_CONFIGURED
-        assert "BWS_ACCESS_TOKEN" in result.error
-
-    def test_fetch_missing_project_not_configured(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("BWS_ACCESS_TOKEN", "0.token")
-        result = BitwardenSource().fetch({"enabled": True}, tmp_path)
-        assert result.error_kind is ErrorKind.NOT_CONFIGURED
-        assert "project_id" in result.error
-
-    def test_fetch_delegates_to_fetch_bitwarden_secrets(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("BWS_ACCESS_TOKEN", "0.token")
-        import agent.secret_sources.bitwarden as bw
-
-        monkeypatch.setattr(bw, "find_bws", lambda **kw: Path("/fake/bws"))
-        captured = {}
-
-        def _fake_fetch(**kwargs):
-            captured.update(kwargs)
-            return {"MY_KEY": "val"}, ["a warning"]
-
-        monkeypatch.setattr(bw, "fetch_bitwarden_secrets", _fake_fetch)
-        result = BitwardenSource().fetch(
-            {"enabled": True, "project_id": "proj",
-             "server_url": " https://vault.bitwarden.eu "},
-            tmp_path,
-        )
-        assert result.ok
-        assert result.secrets == {"MY_KEY": "val"}
-        assert result.warnings == ["a warning"]
-        assert captured["project_id"] == "proj"
-        assert captured["server_url"] == "https://vault.bitwarden.eu"
-        assert captured["home_path"] == tmp_path
-
-    def test_fetch_runtime_error_classified(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("BWS_ACCESS_TOKEN", "0.token")
-        import agent.secret_sources.bitwarden as bw
-
-        monkeypatch.setattr(bw, "find_bws", lambda **kw: Path("/fake/bws"))
-
-        def _fail(**kwargs):
-            raise RuntimeError("bws exited 1: 401 unauthorized")
-
-        monkeypatch.setattr(bw, "fetch_bitwarden_secrets", _fail)
-        result = BitwardenSource().fetch(
-            {"enabled": True, "project_id": "proj"}, tmp_path
-        )
-        assert result.error_kind is ErrorKind.AUTH_FAILED
-
-    def test_e2e_through_orchestrator(self, tmp_path, monkeypatch):
-        """Full path: registry → BitwardenSource → env, with fetch mocked."""
-        monkeypatch.setenv("BWS_ACCESS_TOKEN", "0.token")
-        import agent.secret_sources.bitwarden as bw
-
-        monkeypatch.setattr(bw, "find_bws", lambda **kw: Path("/fake/bws"))
-        monkeypatch.setattr(
-            bw, "fetch_bitwarden_secrets",
-            lambda **kw: ({"ANTHROPIC_API_KEY": "sk-ant", "BWS_ACCESS_TOKEN": "steal"}, []),
-        )
-        reg.register_source(BitwardenSource())
-        env = {"BWS_ACCESS_TOKEN": "0.token"}
-        report = reg.apply_all(
-            {"bitwarden": {"enabled": True, "project_id": "proj"}},
-            tmp_path, environ=env,
-        )
-        assert env["ANTHROPIC_API_KEY"] == "sk-ant"
-        # The bootstrap token is protected even though BSM carried it.
-        assert env["BWS_ACCESS_TOKEN"] == "0.token"
-        assert report.provenance["ANTHROPIC_API_KEY"].source == "bitwarden"
-
-
-# ---------------------------------------------------------------------------
-# Conformance kit applied to the bundled source
-# ---------------------------------------------------------------------------
-
-
-class TestBitwardenConformance(SecretSourceConformance):
-    @pytest.fixture
-    def source(self, monkeypatch):
-        # Never hit the network / auto-install path in conformance runs.
-        import agent.secret_sources.bitwarden as bw
-
-        monkeypatch.setattr(bw, "find_bws", lambda **kw: None)
-        monkeypatch.delenv("BWS_ACCESS_TOKEN", raising=False)
-        return BitwardenSource()
-
-
-# ---------------------------------------------------------------------------
 # 1Password adapter
 # ---------------------------------------------------------------------------
 
@@ -551,43 +437,40 @@ class TestOnePasswordSource:
         assert result.ok
         assert len(result.warnings) == 2
 
-    def test_mapped_op_beats_bulk_bitwarden_through_orchestrator(
+    def test_mapped_op_beats_bulk_through_orchestrator(
         self, tmp_path, monkeypatch
     ):
-        """The headline multi-source scenario: both vaults claim the same var."""
-        import agent.secret_sources.bitwarden as bw
+        """The headline multi-source scenario: both sources claim the same var."""
         import agent.secret_sources.onepassword as op
 
-        monkeypatch.setenv("BWS_ACCESS_TOKEN", "0.token")
-        monkeypatch.setattr(bw, "find_bws", lambda **kw: Path("/fake/bws"))
-        monkeypatch.setattr(
-            bw, "fetch_bitwarden_secrets",
-            lambda **kw: ({"SHARED_KEY": "from-bitwarden",
-                           "BW_ONLY": "bw-val"}, []),
+        reg.register_source(
+            _make_source(
+                name="bulky", shape="bulk",
+                secrets={"SHARED_KEY": "from-bulk", "BULK_ONLY": "bulk-val"},
+            )
         )
         monkeypatch.setattr(op, "find_op", lambda *_a, **_kw: Path("/fake/op"))
         monkeypatch.setattr(
             op, "fetch_onepassword_secrets",
             lambda **kw: ({"SHARED_KEY": "from-1password"}, []),
         )
-        reg.register_source(bw.BitwardenSource())
         reg.register_source(op.OnePasswordSource())
-        env = {"BWS_ACCESS_TOKEN": "0.token"}
+        env: dict = {}
         report = reg.apply_all(
             {
-                # bitwarden listed FIRST — mapped 1Password must still win.
-                "sources": ["bitwarden", "onepassword"],
-                "bitwarden": {"enabled": True, "project_id": "proj"},
+                # bulk listed FIRST — mapped 1Password must still win.
+                "sources": ["bulky", "onepassword"],
+                "bulky": {"enabled": True},
                 "onepassword": {"enabled": True,
                                 "env": {"SHARED_KEY": "op://V/I/F"}},
             },
             tmp_path, environ=env,
         )
         assert env["SHARED_KEY"] == "from-1password"
-        assert env["BW_ONLY"] == "bw-val"
+        assert env["BULK_ONLY"] == "bulk-val"
         assert report.provenance["SHARED_KEY"].source == "onepassword"
-        assert report.provenance["BW_ONLY"].source == "bitwarden"
-        assert report.conflicts  # the shadowed bitwarden claim is surfaced
+        assert report.provenance["BULK_ONLY"].source == "bulky"
+        assert report.conflicts  # the shadowed bulk claim is surfaced
 
 
 class TestOnePasswordConformance(SecretSourceConformance):

@@ -2881,10 +2881,10 @@ def _model_flow_anthropic(config, current_model=""):
             from hermes_cli.env_loader import format_secret_source_suffix
             from hermes_cli.auth import PROVIDER_REGISTRY
 
-            # Surface which env var supplied the key so users with
-            # Bitwarden see "(from Bitwarden)" — without this, a detected
-            # BSM key looks identical to a key in .env and users assume
-            # nothing is wired up.
+            # Surface which env var supplied the key so users with an
+            # external secret source see its label — without this, a
+            # detected vault key looks identical to a key in .env and
+            # users assume nothing is wired up.
             source_suffix = ""
             for var in PROVIDER_REGISTRY["anthropic"].api_key_env_vars:
                 if os.getenv(var, "").strip() == existing_key:

@@ -21,19 +21,19 @@ _CREDENTIAL_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_KEY")
 # tests) don't spam the same warning multiple times.
 _WARNED_KEYS: set[str] = set()
 
-# Map of env-var name → source label ("bitwarden", etc.) for credentials
+# Map of env-var name → source label (e.g. "onepassword") for credentials
 # that were injected by an external secret source during load_hermes_dotenv().
 # Used by setup / `hermes model` flows to label detected credentials so
 # users understand WHERE a key came from when their .env doesn't contain it
 # directly (otherwise the "credentials detected ✓" line looks identical to
-# the .env case and they don't know Bitwarden is wired up).
+# the .env case and they don't know a secret source is wired up).
 _SECRET_SOURCES: dict[str, str] = {}
 
 # HERMES_HOME paths we've already pulled external secrets for during this
 # process.  ``load_hermes_dotenv()`` is called at module-import time from
 # several hot modules (cli.py, hermes_cli/main.py, run_agent.py,
 # trajectory_compressor.py, gateway/run.py, ...), so without this guard the
-# Bitwarden status line gets printed 3-5x per startup.  Bitwarden's own
+# secret-source status line gets printed 3-5x per startup.  The source's
 # in-process cache prevents redundant network calls, but the print, the
 # config re-parse, and the ASCII sanitization sweep still ran every time.
 _APPLIED_HOMES: set[str] = set()
@@ -42,12 +42,13 @@ _APPLIED_HOMES: set[str] = set()
 def get_secret_source(env_var: str) -> str | None:
     """Return the label of the secret source that supplied ``env_var``, if any.
 
-    Returns ``"bitwarden"`` for keys pulled from Bitwarden Secrets Manager
-    during the current process's ``load_hermes_dotenv()`` call.  Returns
-    ``None`` for keys that came from ``.env``, the shell environment, or
-    aren't tracked.  The returned label is metadata only: credential-pool
-    persistence may store it to explain the origin of a borrowed secret, but
-    must never treat it as authorization to persist the raw value.
+    Returns the source's name (e.g. ``"onepassword"``) for keys pulled from
+    an external secret source during the current process's
+    ``load_hermes_dotenv()`` call.  Returns ``None`` for keys that came from
+    ``.env``, the shell environment, or aren't tracked.  The returned label
+    is metadata only: credential-pool persistence may store it to explain
+    the origin of a borrowed secret, but must never treat it as
+    authorization to persist the raw value.
     """
     return _SECRET_SOURCES.get(env_var)
 
@@ -56,17 +57,17 @@ def reset_secret_source_cache() -> None:
     """Forget which HERMES_HOME paths have already had external secrets applied.
 
     The first call to ``_apply_external_secret_sources(home_path)`` in a
-    process pulls from Bitwarden (or other configured backend), records the
-    applied keys in ``_SECRET_SOURCES``, and remembers ``home_path`` so
-    subsequent calls in the same process are no-ops.  Call this to force the
-    next call to re-pull — useful for tests, and for long-running processes
-    that want to refresh after a config change.
+    process pulls from the configured backend, records the applied keys in
+    ``_SECRET_SOURCES``, and remembers ``home_path`` so subsequent calls in
+    the same process are no-ops.  Call this to force the next call to
+    re-pull — useful for tests, and for long-running processes that want to
+    refresh after a config change.
     """
     _APPLIED_HOMES.clear()
 
 
 def format_secret_source_suffix(env_var: str) -> str:
-    """Return a human-readable suffix like ``" (from Bitwarden)"`` or ``""``.
+    """Return a human-readable suffix like ``" (from 1Password)"`` or ``""``.
 
     Use this when printing a detected credential so the user can see where
     it came from.  Empty string when the credential came from ``.env`` or
@@ -76,8 +77,6 @@ def format_secret_source_suffix(env_var: str) -> str:
     source = get_secret_source(env_var)
     if not source:
         return ""
-    if source == "bitwarden":
-        return " (from Bitwarden)"
     # Ask the registry for the source's human label (e.g. "1Password").
     # Fall back to the raw source name for labels the registry doesn't
     # know (stale provenance from an uninstalled plugin, tests).
@@ -363,9 +362,9 @@ def _apply_external_secret_sources(home_path: Path) -> None:
         # a manually edited .env (see #6843).
         _sanitize_loaded_credentials()
         # Remember where each var came from so setup / `hermes model`
-        # flows can label detected credentials with "(from Bitwarden)" /
-        # "(from 1Password)" — otherwise users see "credentials ✓" with
-        # no hint the value came from a vault rather than .env.
+        # flows can label detected credentials with "(from 1Password)" —
+        # otherwise users see "credentials ✓" with no hint the value came
+        # from a vault rather than .env.
         for name, applied in report.provenance.items():
             _SECRET_SOURCES[name] = applied.source
 

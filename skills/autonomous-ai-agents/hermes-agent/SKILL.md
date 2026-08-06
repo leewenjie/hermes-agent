@@ -247,7 +247,7 @@ hermes portal               Quick setup / sign in via Nous Portal
 hermes kanban <verb>        Multi-agent work-queue board (init/create/list/show/assign/…)
 hermes pairing list/approve/revoke  DM authorization
 hermes plugins list/install/remove  Plugin management
-hermes secrets bitwarden …  External secret store (Bitwarden Secrets Manager)
+hermes secrets onepassword …  External secret store (1Password op:// references)
 hermes memory setup/status/off  Memory provider config
 hermes send                 Send a one-off message through a gateway platform
 hermes completion bash|zsh  Shell completions

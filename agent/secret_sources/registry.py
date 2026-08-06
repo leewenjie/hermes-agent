@@ -20,8 +20,8 @@ Plugins register additional sources via
 ``PluginContext.register_secret_source()`` which lands in
 :func:`register_source`.  In-tree sources are registered lazily by
 :func:`_ensure_builtin_sources` — the set of bundled sources is
-deliberately closed (Bitwarden, and 1Password once it lands); new
-third-party backends ship as standalone plugin repos implementing
+closed (1Password); new third-party backends ship as standalone
+plugin repos implementing
 :class:`agent.secret_sources.base.SecretSource`.
 """
 
@@ -160,13 +160,6 @@ def _ensure_builtin_sources() -> None:
     if _BUILTINS_LOADED:
         return
     _BUILTINS_LOADED = True
-    try:
-        from agent.secret_sources.bitwarden import BitwardenSource
-
-        register_source(BitwardenSource())
-    except Exception:  # noqa: BLE001 — never block startup
-        logger.warning("Failed to register bundled Bitwarden secret source",
-                       exc_info=True)
     try:
         from agent.secret_sources.onepassword import OnePasswordSource
 

@@ -1,6 +1,6 @@
 """Shared substrate for external secret-source backends.
 
-Every backend (Bitwarden, 1Password, …) needs the same handful of
+Every backend needs the same handful of
 security-sensitive primitives:
 
   * a uniform result object (:class:`FetchResult`),
@@ -8,7 +8,7 @@ security-sensitive primitives:
   * a two-layer fetch cache whose disk half writes atomically with ``0600``
     permissions and honours a TTL (:class:`DiskCache`, :class:`CachedFetch`).
 
-These used to live inline inside ``bitwarden.py``.  Pulling them here means
+These used to live inline inside the original backend module.  Pulling them here means
 the atomic-write / ``0600`` / TTL logic is audited and fixed in exactly one
 place instead of drifting across copy-pasted per-backend modules — each
 backend supplies only its own cache-key shape and a serializer for it.

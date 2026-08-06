@@ -289,7 +289,7 @@ class TestExitCodes:
             self._build_args(skip_venv=False, json=True, fail_on="critical")
         )
         payload = capsys.readouterr().out
-        # The bitwarden banner can leak above the json; pick the first { line.
+        # Any startup banner can leak above the json; pick the first { line.
         lines = payload.splitlines()
         json_start = next(i for i, l in enumerate(lines) if l.startswith("{"))
         data = json.loads("\n".join(lines[json_start:]))

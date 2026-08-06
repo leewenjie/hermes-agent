@@ -15,9 +15,6 @@ security-sensitive bits live in exactly one place.
 
 Currently bundled:
 
-  - ``bitwarden`` — Bitwarden Secrets Manager (`bws` CLI).  See
-    ``agent.secret_sources.bitwarden`` for the integration and
-    ``hermes_cli.secrets_cli`` for the user-facing setup wizard.
   - ``onepassword`` — 1Password ``op://`` secret references (`op` CLI).
     See ``agent.secret_sources.onepassword`` for the integration and
     ``hermes_cli.onepassword_secrets_cli`` for the user-facing commands.

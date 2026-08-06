@@ -2821,11 +2821,11 @@ def run_job(
         # load_hermes_dotenv (not a bare load_dotenv) and reset the secret-
         # source cache first: startup already applied external secrets and
         # recorded this HERMES_HOME in _APPLIED_HOMES, so a naive reload would
-        # re-apply only the .env placeholder and never re-resolve a Bitwarden/
-        # BSM-backed secret — leaving cron jobs 401'ing on the placeholder
+        # re-apply only the .env placeholder and never re-resolve a
+        # vault-backed secret — leaving cron jobs 401'ing on the placeholder
         # (#33465). Clearing the cache forces the re-pull; the resolved secret
-        # overrides the placeholder only when secrets.bitwarden.override_existing
-        # is set (mirrors startup), and the Bitwarden value-cache keeps the
+        # overrides the placeholder only when the source's override_existing
+        # is set (mirrors startup), and the source value-cache keeps the
         # forced re-pull off the network. load_hermes_dotenv also handles the
         # utf-8/latin-1 encoding fallback internally.
         from hermes_cli.env_loader import (

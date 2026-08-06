@@ -1,5 +1,14 @@
 {
   // This file is not used in compilation. It is here just for a nice editor experience.
   "extends": "@docusaurus/tsconfig",
+  "compilerOptions": {
+    // @docusaurus/tsconfig sets `baseUrl: "."` relative to ITS directory, so
+    // `@site/*` aliases resolve to node_modules. Override to the project root.
+    "baseUrl": ".",
+    // `baseUrl` is deprecated in TS 6.0+; keep it until Docusaurus drops it.
+    "ignoreDeprecations": "6.0",
+    // Allow JSON imports like '@site/src/data/userStories.json'.
+    "resolveJsonModule": true
+  },
   "exclude": [".docusaurus", "build"]
 }

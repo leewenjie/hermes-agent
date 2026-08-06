@@ -3186,43 +3186,12 @@ DEFAULT_CONFIG = {
         # Optional explicit ordering of enabled secret sources.  When
         # omitted, sources run in registration order (bundled first,
         # then plugin-registered).  Regardless of this list, "mapped"
-        # sources (explicit VAR→ref bindings, e.g. a future 1Password
-        # env: map) always take precedence over "bulk" sources
-        # (project dumps like Bitwarden BSM), and the first source to
-        # claim a var wins — later claims are skipped with a warning.
-        # Example: sources: [onepassword, bitwarden]
+        # sources (explicit VAR→ref bindings, e.g. a 1Password env:
+        # map) always take precedence over "bulk" sources, and the
+        # first source to claim a var wins — later claims are skipped
+        # with a warning.
+        # Example: sources: [onepassword]
         # "sources": [],
-        "bitwarden": {
-            # Master switch.  When false, BSM is never contacted and the
-            # bws binary is never auto-installed — same as not having
-            # this section at all.
-            "enabled": False,
-            # Name of the env var that holds the Bitwarden machine-account
-            # access token.  This is the one bootstrap secret; it lives
-            # in ~/.hermes/.env (or your shell) and never in config.yaml.
-            "access_token_env": "BWS_ACCESS_TOKEN",
-            # UUID of the BSM project to sync from.
-            "project_id": "",
-            # Seconds to cache fetched secrets in-process.  0 disables.
-            "cache_ttl_seconds": 300,
-            # When True, BSM values overwrite existing env vars.  Default
-            # True because the point of using BSM is centralized rotation —
-            # if .env had the final say, rotating in Bitwarden wouldn't
-            # take effect until you also cleared the matching .env line.
-            "override_existing": True,
-            # When True, the bws binary is auto-downloaded into
-            # ~/.hermes/bin/ on first use.  When False you must install
-            # bws yourself and have it on PATH.
-            "auto_install": True,
-            # Bitwarden region / self-hosted endpoint.  Empty string
-            # means use the bws CLI default (US Cloud,
-            # https://vault.bitwarden.com).  Set to
-            # https://vault.bitwarden.eu for EU Cloud, or your own URL
-            # for self-hosted Bitwarden.  Plumbed into the bws subprocess
-            # as BWS_SERVER_URL.  Prompted for during
-            # `hermes secrets bitwarden setup`.
-            "server_url": "",
-        },
         "onepassword": {
             # Master switch.  When false, the op CLI is never invoked —
             # same as not having this section at all.

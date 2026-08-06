@@ -1717,7 +1717,6 @@ _SENSITIVE_MANAGED_FILE_BASENAMES = frozenset({
     "google_oauth_pending.json",
     "google_oauth.json",
     "webhook_subscriptions.json",
-    "bws_cache.json",
     # git's credential-store helper cache (agent.file_safety blocks this too).
     ".git-credentials",
 })
@@ -9046,8 +9045,8 @@ def _anthropic_oauth_status() -> Dict[str, Any]:
        this entry's Connect button writes)
     2. ``ANTHROPIC_API_KEY`` → ``ANTHROPIC_TOKEN`` → ``CLAUDE_CODE_OAUTH_TOKEN``
        env vars (registry order) — from ``.env``, the shell, or an external
-       secret source like Bitwarden (whose keys are injected into the process
-       env during ``load_hermes_dotenv()``, so the same check covers them)
+       secret source (whose keys are injected into the process env during
+       ``load_hermes_dotenv()``, so the same check covers them)
 
     Claude Code's ``~/.claude/.credentials.json`` is deliberately NOT read
     here — it has its own dedicated catalog entry (``claude-code`` →
@@ -9080,7 +9079,7 @@ def _anthropic_oauth_status() -> Dict[str, Any]:
         }
 
     # Env-var / secret-source path. ``get_env_value`` checks the process
-    # environment first (where Bitwarden-sourced secrets land) then .env.
+    # environment first (where external-source secrets land) then .env.
     env_var_order: tuple = ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
     try:
         from hermes_cli.auth import PROVIDER_REGISTRY

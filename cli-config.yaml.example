@@ -1405,14 +1405,14 @@ updates:
 # =============================================================================
 # Pull provider credentials from external secret managers at process startup
 # instead of storing them in ~/.hermes/.env. Only the manager's bootstrap
-# credential (e.g. BWS_ACCESS_TOKEN / OP_SERVICE_ACCOUNT_TOKEN) lives in .env
+# credential (e.g. OP_SERVICE_ACCOUNT_TOKEN) lives in .env
 # (or your shell / desktop session); everything else rotates centrally.
 # Failures never block startup — Hermes warns once and continues with
 # whatever .env already had.
 #
 # Multiple sources can be enabled at once:
 #   - "mapped" sources (explicit VAR -> ref bindings, e.g. 1Password's env:
-#     map) beat "bulk" sources (whole-project dumps like Bitwarden BSM)
+#     map) beat "bulk" sources (whole-project dumps)
 #   - within a shape, the first source to claim a var wins; later claims
 #     are skipped with a startup warning (never a silent clobber)
 #   - a source's override_existing lets it beat .env/shell values, but
@@ -1421,17 +1421,7 @@ updates:
 #
 # secrets:
 #   # Optional explicit ordering of enabled sources.
-#   # sources: [onepassword, bitwarden]
-#
-#   # ---- Bitwarden Secrets Manager (bws CLI) --------------------------------
-#   bitwarden:
-#     enabled: false
-#     access_token_env: BWS_ACCESS_TOKEN   # bootstrap token, sourced from .env
-#     project_id: ""                       # UUID of the BSM project to sync
-#     server_url: ""                       # "" = US Cloud; EU/self-hosted URL otherwise
-#     cache_ttl_seconds: 300               # 0 disables caching
-#     override_existing: true              # BSM values win over existing env
-#     auto_install: true                   # lazy-download bws into ~/.hermes/bin
+#   # sources: [onepassword]
 #
 #   # ---- 1Password (op CLI) -------------------------------------------------
 #   onepassword:

@@ -6,7 +6,7 @@ description: "How to build a secret-manager backend plugin for Hermes Agent"
 
 # Building a Secret Source Plugin
 
-Secret sources resolve provider credentials from an external secret manager (a vault, a password manager, an OS keystore, a custom script) into environment variables at process startup — after `~/.hermes/.env` loads, before Hermes reads credentials. Bitwarden and 1Password ship in-tree; **every other backend is a plugin**. This guide covers building one.
+Secret sources resolve provider credentials from an external secret manager (a vault, a password manager, an OS keystore, a custom script) into environment variables at process startup — after `~/.hermes/.env` loads, before Hermes reads credentials. 1Password ships in-tree; **every other backend is a plugin**. This guide covers building one.
 
 :::tip
 The bundled set is deliberately closed, same policy as [memory providers](/developer-guide/memory-provider-plugin): PRs adding new vault backends under `agent/secret_sources/` are closed with a pointer to this guide. Publish your backend as a standalone plugin repo and share it in the Nous Research Discord (`#plugins-skills-and-skins`).
@@ -99,7 +99,7 @@ class MyVaultSource(SecretSource):
 ### Choosing your `shape`
 
 - `mapped` — the user explicitly binds env-var names to references in config (like 1Password's `env:` map). Strongest intent: mapped claims beat bulk claims on contested vars.
-- `bulk` — you inject a whole project/folder of secrets implicitly (like Bitwarden BSM). Yields to mapped sources.
+- `bulk` — you inject a whole project/folder of secrets implicitly. Yields to mapped sources.
 
 ### Optional hooks
 
@@ -133,7 +133,7 @@ Plugin discovery runs later in startup than the first `load_hermes_dotenv()` cal
 
 ```yaml
 secrets:
-  sources: [myvault, bitwarden]   # optional ordering
+  sources: [myvault, onepassword]   # optional ordering
   myvault:
     enabled: true
     # ... your config_schema keys

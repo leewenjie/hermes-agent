@@ -896,14 +896,14 @@ def test_credential_pool_never_selects_empty_borrowed_entry():
     assert pool.acquire_lease() is None
 
 
-def test_load_pool_persists_bitwarden_origin_metadata_without_secret(tmp_path, monkeypatch):
-    """Bitwarden-injected env vars retain source metadata but not raw values."""
-    sentinel = "S3NTINEL_DO_NOT_PERSIST_BITWARDEN"
+def test_load_pool_persists_onepassword_origin_metadata_without_secret(tmp_path, monkeypatch):
+    """Vault-injected env vars retain source metadata but not raw values."""
+    sentinel = "S3NTINEL_DO_NOT_PERSIST_ONEPASSWORD"
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     monkeypatch.setenv("OPENROUTER_API_KEY", sentinel)
     monkeypatch.setattr(
         "hermes_cli.env_loader.get_secret_source",
-        lambda env_var: "bitwarden" if env_var == "OPENROUTER_API_KEY" else None,
+        lambda env_var: "onepassword" if env_var == "OPENROUTER_API_KEY" else None,
     )
     _write_auth_store(tmp_path, {"version": 1, "providers": {}})
 
@@ -920,7 +920,7 @@ def test_load_pool_persists_bitwarden_origin_metadata_without_secret(tmp_path, m
     assert sentinel not in auth_text
     persisted = json.loads(auth_text)["credential_pool"]["openrouter"][0]
     assert persisted["source"] == "env:OPENROUTER_API_KEY"
-    assert persisted["secret_source"] == "bitwarden"
+    assert persisted["secret_source"] == "onepassword"
     assert "access_token" not in persisted
 
 

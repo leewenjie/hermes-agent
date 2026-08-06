@@ -19,7 +19,7 @@ Design summary
 
 * After ``.env`` loads, each reference is resolved with a single
   ``op read -- <reference>`` call and injected into ``os.environ`` (the
-  same point in startup as the Bitwarden source).
+  same point in startup as every external source).
 * Authentication is whatever the user's ``op`` CLI already uses — a
   service-account token (``OP_SERVICE_ACCOUNT_TOKEN``) for headless boxes,
   or a desktop/interactive session (``OP_SESSION_*``).  Hermes never
@@ -493,8 +493,7 @@ class OnePasswordSource(SecretSource):
 
     1Password is a **mapped** source: the user explicitly binds each env
     var to an ``op://`` reference under ``secrets.onepassword.env``, so
-    its claims outrank bulk sources (e.g. a Bitwarden project dump) on
-    contested vars.
+    its claims outrank bulk sources on contested vars.
     """
 
     name = "onepassword"
@@ -506,7 +505,7 @@ class OnePasswordSource(SecretSource):
         # Default True: an explicit VAR→op:// binding is the strongest
         # user intent there is — leaving a stale .env line in place
         # should not silently defeat it (same rotation rationale as
-        # Bitwarden).
+        # every mapped source).
         return bool(isinstance(cfg, dict) and cfg.get("override_existing", True))
 
     def protected_env_vars(self, cfg: dict):

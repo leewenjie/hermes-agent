@@ -1694,7 +1694,7 @@ class TestRunJobSessionPersistence:
 
     def test_run_job_resets_secret_source_cache_before_reload(self, tmp_path, monkeypatch):
         """Each run must clear the secret-source cache before re-reading the
-        env, so a long-running gateway re-resolves Bitwarden/BSM-backed secrets
+        env, so a long-running gateway re-resolves vault-backed secrets
         instead of leaving the startup .env placeholder in place (#33465).
 
         A bare ``load_dotenv`` re-load can't do this: startup already recorded

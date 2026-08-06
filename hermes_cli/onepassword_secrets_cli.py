@@ -8,9 +8,9 @@ Subcommands:
     sync     — resolve references now and show what would be applied (dry-run)
     disable  — flip ``secrets.onepassword.enabled`` to False
 
-Unlike Bitwarden, the ``op`` binary is NOT auto-installed: 1Password publishes
-the CLI through OS package managers and signed installers, so Hermes expects
-an already-installed, already-authenticated ``op`` and never downloads one.
+The ``op`` binary is NOT auto-installed: 1Password publishes the CLI through
+OS package managers and signed installers, so Hermes expects an
+already-installed, already-authenticated ``op`` and never downloads one.
 """
 
 from __future__ import annotations
