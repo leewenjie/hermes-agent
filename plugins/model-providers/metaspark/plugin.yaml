@@ -1,0 +1,5 @@
+name: metaspark
+version: 1.0.0
+kind: model-provider
+description: "Muse Spark 1.x (Meta) — OpenAI-compatible API"
+author: Oxaide
