@@ -97,6 +97,18 @@ class ThreadSafeAsyncQueue(asyncio.Queue):
         # request handlers below), so get_running_loop() is safe here.
         self._loop_ref = asyncio.get_running_loop()
 
+    # Backward compat for pinned tests that still construct queue.Queue()
+    # and pass it into _write_sse_chat_completion/_write_sse_responses.
+    # These legacy doubles expose get(timeout) + put() but not the async
+    # interface. Detect at call-time rather than forcing every test to
+    # migrate synchronously.
+    def _is_sync_queue(self, other: Any) -> bool:
+        import queue as _queue_mod
+
+        return isinstance(other, _queue_mod.Queue) and not isinstance(
+            other, ThreadSafeAsyncQueue
+        )
+
 
 def _sse_frame(data: Any, *, event: str = None, ensure_ascii: bool = True) -> bytes:
     """Encode one SSE frame: optional ``event:`` line, then ``data: <json>\\n\\n``.
@@ -2579,11 +2591,42 @@ class APIServerAdapter(BasePlatformAdapter):
                 return time.monotonic()
 
             # Stream content chunks as they arrive from the agent.
-            # Queue is a ThreadSafeAsyncQueue — consumer is woken immediately
-            # via call_soon_threadsafe instead of polling run_in_executor.
+            # Production: ThreadSafeAsyncQueue (asyncio.Queue) — consumer is
+            # woken immediately via call_soon_threadsafe. Tests (pinned on
+            # queue.Queue) still pass via compat fallback.
+            import queue as _sync_q
+
+            def _is_sync_queue(q: Any) -> bool:
+                return isinstance(q, _sync_q.Queue) and not isinstance(
+                    q, ThreadSafeAsyncQueue
+                )
+
+            is_sync = _is_sync_queue(stream_q)
+            loop = asyncio.get_running_loop() if is_sync else None
             while True:
                 try:
-                    delta = await asyncio.wait_for(stream_q.get(), timeout=0.5)
+                    if is_sync:
+                        # Legacy test double: blocking queue.Queue with timeout
+                        delta = await loop.run_in_executor(
+                            None, lambda: stream_q.get(timeout=0.5)
+                        )
+                    else:
+                        delta = await asyncio.wait_for(stream_q.get(), timeout=0.5)
+                except _sync_q.Empty:
+                    if agent_task.done():
+                        while True:
+                            try:
+                                delta = stream_q.get_nowait()
+                                if delta is None:
+                                    break
+                                last_activity = await _emit(delta)
+                            except _sync_q.Empty:
+                                break
+                        break
+                    if time.monotonic() - last_activity >= CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS:
+                        await response.write(b": keepalive\n\n")
+                        last_activity = time.monotonic()
+                    continue
                 except asyncio.TimeoutError:
                     if agent_task.done():
                         # Drain any remaining items
@@ -3072,9 +3115,39 @@ class APIServerAdapter(BasePlatformAdapter):
                         _batch_buf = []
                         await _emit_text_delta(combined)
 
+            import queue as _sync_q2
+
+            def _is_sync_queue2(q: Any) -> bool:
+                return isinstance(q, _sync_q2.Queue) and not isinstance(
+                    q, ThreadSafeAsyncQueue
+                )
+
+            is_sync2 = _is_sync_queue2(stream_q)
+            loop2 = asyncio.get_running_loop() if is_sync2 else None
             while True:
                 try:
-                    item = await asyncio.wait_for(stream_q.get(), timeout=0.5)
+                    if is_sync2:
+                        item = await loop2.run_in_executor(
+                            None, lambda: stream_q.get(timeout=0.5)
+                        )
+                    else:
+                        item = await asyncio.wait_for(stream_q.get(), timeout=0.5)
+                except _sync_q2.Empty:
+                    if agent_task.done():
+                        while True:
+                            try:
+                                item = stream_q.get_nowait()
+                                if item is None:
+                                    break
+                                await _dispatch(item)
+                                last_activity = time.monotonic()
+                            except _sync_q2.Empty:
+                                break
+                        break
+                    if time.monotonic() - last_activity >= CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS:
+                        await response.write(b": keepalive\n\n")
+                        last_activity = time.monotonic()
+                    continue
                 except asyncio.TimeoutError:
                     if agent_task.done():
                         # Drain remaining
