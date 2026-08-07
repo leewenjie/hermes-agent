@@ -1453,7 +1453,7 @@ def test_run_conversation_codex_tool_round_trip(monkeypatch):
     responses = [_codex_tool_call_response(), _codex_message_response("done")]
     monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: responses.pop(0))
 
-    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id, *_args):
+    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id, *_args, execution_capability=None):
         for call in assistant_message.tool_calls:
             messages.append(
                 {
@@ -1644,7 +1644,7 @@ def test_run_conversation_codex_replay_payload_keeps_call_id(monkeypatch):
 
     monkeypatch.setattr(agent, "_interruptible_api_call", _fake_api_call)
 
-    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id, *_args):
+    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id, *_args, execution_capability=None):
         for call in assistant_message.tool_calls:
             messages.append(
                 {
@@ -1684,7 +1684,7 @@ def test_run_conversation_codex_continues_after_incomplete_interim_message(monke
         lambda api_kwargs: requests.append(api_kwargs) or responses.pop(0),
     )
 
-    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id, *_args):
+    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id, *_args, execution_capability=None):
         for call in assistant_message.tool_calls:
             messages.append(
                 {
@@ -1799,7 +1799,7 @@ def test_run_conversation_compresses_mid_turn_before_output_budget_exhaustion(mo
         lambda api_kwargs: requests.append(api_kwargs) or responses.pop(0),
     )
 
-    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count=0):
+    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count=0, execution_capability=None):
         for call in assistant_message.tool_calls:
             messages.append(
                 {
@@ -1865,7 +1865,7 @@ def test_mid_turn_compaction_does_not_double_persist_in_place_rows(monkeypatch, 
         agent, "_interruptible_api_call", lambda api_kwargs: responses.pop(0)
     )
 
-    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count=0):
+    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count=0, execution_capability=None):
         for call in assistant_message.tool_calls:
             messages.append(
                 {"role": "tool", "tool_call_id": call.id, "content": "x" * 80_000}
@@ -2333,7 +2333,7 @@ def test_run_conversation_codex_continues_after_commentary_phase_message(monkeyp
     ]
     monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: responses.pop(0))
 
-    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id, *_args):
+    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id, *_args, execution_capability=None):
         for call in assistant_message.tool_calls:
             messages.append(
                 {
@@ -2375,7 +2375,7 @@ def test_run_conversation_codex_continues_after_ack_stop_message(monkeypatch):
     ]
     monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: responses.pop(0))
 
-    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id, *_args):
+    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id, *_args, execution_capability=None):
         for call in assistant_message.tool_calls:
             messages.append(
                 {
@@ -2416,7 +2416,7 @@ def test_run_conversation_codex_continues_after_ack_for_directory_listing_prompt
     ]
     monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: responses.pop(0))
 
-    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id, *_args):
+    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id, *_args, execution_capability=None):
         for call in assistant_message.tool_calls:
             messages.append(
                 {

@@ -116,7 +116,7 @@ def test_run_conversation_flushes_assistant_tool_call_before_execution():
     executed = {"count": 0}
     snapshot_at_execute: list = []
 
-    def _fake_execute(assistant_message, messages, effective_task_id, api_call_count=0):
+    def _fake_execute(assistant_message, messages, effective_task_id, api_call_count=0, execution_capability=None):
         executed["count"] += 1
         # Record the DB state observed at the moment tool execution begins.
         snapshot_at_execute.append(

@@ -928,11 +928,14 @@ def _home_prefix_fold_regex(path: str):
     if not path:
         return None
     components = [c for c in re.split(r"[/\\]+", path) if c]
-    # Require at least two non-empty components below the root. For POSIX this
-    # mirrors the historical ``count("/") >= 2`` guard (``/home/alice`` folds,
-    # ``/home`` does not); for Windows it rejects a bare drive root (``C:\\``)
-    # while accepting a real home (``C:\\Users\\alice``).
-    if len(components) < 2:
+    # Require at least one non-empty component below the root. This rejects a
+    # stray HOME / HERMES_HOME of ``/``, ``C:\\``, or ``""`` (which would fold
+    # every absolute path and rewrite unrelated prefixes) while still folding
+    # single-component POSIX homes such as the root user's ``/root`` — without
+    # it, ``tee /root/.bashrc`` or ``cat key >> /root/.ssh/authorized_keys``
+    # would slip past the same ``~/.bashrc`` / ``~/.ssh`` gates that the
+    # multi-component form (``/home/alice/...``) is caught by.
+    if len(components) < 1:
         return None
     body = r"[/\\]+".join(re.escape(c) for c in components)
     # Optional leading root separator (POSIX ``/`` or UNC ``\\``); a Windows

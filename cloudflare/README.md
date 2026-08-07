@@ -45,8 +45,15 @@ cd cloudflare && ./deploy.sh secrets
 # 2. Deploy edge connector
 ./deploy.sh connector
 
-# 3. Build & deploy agent runtime
+# 3. Build agent runtime image
 ./deploy.sh runtime
+
+The `runtime` target builds the container image locally; pushing it to
+Cloudflare Containers and deploying the container application is done from
+the Cloudflare dashboard (or the Oxaide release tool at
+`oxaide/tools/build/deploy-cloudflare-hermes-runtime.mjs`), since the image
+must be uploaded to `registry.cloudflare.com` before a container app can use
+it.
 
 # 4. Point webhooks at your Worker URL
 # Telegram: https://your-worker.workers.dev/webhook/telegram/<token>
